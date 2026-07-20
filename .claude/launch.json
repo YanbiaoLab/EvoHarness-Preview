@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "evoweb",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "evoharness.evoweb", "results", "--port", "7861"],
+      "port": 7861
+    }
+  ]
+}

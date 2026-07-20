@@ -1,0 +1,10 @@
+# modmul 本地快速轮(MPS 笔记本档):首次真实进化 run 的配置。
+# GPU 机放量时:num_generations 提到 30+、去掉 MODMUL_QUICK、eval_batch_size 按显存调。
+search:
+  num_generations: 5
+  eval_batch_size: 2
+  llm_models: ["qwen3-coder-plus"]
+  llm_max_tokens: 8192
+  seed: 7
+population:
+  num_islands: 1

@@ -1,0 +1,51 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: LIVE demo (real LLM, 3 gens)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "experiments.run_evolution",
+      "args": [
+        "--recipe", "e3r",
+        "--task", "demo_counter",
+        "--live",
+        "--run-dir", "results/debug_live",
+        "--set",
+        "search.llm_models=[\"qwen3-coder-plus\"]",
+        "search.num_generations=3",
+        "search.seed=1"
+      ],
+      "envFile": "${workspaceFolder}/.env",
+      "preLaunchTask": "clean-debug-live-run",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug: offline demo (fake LLM, 5 gens)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "experiments.run_evolution",
+      "args": [
+        "--recipe", "e3r",
+        "--task", "demo_counter",
+        "--run-dir", "results/debug_demo",
+        "--set", "search.num_generations=5", "search.seed=1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug: current test file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-s"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

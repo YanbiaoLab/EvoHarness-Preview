@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evoharness"
+version = "0.1.0"
+description = "Self-hosted evolutionary harness engine (evocore) with guardrails (evoguard), research extensions (evoplus) and the eval-side SDK (evoserve)"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "litellm>=1.92.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["evoharness*", "modmul*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

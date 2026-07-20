@@ -1,0 +1,13 @@
+EvoHarness
+Copyright 2026 EvoHarness contributors
+
+Portions of the evocore package are derived from SakanaAI/ShinkaEvolve
+(https://github.com/SakanaAI/ShinkaEvolve), licensed under the Apache
+License, Version 2.0. The referenced upstream revision is commit
+7939f6b44046a2b92e4baa6687b52b23e6236898. Per-file provenance is noted in
+source file headers.
+
+The staged (early-exit) evaluation design in evoguard/tasks is conceptually
+informed by the cascade evaluation feature of codelion/openevolve
+(https://github.com/codelion/openevolve), Apache License 2.0; it is an
+independent implementation.

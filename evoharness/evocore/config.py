@@ -1,0 +1,149 @@
+# Portions derived from SakanaAI/ShinkaEvolve (Apache-2.0)
+# Upstream: shinka/database/dbase.py (DatabaseConfig), shinka/core/config.py
+#           (EvolutionConfig), shinka/defaults.py
+# Upstream revision: 7939f6b44046a2b92e4baa6687b52b23e6236898
+# Defaults are aligned with upstream for parity (see docs/naming_map.md for
+# the naming correspondence). Intentional deviations are noted inline.
+"""Configuration dataclasses for the evocore engine."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ProposalConfig:
+    """Orthogonal proposal-generation arm and its per-proposal limits."""
+
+    mode: str = "single_shot"
+    model: str | None = None
+    max_turns: int = 12
+    max_tool_calls: int = 40
+    timeout_s: float = 300.0
+    max_cost_usd: float | None = None
+    max_repair_rounds: int = 3
+    max_input_tokens: int = 32_768
+    max_parallel_tools: int = 4
+    recent_tool_results_to_keep: int = 8
+    hybrid_agent_probability: float = 0.1
+    hybrid_stagnation_generations: int = 5
+
+    def __post_init__(self) -> None:
+        if self.mode not in {
+            "single_shot",
+            "conversational",
+            "agentic",
+            "hybrid",
+        }:
+            raise ValueError(
+                "proposal mode must be single_shot, conversational, agentic, "
+                "or hybrid"
+            )
+        if self.model is not None and (
+            not isinstance(self.model, str) or not self.model.strip()
+        ):
+            raise ValueError("proposal model must be non-empty when present")
+        for name, minimum in (
+            ("max_turns", 1),
+            ("max_tool_calls", 0),
+            ("max_repair_rounds", 0),
+            ("max_input_tokens", 1),
+            ("max_parallel_tools", 1),
+            ("recent_tool_results_to_keep", 0),
+            ("hybrid_stagnation_generations", 1),
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(f"{name} must be at least {minimum}")
+        if (
+            isinstance(self.timeout_s, bool)
+            or not isinstance(self.timeout_s, (int, float))
+            or not math.isfinite(self.timeout_s)
+            or self.timeout_s <= 0
+        ):
+            raise ValueError("proposal timeout_s must be positive and finite")
+        if self.max_cost_usd is not None and (
+            isinstance(self.max_cost_usd, bool)
+            or not isinstance(self.max_cost_usd, (int, float))
+            or not math.isfinite(self.max_cost_usd)
+            or self.max_cost_usd < 0
+        ):
+            raise ValueError(
+                "proposal max_cost_usd must be nonnegative and finite"
+            )
+        if (
+            isinstance(self.hybrid_agent_probability, bool)
+            or not isinstance(
+                self.hybrid_agent_probability,
+                (int, float),
+            )
+            or not math.isfinite(self.hybrid_agent_probability)
+            or not 0 <= self.hybrid_agent_probability <= 1
+        ):
+            raise ValueError(
+                "hybrid_agent_probability must be between 0 and 1"
+            )
+
+
+@dataclass
+class PopulationConfig:
+    """Population store, islands, migration and parent selection.
+
+    Field defaults mirror upstream DatabaseConfig so that parity runs need no
+    overrides. Note migration is OFF by default upstream (migration_rate=0.0).
+    """
+
+    num_islands: int = 2
+    archive_size: int = 40
+    elite_selection_ratio: float = 0.3
+    num_archive_inspirations: int = 1
+    num_top_k_inspirations: int = 1
+    migration_interval: int = 10
+    migration_rate: float = 0.0
+    island_elitism: bool = True
+    enforce_island_separation: bool = True
+    parent_strategy: str = "weighted"  # weighted|power_law|beam|seed_only|latest
+    weighted_lambda: float = 10.0
+    power_alpha: float = 1.0
+    beam_width: int = 5
+    archive_update_strategy: str = "fitness"  # crowding intentionally not ported
+
+
+@dataclass
+class SearchConfig:
+    """Main loop configuration (subset of upstream EvolutionConfig)."""
+
+    num_generations: int = 150
+    task_sys_msg: str = ""
+    language: str = "python"
+    llm_models: list[str] = field(default_factory=lambda: ["gpt-5.1"])
+    llm_temperature: float = 0.75
+    llm_max_tokens: int = 4096
+    operators: list[str] = field(
+        default_factory=lambda: ["revise", "rewrite", "recombine"]
+    )
+    operator_probs: list[float] = field(default_factory=lambda: [0.6, 0.3, 0.1])
+    max_op_resamples: int = 3
+    max_novelty_attempts: int = 3
+    similarity_threshold: float = 0.99
+    novelty_llm_judge: bool = False  # deviation: simplified, off by default
+    repair_enabled: bool = True
+    # Throttle for the repair-first policy: with a failed candidate pending,
+    # repair is chosen with this probability, else a normal proposal proceeds.
+    # 1.0 = upstream-parity always-repair. Guards against "repair storms"
+    # (gpu_run1: 36/60 proposals were repairs, crowding out exploration).
+    repair_probability: float = 1.0
+    seed: int = 0
+    # Circuit breaker for remote evaluation (no upstream counterpart):
+    # proposals are paid for BEFORE grading, so a dead eval service would
+    # otherwise burn the whole LLM budget on candidates that get dropped.
+    max_consecutive_infra_failures: int = 5
+    # Batched dispatch (WS-2, no upstream counterpart): candidates proposed
+    # per generation and graded CONCURRENTLY — required when one evaluation
+    # is minute-scale (remote GPU training). 1 = upstream-parity serial loop.
+    eval_batch_size: int = 1
