@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from ..llm import LLMToolCall, LLMToolDefinition, LLMToolResult
-from .tools import (
+from ...llm import LLMToolCall, LLMToolDefinition, LLMToolResult
+from .base import (
     AgentToolContext,
     AgentToolError,
     make_tool_result,

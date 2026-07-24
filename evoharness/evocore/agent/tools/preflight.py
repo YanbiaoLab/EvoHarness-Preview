@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from ..llm import LLMToolCall, LLMToolDefinition, LLMToolResult
-from .feedback import preflight_issue_to_payload
-from .tools import (
+from ...llm import LLMToolCall, LLMToolDefinition, LLMToolResult
+from .base import (
     AgentToolContext,
     AgentToolError,
     make_tool_result,
@@ -51,6 +50,11 @@ class RunPreflightTool:
                 "invalid-arguments",
                 "run_preflight does not accept arguments",
             )
+
+        # Deferred: agent.feedback imports this package for its text
+        # helpers, so a module-level import here would close an import
+        # cycle (feedback -> tools -> preflight -> feedback).
+        from ..feedback import preflight_issue_to_payload
 
         outcome = ctx.preflight.check(ctx.preflight_context)
         issues = [

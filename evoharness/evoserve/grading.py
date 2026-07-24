@@ -32,6 +32,7 @@ class Grade:
     hidden_metrics: dict = field(default_factory=dict)
     notes: str = ""
     structured_feedback: dict | None = None   # None = 任务没提供(协议红线探测依据)
+    artifacts_ref: str | None = None          # 指向 ArtifactStore 里的冷 trace(层②)
     stdout_log: str = ""
     stderr_log: str = ""
     stage_reached: int = 3
@@ -75,6 +76,7 @@ def coerce_grade(raw: GradeValue) -> dict:
         "hidden_metrics": dict(grade.hidden_metrics),
         "notes": grade.notes,
         "structured_feedback": grade.structured_feedback,
+        "artifacts_ref": grade.artifacts_ref,
         "stdout_log": grade.stdout_log,
         "stderr_log": grade.stderr_log,
         "stage_reached": int(grade.stage_reached),

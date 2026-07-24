@@ -173,3 +173,16 @@ def test_git_workspace_kind_roundtrip(tmp_path):
     assert got.workspace_kind == "git"
     assert isinstance(got.workspace, GitWorkspace)
     assert got.workspace.main_text() == "x = 1\n"
+
+
+def test_eval_report_artifacts_ref_roundtrip_and_backcompat():
+    # New field survives a to_json/from_json round trip.
+    report = EvalReport(fitness=0.5, passed=True, artifacts_ref="cand-123")
+    assert EvalReport.from_json(report.to_json()).artifacts_ref == "cand-123"
+
+    # Defaults to None when absent.
+    assert EvalReport(fitness=0.5, passed=True).artifacts_ref is None
+
+    # Legacy rows written before the field existed still load (defaults None).
+    legacy = {"fitness": 1.0, "passed": True}
+    assert EvalReport.from_json(legacy).artifacts_ref is None

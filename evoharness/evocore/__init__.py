@@ -45,6 +45,8 @@ from .interfaces import (
     MutationContext,
     NullBudget,
     PromptContributor,
+    RejectionEvent,
+    RejectionObserver,
     SamplingWeightPolicy,
 )
 from .llm import (
@@ -169,6 +171,8 @@ __all__ = [
     "ProposalLane",
     "ProposeResult",
     "Proposer",
+    "RejectionEvent",
+    "RejectionObserver",
     "SingleShotProposer",
     "RunReport",
     "SamplingWeightPolicy",

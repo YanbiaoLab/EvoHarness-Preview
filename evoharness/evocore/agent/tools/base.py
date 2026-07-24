@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
 
-from ..llm import LLMToolCall, LLMToolDefinition, LLMToolResult
-from ..population import Candidate
-from ..preflight import PreflightContext, ProposalPreflight
+from ...llm import LLMToolCall, LLMToolDefinition, LLMToolResult
+from ...population import Candidate
+from ...preflight import PreflightContext, ProposalPreflight
 
 
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")

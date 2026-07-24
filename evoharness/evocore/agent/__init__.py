@@ -15,8 +15,6 @@ from .contracts import (
     ProposalTraceSummary,
 )
 from .conversation import ConversationalAgentBackend
-from .preflight_tool import RunPreflightTool
-from .run_tool import RunTool, Runner, RunnerResult
 from .session_proposer import AgentSessionProposer
 from .transcript import (
     JsonlEventSink,
@@ -29,20 +27,23 @@ from .tools import (
     AgentToolContext,
     AgentToolError,
     AgentToolRegistry,
-    make_tool_error,
-    make_tool_result,
-    truncate_tool_text,
-)
-from .runtime import NativeToolAgentBackend, TokenEstimator
-from .workspace_tools import (
+    InspectParentEvalTool,
+    RunPreflightTool,
+    RunTool,
+    Runner,
+    RunnerResult,
     WorkspaceDeleteTool,
     WorkspaceEditTool,
     WorkspaceGlobTool,
     WorkspaceGrepTool,
     WorkspaceReadTool,
     WorkspaceWriteTool,
+    make_tool_error,
+    make_tool_result,
     resolve_workspace_path,
+    truncate_tool_text,
 )
+from .runtime import NativeToolAgentBackend, TokenEstimator
 
 
 def make_default_agent_tools(runner: Runner) -> tuple[AgentTool, ...]:
@@ -82,6 +83,7 @@ __all__ = [
     "AgentToolContext",
     "AgentToolError",
     "AgentToolRegistry",
+    "InspectParentEvalTool",
     "RunPreflightTool",
     "RunTool",
     "Runner",

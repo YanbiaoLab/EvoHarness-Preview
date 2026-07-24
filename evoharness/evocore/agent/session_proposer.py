@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
 
+from .runtime import NativeToolAgentBackend
 from ..operators import parse_change_header
 from ..population import Candidate
 from ..preflight import PreflightContext, PreflightIssue, ProposalPreflight
@@ -422,7 +423,7 @@ class AgentSessionProposer(Proposer):
     def __init__(
         self,
         *,
-        backend: AgentBackend,
+        backend: AgentBackend | NativeToolAgentBackend ,
         preflight: ProposalPreflight,
         limits: AgentSessionLimits,
         event_sink_factory: EventSinkFactory,
@@ -471,7 +472,7 @@ class AgentSessionProposer(Proposer):
         parent: Candidate,
         system: str,
         user: str,
-    ) -> ProposeResult:
+    ) -> ProposeResult | None:
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator must be non-empty")
         if not isinstance(system, str) or not system.strip():

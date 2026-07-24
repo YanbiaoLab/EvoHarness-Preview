@@ -1,5 +1,5 @@
-"""IMO Proof benchmark experiments for EvoHarness."""
+"""Independent EvoHarness experiment for evolving an IMO proof agent."""
 
-from .strategy import ProofRun, ProofStrategy
+from .protocol import BenchmarkSpec, load_default_spec
 
-__all__ = ["ProofRun", "ProofStrategy"]
+__all__ = ["BenchmarkSpec", "load_default_spec"]

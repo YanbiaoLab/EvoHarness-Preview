@@ -1,0 +1,138 @@
+{
+  "benchmark_id": "imo-proof-v1",
+  "candidate": {
+    "entrypoint": "solver:solve",
+    "max_file_bytes": 262144,
+    "mutable_files": [
+      "solver.py",
+      "prompts.py",
+      "policy.py"
+    ]
+  },
+  "dataset": {
+    "expected_rows": 60,
+    "id_column": "Problem ID",
+    "path": "experiments/imo_proof/assets/proofbench.csv",
+    "problem_column": "Problem",
+    "sha256": "c03ad2d9788ba147022031d90ecf192d16c038939eb432759914902598a87d6d"
+  },
+  "grader": {
+    "model": {
+      "enable_thinking": false,
+      "input_cost_per_million": null,
+      "max_output_tokens": 65536,
+      "name": "openai/qwen3.7-plus",
+      "output_cost_per_million": null,
+      "temperature": 0.0
+    },
+    "prompt_path": "experiments/imo_proof/assets/grader_prompt.txt",
+    "prompt_sha256": "a8556ad35e5018025c661dc13ae33f858718b81a475f72973cd631cc9e18689e"
+  },
+  "optimizer": {
+    "enable_thinking": false,
+    "input_cost_per_million": null,
+    "max_output_tokens": 65536,
+    "name": "openai/qwen3.7-plus",
+    "output_cost_per_million": null,
+    "temperature": 0.0
+  },
+  "optimizer_budget": {
+    "max_candidates": 15,
+    "max_tool_calls_per_candidate": 40,
+    "max_total_cost_usd": null,
+    "max_turns_per_candidate": 12,
+    "timeout_s_per_candidate": 3000.0
+  },
+  "schema_version": 1,
+  "scoring": {
+    "label_points": {
+      "almost": 6,
+      "correct": 7,
+      "incorrect": 0,
+      "partial": 1
+    }
+  },
+  "solver": {
+    "enable_thinking": false,
+    "input_cost_per_million": null,
+    "max_output_tokens": 65536,
+    "name": "openai/qwen3.5-plus",
+    "output_cost_per_million": null,
+    "temperature": 0.0
+  },
+  "solver_budget": {
+    "max_calls_per_problem": 8,
+    "max_completion_tokens_per_problem": 200000,
+    "max_cost_usd_per_problem": null,
+    "max_prompt_tokens_per_problem": 200000,
+    "timeout_s_per_problem": 3000.0
+  },
+  "splits": {
+    "test": [
+      "PB-Advanced-002",
+      "PB-Advanced-005",
+      "PB-Advanced-007",
+      "PB-Advanced-009",
+      "PB-Advanced-011",
+      "PB-Advanced-012",
+      "PB-Advanced-013",
+      "PB-Advanced-017",
+      "PB-Advanced-019",
+      "PB-Advanced-020",
+      "PB-Advanced-022",
+      "PB-Advanced-023",
+      "PB-Advanced-024",
+      "PB-Advanced-025",
+      "PB-Advanced-026",
+      "PB-Advanced-027",
+      "PB-Advanced-028",
+      "PB-Advanced-029",
+      "PB-Advanced-030",
+      "PB-Basic-004",
+      "PB-Basic-008",
+      "PB-Basic-011",
+      "PB-Basic-012",
+      "PB-Basic-014",
+      "PB-Basic-015",
+      "PB-Basic-016",
+      "PB-Basic-017",
+      "PB-Basic-018",
+      "PB-Basic-019",
+      "PB-Basic-021",
+      "PB-Basic-022",
+      "PB-Basic-024",
+      "PB-Basic-025",
+      "PB-Basic-026",
+      "PB-Basic-029",
+      "PB-Basic-030"
+    ],
+    "train": [
+      "PB-Advanced-006",
+      "PB-Advanced-008",
+      "PB-Advanced-010",
+      "PB-Advanced-015",
+      "PB-Advanced-016",
+      "PB-Advanced-018",
+      "PB-Basic-001",
+      "PB-Basic-002",
+      "PB-Basic-003",
+      "PB-Basic-006",
+      "PB-Basic-009",
+      "PB-Basic-010"
+    ],
+    "validation": [
+      "PB-Advanced-001",
+      "PB-Advanced-003",
+      "PB-Advanced-004",
+      "PB-Advanced-014",
+      "PB-Advanced-021",
+      "PB-Basic-005",
+      "PB-Basic-007",
+      "PB-Basic-013",
+      "PB-Basic-020",
+      "PB-Basic-023",
+      "PB-Basic-027",
+      "PB-Basic-028"
+    ]
+  }
+}

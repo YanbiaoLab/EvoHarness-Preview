@@ -2,7 +2,7 @@
 # components, each experiment group is a thin assembly file. This module is
 # the shared assembly core; recipes stay ~20 lines and their mutual diffs
 # ARE the ablation definitions.
-"""Shared recipe machinery: RecipeContext, TaskBundle, assemble()."""
+"""Shared recipe machinery: RecipeContext, ScorableTask, assemble()."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import dataclasses
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
+from evoharness import ScorableTask
 from evoharness.evocore import (
     AgentSessionLimits,
     AgentSessionProposer,
@@ -44,29 +44,13 @@ from evoharness.evocore.agent import (
 )
 from evoharness.evocore.interfaces import BudgetLike, Grader
 from evoharness.evocore.preflight import PreflightValidator
-from evoharness.evocore.workspace import Workspace
 from evoharness.evoguard import Sandbox
 from evoharness.evoplus.config import PlusConfig
 
 
-@dataclass
-class TaskBundle:
-    """What a task factory returns (see tasks/demo_counter.py). transport is
-    optional: demo/offline tasks may ship a fake LLM transport.
-    research_brief is the tier-1 frozen domain brief (methods-level
-    knowledge, authored offline, part of the task definition)."""
-
-    grader: Grader
-    initial_code: str
-    initial_workspace: Workspace | None = None
-    task_sys_msg: str = ""
-    transport: Callable | None = None
-    research_brief: str = ""
-    # Heterogeneous island seeding: variant i seeds island (i+1). Wide search
-    # spaces get one hand-designed approach family per island.
-    extra_seeds: list = field(default_factory=list)
-    preflight_validators: tuple[PreflightValidator, ...] = ()
-    runner: Runner | None = None
+# Compatibility name for existing task modules.  New tasks should import
+# ScorableTask from evoharness directly.
+TaskBundle = ScorableTask
 
 
 @dataclass
@@ -83,6 +67,7 @@ class RecipeContext:
     preflight_validators: tuple[PreflightValidator, ...] = ()
     runner: Runner | None = None
     token_estimator: TokenEstimator | None = None
+    extra_agent_tools: tuple = ()  # task-injected agent tools (appended to defaults)
     extras: dict = field(default_factory=dict)  # recipes may stash handles here
 
 
@@ -143,7 +128,7 @@ def _build_proposer(
     tools = (
         ()
         if mode == "conversational"
-        else make_default_agent_tools(runner)
+        else (*make_default_agent_tools(runner), *ctx.extra_agent_tools)
     )
     registry = AgentToolRegistry(tools)
     backend = NativeToolAgentBackend(

@@ -14,13 +14,16 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import ClassVar, Collection, Protocol, runtime_checkable
 
 
 MAX_TEXT_FILE_SIZE = 2 * 1024 * 1024
 
 
-def _read_text_tree(root: Path) -> dict[str, str]:
+def _read_text_tree(
+    root: Path,
+    include_files: Collection[str] | None = None,
+) -> dict[str, str]:
     """Read candidate-visible UTF-8 text files from workspace."""
     root = Path(root).resolve()
 
@@ -28,13 +31,27 @@ def _read_text_tree(root: Path) -> dict[str, str]:
         raise WorkspaceError(f"workspace directory does not exist: {root}")
 
     texts: dict[str, str] = {}
+    included = None if include_files is None else set(include_files)
+    if included is not None:
+        for rel in included:
+            path = Path(rel)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or rel != path.as_posix()
+            ):
+                raise WorkspaceError(f"unsafe included path: {rel}")
 
     for path in root.rglob("*"):
         rel = path.relative_to(root)
         if ".." in rel.parts:
             raise WorkspaceError(f"invalid workspace path: {rel}")
 
-        if ".git" in rel.parts:
+        if ".git" in rel.parts or "__pycache__" in rel.parts:
+            continue
+
+        rel_name = rel.as_posix()
+        if included is not None and rel_name not in included:
             continue
 
         if path.is_symlink():
@@ -47,11 +64,19 @@ def _read_text_tree(root: Path) -> dict[str, str]:
             raise WorkspaceError(f"candidate file too large: {rel}")
 
         try:
-            texts[rel.as_posix()] = path.read_text(encoding="utf-8")
+            texts[rel_name] = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise WorkspaceError(f"binary files are not supported: {rel}") from exc
 
+    if included is not None:
+        missing = included - set(texts)
+        if missing:
+            raise WorkspaceError(
+                f"included seed files are missing: {sorted(missing)}"
+            )
+
     return texts
+
 
 class WorkspaceError(RuntimeError):
     """The genome cannot be reconstructed (bad patch, unsafe path, no git)."""
@@ -170,6 +195,24 @@ class GitWorkspace:
     main_file: str = "main.py"
     kind: ClassVar[str] = "git"
     _cache: Path | None = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def from_directory(
+        cls,
+        root: Path,
+        *,
+        main_file: str = "main.py",
+        include_files: Collection[str] | None = None,
+    ) -> "GitWorkspace":
+        """Freeze a text-only directory as the base snapshot of a genome."""
+
+        root = Path(root)
+        files = _read_text_tree(root, include_files)
+        if main_file not in files:
+            raise WorkspaceError(
+                f"main file {main_file!r} missing from seed directory {root}"
+            )
+        return cls(base_files=files, main_file=main_file)
 
     def materialize(self, dest: Path) -> Path:
         dest = Path(dest)

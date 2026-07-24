@@ -40,6 +40,7 @@ class EvalReport:
     hidden_metrics: dict = field(default_factory=dict)
     notes: str = ""
     structured_feedback: dict | None = None
+    artifacts_ref: str | None = None
     stdout_log: str = ""
     stderr_log: str = ""
     stage_reached: int = 3
@@ -56,6 +57,7 @@ class EvalReport:
             "hidden_metrics": self.hidden_metrics,
             "notes": self.notes,
             "structured_feedback": self.structured_feedback,
+            "artifacts_ref": self.artifacts_ref,
             "stdout_log": self.stdout_log,
             "stderr_log": self.stderr_log,
             "stage_reached": self.stage_reached,
@@ -85,6 +87,7 @@ class EvalReport:
             hidden_metrics=d.get("hidden_metrics", {}),
             notes=d.get("notes", ""),
             structured_feedback=d.get("structured_feedback"),
+            artifacts_ref=d.get("artifacts_ref"),
             stdout_log=d.get("stdout_log", ""),
             stderr_log=d.get("stderr_log", ""),
             stage_reached=int(d.get("stage_reached", 3)),
@@ -273,7 +276,7 @@ class PopulationStore:
     # -- insertion & island assignment ----------------------------------------
 
     def insert(self, cand: Candidate) -> None:
-        """Insert a candidate; assigns a island if island_idx < 0 and maintains
+        """Insert a candidate; assigns an island if island_idx < 0 and maintains
         the parent's children_count (upstream behavior)."""
         if cand.island_idx < 0:
             cand.island_idx = self._assign_island(cand)
