@@ -22,6 +22,7 @@ from .feedback import (
     ItemResult,
     StructuredFeedback,
 )
+from .reflection import MutationReflector
 
 __all__ = [
     "BehaviorSignature",
@@ -36,6 +37,7 @@ __all__ = [
     "FeedbackContributor",
     "HumanDirectiveContributor",
     "LineageVetoPolicy",
+    "MutationReflector",
     "append_directive",
     "ItemResult",
     "SignatureRecorder",

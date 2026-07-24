@@ -146,7 +146,6 @@ def test_hamming_threshold_relaxation():
 def _store_with_lineage(tmp_path):
     pop = PopulationStore(PopulationConfig())
     parent = make_candidate("p", 1.0)
-    parent.report.structured_feedback = feedback_fixture("1000").to_json()
     pop.insert(parent)
     xs = ExperienceStore(tmp_path / "exp.jsonl")
 
@@ -161,16 +160,90 @@ def _store_with_lineage(tmp_path):
     return pop, xs
 
 
-def test_experience_store_records_and_queries(tmp_path):
+def test_experience_store_records_wins_and_losses(tmp_path):
     pop, xs = _store_with_lineage(tmp_path)
     assert len(xs.entries) == 2
-    wins, losses = xs.query(["logic"])
-    assert [e.change_title for e in wins] == ["add cache"]
-    assert [e.change_title for e in losses] == ["raise temperature"]
-    assert xs.query(["unrelated-cat"]) == ([], [])
+    assert [e.change_title for e in xs.recent_wins()] == ["add cache"]
+    assert [e.change_title for e in xs.recent_losses()] == ["raise temperature"]
+    assert all(e.kind == "evaluated" for e in xs.entries)
+    assert xs.entries[0].parent_id == "p" and xs.entries[0].child_id == "w"
     # jsonl persistence roundtrip
     reloaded = ExperienceStore(tmp_path / "exp.jsonl")
     assert len(reloaded.entries) == 2
+
+
+def test_experience_store_loads_v1_rows(tmp_path):
+    path = tmp_path / "exp.jsonl"
+    path.write_text(
+        '{"parent_error_categories": ["logic"], "operator": "revise", '
+        '"change_title": "old", "change_summary": "s", '
+        '"fitness_delta": 0.2, "success": true, "generation": 1}\n'
+    )
+    xs = ExperienceStore(path)
+    assert len(xs.entries) == 1
+    entry = xs.entries[0]
+    assert entry.kind == "evaluated"  # v1 rows default to evaluated
+    assert entry.redeemed_by is None
+    assert entry.change_title == "old"
+
+
+def test_experience_redemption(tmp_path):
+    pop, xs = _store_with_lineage(tmp_path)
+    pop.insert(make_candidate("l", 0.5, parent_id="p", generation=3))
+    # A child of the regressed candidate improves past it: the parent's
+    # negative entry is redeemed and leaves the loss sections.
+    redeemer = make_candidate("r", 0.9, parent_id="l", generation=4)
+    xs.on_candidate_graded(redeemer, pop)
+    entry = next(e for e in xs.entries if e.child_id == "l")
+    assert entry.redeemed_by == "r"
+    assert all(e.child_id != "l" for e in xs.recent_losses())
+    assert all(e.child_id != "l" for e in xs.recent_negatives(generation=5))
+    # redemption row survives the jsonl roundtrip
+    reloaded = ExperienceStore(tmp_path / "exp.jsonl")
+    assert next(e for e in reloaded.entries if e.child_id == "l").redeemed_by == "r"
+
+
+def test_experience_store_records_rejections(tmp_path):
+    from evoharness.evocore import RejectionEvent
+
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    parent = make_candidate(
+        "p", 1.0, island=1, code="print('hello world one')\n"
+    )
+    xs.on_proposal_rejected(
+        RejectionEvent(
+            kind="novelty",
+            generation=4,
+            operator="rewrite",
+            parent=parent,
+            proposal_code="print('hello world two')\n",
+            change_title="tweak print",
+            max_similarity=0.995,
+            most_similar_id="abc",
+        )
+    )
+    xs.on_proposal_rejected(
+        RejectionEvent(
+            kind="proposal_failed",
+            generation=5,
+            operator="diff",
+            parent=parent,
+            failure_reason="no valid diff produced",
+        )
+    )
+    kinds = [e.kind for e in xs.entries]
+    assert kinds == ["rejected_novelty", "proposal_failed"]
+    novelty = xs.entries[0]
+    assert novelty.island_idx == 1 and novelty.max_similarity == 0.995
+    assert "hello world two" in novelty.change_summary  # diff vs parent text
+    rendered = novelty.render(show_origin=True)
+    assert "REJECTED before eval" in rendered and "island 1" in rendered
+    assert "PROPOSAL FAILED" in xs.entries[1].render()
+    # same-island entries sort first for a same-island parent
+    negatives = xs.recent_negatives(generation=5, island_idx=1)
+    assert len(negatives) == 2
+    reloaded = ExperienceStore(tmp_path / "exp.jsonl")
+    assert [e.kind for e in reloaded.entries] == kinds
 
 
 def test_experience_contributor_retrieval(tmp_path):
@@ -178,12 +251,39 @@ def test_experience_contributor_retrieval(tmp_path):
     contrib = ExperienceContributor(xs, mode="retrieval")
     parent = pop.get("p")
     section = contrib.contribute(MutationContext(parent, [], [], "revise", 4))
-    assert "Experience from similar failure modes" in section
+    assert "Experience from this run" in section
     assert "add cache" in section and "helped" in section
     assert "raise temperature" in section and "did NOT help" in section
+    # losses render before wins (strongest positive example last)
+    assert section.index("raise temperature") < section.index("add cache")
 
     off = ExperienceContributor(xs, mode="off")
     assert off.contribute(MutationContext(parent, [], [], "revise", 4)) is None
+
+
+def test_experience_contributor_rejected_section(tmp_path):
+    from evoharness.evocore import RejectionEvent
+
+    pop, xs = _store_with_lineage(tmp_path)
+    parent = pop.get("p")
+    xs.on_proposal_rejected(
+        RejectionEvent(
+            kind="proposal_failed",
+            generation=4,
+            operator="diff",
+            parent=parent,
+            failure_reason="no valid diff produced",
+        )
+    )
+    contrib = ExperienceContributor(xs, mode="retrieval+rejected")
+    section = contrib.contribute(MutationContext(parent, [], [], "revise", 5))
+    assert "avoid repeating without variation" in section
+    assert "PROPOSAL FAILED" in section
+    # plain retrieval mode omits the negative section
+    plain = ExperienceContributor(xs, mode="retrieval")
+    assert "PROPOSAL FAILED" not in plain.contribute(
+        MutationContext(parent, [], [], "revise", 5)
+    )
 
 
 def test_experience_contributor_global_distills_on_interval(tmp_path):
@@ -211,3 +311,289 @@ def test_experience_contributor_global_distills_on_interval(tmp_path):
         ExperienceContributor(xs, mode="global")  # llm required
     with pytest.raises(ValueError):
         ExperienceContributor(xs, mode="bogus")
+
+
+# -- L1 reflection (items 6-7) --------------------------------------------------
+
+def _reflect_transport(captured):
+    """Echoes an 'improved' lesson per '### mutation <id>' block it sees."""
+    import json
+    import re
+
+    def transport(messages, model, **kw):
+        captured.append(messages[1].content)
+        ids = re.findall(r"### mutation (\S+)", messages[1].content)
+        body = {
+            "lessons": [
+                {
+                    "child_id": i,
+                    "verdict": "improved",
+                    "why": f"why-{i}",
+                    "advice": f"advice-{i}",
+                    "tags": ["Missing Case"],
+                }
+                for i in ids
+            ],
+            "scratchpad": "S" * 3000,
+        }
+        return LLMResponse(text=json.dumps(body), model=model)
+
+    return transport
+
+
+def test_reflector_batches_lessons_and_scratchpad(tmp_path):
+    from evoharness.evoplus import MutationReflector
+
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 1.0))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    captured: list[str] = []
+    llm = LLMClient(
+        transport=_reflect_transport(captured), sleep=lambda s: None
+    )
+    reflector = MutationReflector(xs, llm, model="m", batch_size=3)
+
+    for i in range(3):
+        child = make_candidate(
+            f"c{i}", 1.0 + 0.1 * (i + 1), parent_id="p", generation=i + 1
+        )
+        pop.insert(child)
+        xs.on_candidate_graded(child, pop)          # store BEFORE reflector
+        reflector.on_candidate_graded(child, pop)
+
+    assert len(captured) == 1  # one batched call, triggered by the 3rd entry
+    assert all(e.lesson for e in xs.entries)
+    assert xs.entries[0].lesson["why"] == "why-c0"
+    assert xs.entries[0].lesson["tags"] == ["missing-case"]  # slug-normalized
+    assert not xs.pending_reflection()
+    assert reflector.scratchpad_version == 1
+    assert len(reflector.scratchpad) <= 2000  # hard budget enforced
+    # lessons survive the jsonl roundtrip
+    reloaded = ExperienceStore(tmp_path / "exp.jsonl")
+    assert all(e.lesson for e in reloaded.entries)
+    # checkpoint roundtrip
+    fresh = MutationReflector(xs, llm, batch_size=3)
+    fresh.set_state(reflector.state())
+    assert fresh.scratchpad == reflector.scratchpad
+    assert fresh.scratchpad_version == 1
+
+
+def test_reflector_skips_bad_llm_output(tmp_path):
+    from evoharness.evoplus import MutationReflector
+
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 1.0))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    llm = LLMClient(
+        transport=lambda messages, model, **kw: LLMResponse(
+            text="not json at all", model=model
+        ),
+        sleep=lambda s: None,
+    )
+    reflector = MutationReflector(xs, llm, batch_size=2)
+    for i in range(2):
+        child = make_candidate(f"c{i}", 1.2, parent_id="p", generation=i + 1)
+        pop.insert(child)
+        xs.on_candidate_graded(child, pop)
+        reflector.on_candidate_graded(child, pop)
+    # batch attempted and failed: run survives, entries stay pending
+    assert all(e.lesson is None for e in xs.entries)
+    assert len(xs.pending_reflection()) == 2
+    assert reflector.scratchpad_version == 0
+
+
+# -- Contributor v2 (item 8) -----------------------------------------------------
+
+def _lessoned_store(tmp_path):
+    pop, xs = _store_with_lineage(tmp_path)  # entries: w (win), l (loss)
+    xs.attach_lesson("w", {
+        "verdict": "improved",
+        "why": "cache removed rework",
+        "advice": "memoize expensive verifier calls",
+        "tags": ["slow-verify"],
+    })
+    xs.attach_lesson("l", {
+        "verdict": "regressed",
+        "why": "temperature added noise",
+        "advice": "avoid raising temperature blindly",
+        "tags": ["prompt-noise"],
+    })
+    return pop, xs
+
+
+def test_contributor_lessons_mode(tmp_path):
+    pop, xs = _lessoned_store(tmp_path)
+    contrib = ExperienceContributor(xs, mode="lessons")
+    parent = pop.get("p")
+    section = contrib.contribute(MutationContext(parent, [], [], "revise", 4))
+    assert "Lessons from past mutations" in section
+    assert "parent not attributed yet" in section  # root has no own lesson
+    assert "advice: memoize expensive verifier calls" in section
+    assert "advice: avoid raising temperature blindly" in section
+    # regressed lesson renders before the improved one
+    assert section.index("raise temperature") < section.index("add cache")
+    # the lessoned regression left the mechanical negative section
+    assert all(e.child_id != "l" for e in xs.recent_negatives(generation=5))
+
+
+def test_contributor_lessons_tag_match(tmp_path):
+    pop, xs = _lessoned_store(tmp_path)
+    extra = make_candidate("x", 1.2, parent_id="p", generation=4)
+    extra.operator, extra.change_title = "revise", "tune sampling"
+    pop.insert(extra)
+    xs.on_candidate_graded(extra, pop)
+    xs.attach_lesson("x", {
+        "verdict": "improved",
+        "why": "less sampling noise",
+        "advice": "keep temperature low",
+        "tags": ["prompt-noise"],
+    })
+    # mutate FROM l, whose own lesson carries tags ["prompt-noise"]
+    fake_parent = make_candidate("l", 0.5)
+    section = ExperienceContributor(xs, mode="lessons").contribute(
+        MutationContext(fake_parent, [], [], "revise", 5)
+    )
+    assert "matched on the parent's failure tags: prompt-noise" in section
+    # tag-matched win (x) outranks the bigger-delta win (w), so after the
+    # worst->best flip it renders LAST (recency-bias slot)
+    assert section.index("add cache") < section.index("tune sampling")
+
+
+def test_contributor_lessons_falls_back_before_first_batch(tmp_path):
+    pop, xs = _store_with_lineage(tmp_path)  # no lessons attached
+    section = ExperienceContributor(xs, mode="lessons").contribute(
+        MutationContext(pop.get("p"), [], [], "revise", 4)
+    )
+    assert "Experience from this run" in section  # mechanical fallback
+
+
+def test_contributor_scratchpad_hint(tmp_path):
+    class FakeReflector:
+        scratchpad = (
+            "Successful patterns\n- pattern A\n"
+            "Unexplored directions\n- try operator X\n- try shorter prompts\n"
+        )
+
+    pop, xs = _lessoned_store(tmp_path)
+    contrib = ExperienceContributor(
+        xs, mode="lessons+scratchpad", reflector=FakeReflector()
+    )
+    parent = pop.get("p")
+    ctx = MutationContext(parent, [], [], "revise", 6)
+    section = contrib.contribute(ctx)
+    assert "Direction hint" in section
+    hint = section.split("Direction hint (from the evolution scratchpad)")[1]
+    # sampled from the Unexplored section only, deterministically
+    assert "try operator" in hint or "try shorter prompts" in hint
+    assert "pattern A" not in hint
+    assert contrib.contribute(ctx) == section  # same ctx -> same sample
+
+    with pytest.raises(ValueError):
+        ExperienceContributor(xs, mode="lessons+scratchpad")  # needs reflector
+
+
+# -- L2 consolidation + wiring (items 9-10) ---------------------------------------
+
+def test_reflector_consolidation_merges_tags_and_rewrites_redeemed(tmp_path):
+    import json
+    from evoharness.evoplus import MutationReflector
+
+    pop, xs = _store_with_lineage(tmp_path)
+    xs.attach_lesson("w", {
+        "verdict": "improved", "why": "", "advice": "keep caching",
+        "tags": ["missing-case"],
+    })
+    xs.attach_lesson("l", {
+        "verdict": "regressed", "why": "", "advice": "avoid temperature",
+        "tags": ["missing-cases"],
+    })
+    # redeem l so its lesson qualifies for the stepping-stone rewrite
+    pop.insert(make_candidate("l", 0.5, parent_id="p", generation=3))
+    redeemer = make_candidate("r", 0.9, parent_id="l", generation=4)
+    pop.insert(redeemer)
+    xs.on_candidate_graded(redeemer, pop)
+
+    def transport(messages, model, **kw):
+        assert "lesson memory" in messages[0].content
+        assert "REDEEMED by r" in messages[1].content
+        body = {
+            "tag_map": {"missing-cases": "missing-case"},
+            "rewrites": [
+                {"child_id": "l",
+                 "advice": "stepping stone: keep direction, smaller steps"},
+                {"child_id": "w", "advice": "MUST NOT APPLY"},  # not redeemed
+            ],
+        }
+        return LLMResponse(text=json.dumps(body), model=model)
+
+    llm = LLMClient(transport=transport, sleep=lambda s: None)
+    reflector = MutationReflector(xs, llm, model="m", consolidate_threshold=2)
+    reflector._consolidate()
+
+    l_entry = next(e for e in xs.entries if e.child_id == "l")
+    w_entry = next(e for e in xs.entries if e.child_id == "w")
+    assert l_entry.lesson["tags"] == ["missing-case"]      # synonym merged
+    assert "stepping stone" in l_entry.lesson["advice"]    # redeemed rewrite
+    assert w_entry.lesson["advice"] == "keep caching"      # guard held
+    assert reflector.consolidated_at == 2  # w+l lessoned; r still pending
+    # consolidated lessons survive the jsonl roundtrip
+    reloaded = ExperienceStore(tmp_path / "exp.jsonl")
+    l_again = next(e for e in reloaded.entries if e.child_id == "l")
+    assert l_again.lesson["tags"] == ["missing-case"]
+
+
+def test_reflector_triggers_consolidation_and_charges_budget(tmp_path):
+    from evoharness.evoplus import MutationReflector
+
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 1.0))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    calls: list[str] = []
+
+    def transport(messages, model, **kw):
+        import json
+        import re
+        if "attribution analyst" in messages[0].content:
+            calls.append("reflect")
+            ids = re.findall(r"### mutation (\S+)", messages[1].content)
+            body = {
+                "lessons": [
+                    {"child_id": i, "verdict": "improved", "why": "w",
+                     "advice": "a", "tags": ["t"]}
+                    for i in ids
+                ],
+                "scratchpad": "- keep going",
+            }
+        else:
+            calls.append("consolidate")
+            body = {"tag_map": {}, "rewrites": []}
+        return LLMResponse(text=json.dumps(body), model=model, cost=0.5)
+
+    class SpyBudget:
+        def __init__(self):
+            self.charged: list[float] = []
+
+        def charge(self, usd: float) -> None:
+            self.charged.append(usd)
+
+        def should_stop(self) -> bool:
+            return False
+
+    budget = SpyBudget()
+    llm = LLMClient(transport=transport, sleep=lambda s: None)
+    reflector = MutationReflector(
+        xs, llm, model="m", batch_size=2, consolidate_threshold=2, budget=budget
+    )
+    for i in range(2):
+        child = make_candidate(f"c{i}", 1.2, parent_id="p", generation=i + 1)
+        pop.insert(child)
+        xs.on_candidate_graded(child, pop)
+        reflector.on_candidate_graded(child, pop)
+
+    assert calls == ["reflect", "consolidate"]  # threshold hit right after batch
+    assert budget.charged == [0.5, 0.5]         # both calls metered
+    assert reflector.consolidated_at == 2
+    # watermark survives the checkpoint roundtrip
+    fresh = MutationReflector(xs, llm, budget=budget)
+    fresh.set_state(reflector.state())
+    assert fresh.consolidated_at == 2

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .population import Candidate, PopulationStore
+    from .workspace import Workspace
 
 
 @dataclass
@@ -22,6 +23,23 @@ class MutationContext:
     top_k_inspirations: list["Candidate"]
     operator: str
     generation: int
+
+
+@dataclass(frozen=True)
+class RejectionEvent:
+    """A proposal discarded before evaluation (novelty gate, or the proposer
+    failed to produce a valid edit). Carried to observers so negative
+    experience can be recorded; evocore itself never interprets it."""
+    kind: str
+    generation: int
+    operator: str
+    parent: "Candidate"
+    proposal_code: str | None = None
+    proposal_workspace: "Workspace | None" = None
+    change_title: str = ""
+    failure_reason: str = ""
+    max_similarity: float = 0.0
+    most_similar_id: str | None = None
 
 
 @runtime_checkable
@@ -45,6 +63,14 @@ class LoopObserver(Protocol):
     def on_candidate_graded(
         self, cand: "Candidate", store: "PopulationStore"
     ) -> None: ...
+
+
+@runtime_checkable
+class RejectionObserver(Protocol):
+    """Optional hook: hears about pre-evaluation rejections. Dispatch in
+    SearchLoop is duck-typed, so plain LoopObservers are unaffected."""
+
+    def on_proposal_rejected(self, event: RejectionEvent) -> None: ...
 
 
 @runtime_checkable

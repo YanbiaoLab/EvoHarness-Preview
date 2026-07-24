@@ -136,9 +136,9 @@ def test_full_loop_with_all_three_extensions(tmp_path):
     # C1: some mutation prompt carried the parent failure analysis while the
     # parent still had failures
     assert any("Parent failure analysis" in s for s in captured_systems)
-    # C3: once experience matched the parent's failure modes it was injected
+    # C3: once the buffer had outcomes they were injected into prompts
     assert any(
-        "Experience from similar failure modes" in s for s in captured_systems
+        "Experience from this run" in s for s in captured_systems
     )
     # solved candidates stop injecting the feedback section
     last_system = captured_systems[-1]

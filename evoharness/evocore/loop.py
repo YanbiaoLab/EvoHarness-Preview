@@ -32,6 +32,7 @@ from .interfaces import (
     LoopObserver,
     MutationContext,
     NullBudget,
+    RejectionEvent,
 )
 from .llm import LLMClient
 from .metrics import MetricLog
@@ -268,6 +269,14 @@ class SearchLoop:
         }
         self.metric_log.log(generation, metrics, candidate_id=cand.id)
 
+    def _notify_rejected(self, event: RejectionEvent) -> None:
+        """Duck-typed dispatch (same style as _stateful_components): only
+        observers implementing RejectionObserver hear rejections."""
+        for observer in self.observers:
+            handler = getattr(observer, "on_proposal_rejected", None)
+            if handler is not None:
+                handler(event)
+
     # -- proposal --------------------------------------------------------------
 
     def _pick_island(self, generation: int):
@@ -346,6 +355,15 @@ class SearchLoop:
                         "llm_cost": result.llm_cost,
                     }
                 )
+                self._notify_rejected(
+                    RejectionEvent(
+                        kind="proposal_failed",
+                        generation=generation,
+                        operator=operator,
+                        parent=parent,
+                        failure_reason=result.failure_reason or "",
+                    )
+                )
                 return None
             proposal = result.proposal
             if self.proposal_selector is not None:
@@ -356,6 +374,19 @@ class SearchLoop:
                 verdict = self.novelty_gate.check(proposal.code, island)
                 if not verdict.accepted:
                     report.novelty_rejections += 1
+                    self._notify_rejected(
+                        RejectionEvent(
+                            kind="novelty",
+                            generation=generation,
+                            operator=operator,
+                            parent=parent,
+                            proposal_code=proposal.code,
+                            proposal_workspace=proposal.workspace,
+                            change_title=proposal.title,
+                            max_similarity=verdict.max_similarity,
+                            most_similar_id=verdict.most_similar_id,
+                        )
+                    )
                     continue  # re-sample a parent, upstream retry semantics
                 embedding = verdict.embedding
 
