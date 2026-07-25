@@ -372,13 +372,69 @@ _REPAIR_SPEC = (
 )
 
 
-def _render_candidate(c: Candidate, language: str, heading: str) -> str:
+_OPERATOR_INTENT = {
+    "revise": (
+        "# This mutation: REVISE\n"
+        "Make one focused, targeted change to the current program. Keep its "
+        "overall structure and strategy; improve a specific weakness you can "
+        "point to in the evaluation feedback."
+    ),
+    "rewrite": (
+        "# This mutation: REWRITE\n"
+        "Restructure the program's approach rather than tuning it. Prefer a "
+        "strategy meaningfully different from the current one, even at the "
+        "risk of scoring worse — small safe edits are what the REVISE "
+        "operator is for."
+    ),
+    "recombine": (
+        "# This mutation: RECOMBINE\n"
+        "Merge the strongest ideas of a reference program into the current "
+        "one. Read the reference with inspect_candidate first, then combine "
+        "rather than replace."
+    ),
+}
+
+
+def _operator_intent(operator: str) -> str:
+    """What the operator asks the agent to DO.
+
+    Distinct from the operator's response-format spec, which a tool-using
+    agent never follows. Without this the operator is invisible to it.
+    """
+    return _OPERATOR_INTENT.get(
+        operator, f"# This mutation: {operator.upper()}"
+    )
+
+
+def _render_candidate(
+    c: Candidate,
+    language: str,
+    heading: str,
+    *,
+    include_code: bool = True,
+    max_chars: int = 24_000,
+) -> str:
+    """Render one candidate for the prompt.
+
+    `include_code=False` emits an inventory instead of file bodies, for
+    readers that can fetch the text themselves. Full rendering is the only
+    part of the prompt whose size tracks the size of the program being
+    evolved rather than a budget, so it is also the first thing to breach
+    a context window as a project grows: bound it.
+    """
     parts = [f"### {heading}"]
     if c.change_title:
         parts.append(f"Change: {c.change_title} — {c.change_summary}")
     if c.report:
         parts.append(c.report.render_for_prompt())
     texts = c.workspace.texts()
+    if not include_code:
+        inventory = ", ".join(
+            f"{path} ({len(texts[path].splitlines())} lines)"
+            for path in sorted(texts)
+        )
+        parts.append(f"Files: {inventory}")
+        return "\n".join(parts)
     if len(texts) > 1:
         # Multi-file genome: render every file in the SAME format the LLM
         # must answer in (### FILE: blocks) — the example IS the spec.
@@ -386,7 +442,13 @@ def _render_candidate(c: Candidate, language: str, heading: str) -> str:
             parts.append(f"### FILE: {path}\n```{language}\n{texts[path]}\n```")
     else:
         parts.append(f"```{language}\n{c.workspace.main_text()}\n```")
-    return "\n".join(parts)
+    rendered = "\n".join(parts)
+    if len(rendered) > max_chars:
+        rendered = (
+            rendered[:max_chars]
+            + f"\n... [truncated at {max_chars} characters]"
+        )
+    return rendered
 
 
 class PromptBuilder:
@@ -422,24 +484,47 @@ class PromptBuilder:
             section = contrib.contribute(ctx)
             if section:
                 parts.append(section)
-        parts.append(spec)
         if self.workspace_agent:
+            # The operator spec is a RESPONSE-FORMAT spec: patch blocks for
+            # revise, a full code block for rewrite. A workspace agent edits
+            # files with tools and returns only TITLE/SUMMARY, so including
+            # it contradicts _WORKSPACE_AGENT_SPEC — and it was the only
+            # thing that differed between operators here, which is why three
+            # operators produced byte-identical edits from one parent.
+            parts.append(_operator_intent(ctx.operator))
             parts.append(_WORKSPACE_AGENT_SPEC)
+        else:
+            parts.append(spec)
         return "\n\n".join(parts)
 
     def _history(self, ctx: MutationContext) -> str:
+        # A workspace agent can fetch any candidate's text on demand, so
+        # reference programs arrive as an inventory it can expand rather
+        # than as bodies resent on every turn of the session.
+        code = not self.workspace_agent
         sections = []
         for c in ctx.archive_inspirations:
             sections.append(
-                _render_candidate(c, self.language, "Reference program (archive)")
+                _render_candidate(
+                    c, self.language, f"Reference program (archive) id={c.id}",
+                    include_code=code,
+                )
             )
         for c in ctx.top_k_inspirations:
             sections.append(
-                _render_candidate(c, self.language, "Reference program (top)")
+                _render_candidate(
+                    c, self.language, f"Reference program (top) id={c.id}",
+                    include_code=code,
+                )
             )
         if not sections:
             return ""
-        return "## Previously evaluated programs\n\n" + "\n\n".join(sections)
+        header = "## Previously evaluated programs"
+        if not code:
+            header += (
+                "\nRead any of them with inspect_candidate(candidate_id, path)."
+            )
+        return header + "\n\n" + "\n\n".join(sections)
 
     def build(self, ctx: MutationContext) -> tuple[str, str]:
         if ctx.operator == "revise":
@@ -456,9 +541,22 @@ class PromptBuilder:
         history = self._history(ctx)
         if history:
             user_parts.append(history)
+        # The workspace agent already has the parent's files materialised on
+        # disk; repeating them in the prompt pays for what it can read for
+        # free, on every turn of the session.
         user_parts.append(
-            _render_candidate(ctx.parent, self.language, "Current program")
+            _render_candidate(
+                ctx.parent,
+                self.language,
+                "Current program",
+                include_code=not self.workspace_agent,
+            )
         )
+        if self.workspace_agent:
+            user_parts.append(
+                "The current program's files are already in your workspace. "
+                "Read them with workspace_read before editing."
+            )
         if (
             len(ctx.parent.workspace.texts()) > 1
             and not self.workspace_agent

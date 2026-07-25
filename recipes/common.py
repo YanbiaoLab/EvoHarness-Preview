@@ -38,6 +38,7 @@ from evoharness.evocore import (
 )
 from evoharness.evocore.agent import (
     AgentToolRegistry,
+    InspectCandidateTool,
     Runner,
     TokenEstimator,
     make_default_agent_tools,
@@ -107,6 +108,7 @@ def _resolve_agent_model(ctx: RecipeContext) -> str:
 def _build_proposer(
     ctx: RecipeContext,
     model_router: StaticRouter,
+    store=None,
 ) -> tuple[Proposer, Proposer | None]:
     mode = ctx.proposal.mode
     if mode == "single_shot":
@@ -129,7 +131,13 @@ def _build_proposer(
     tools = (
         ()
         if mode == "conversational"
-        else (*make_default_agent_tools(runner), *ctx.extra_agent_tools)
+        else (
+            *make_default_agent_tools(runner),
+            # Reference programs reach the prompt as an inventory; this is
+            # how the agent expands one it actually wants to read.
+            *((InspectCandidateTool(store),) if store is not None else ()),
+            *ctx.extra_agent_tools,
+        )
     )
     registry = AgentToolRegistry(tools)
     backend = NativeToolAgentBackend(
@@ -255,7 +263,7 @@ def assemble(
         if ctx.search.novelty_enabled
         else None
     )
-    proposer, hybrid_agent_proposer = _build_proposer(ctx, model_router)
+    proposer, hybrid_agent_proposer = _build_proposer(ctx, model_router, store)
     assembly_fingerprint = {
         "contributors": [
             f"{item.__class__.__module__}.{item.__class__.__qualname__}"

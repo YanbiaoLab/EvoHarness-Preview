@@ -419,3 +419,50 @@ def test_novelty_gate_identity_mode_accepts_small_edits(tmp_path):
     fuzzy = NoveltyGate(hashing_embedding, mode="similarity")
     existing.embedding = hashing_embedding(same)
     assert fuzzy.check(tweaked, island).accepted is False
+
+
+def test_workspace_agent_prompt_drops_dead_sections(tmp_path):
+    """In agentic mode the operator's response-format spec is dead weight —
+    the agent edits with tools and returns TITLE/SUMMARY — and it was the
+    ONLY thing that differed between operators, which is why three
+    operators once produced byte-identical edits from one parent. The
+    parent's own files are equally redundant: they are on disk already."""
+    from evoharness.evocore import Candidate, EvalReport, MutationContext
+    from evoharness.evocore.operators import PromptBuilder
+    from evoharness.evocore.workspace import GitWorkspace
+
+    def _cand(cid, title):
+        return Candidate(
+            id=cid,
+            code=GitWorkspace(
+                base_files={"main.py": "x = 1\n" * 200, "helper.py": "y = 2\n"},
+                main_file="main.py",
+            ).serialize(),
+            generation=1, parent_id=None, island_idx=0, operator="revise",
+            workspace_kind="git", change_title=title,
+            report=EvalReport(fitness=0.5, passed=True),
+        )
+
+    parent, peer = _cand("p1", "parent change"), _cand("i1", "peer change")
+    ctx = MutationContext(parent, [peer], [], "revise", 3)
+
+    agent = PromptBuilder("task", contributors=[], workspace_agent=True)
+    plain = PromptBuilder("task", contributors=[], workspace_agent=False)
+    a_sys, a_user = agent.build(ctx)
+    p_sys, p_user = plain.build(ctx)
+
+    assert "# Response format" not in a_sys      # contradicts tool editing
+    assert "# Response format" in p_sys          # single-shot still needs it
+    assert "This mutation: REVISE" in a_sys      # operator intent instead
+    assert "x = 1" not in a_user                 # no bodies for the agent
+    assert "x = 1" in p_user                     # single-shot still gets them
+    assert "inspect_candidate" in a_user         # told how to expand one
+    assert "id=i1" in a_user                     # and which id to expand
+    assert len(a_user) < len(p_user) / 4         # the whole point
+
+    # operator intent, not response format, is what now varies by operator
+    rewrite_sys, _ = agent.build(
+        MutationContext(parent, [peer], [], "rewrite", 3)
+    )
+    assert "This mutation: REWRITE" in rewrite_sys
+    assert "meaningfully different" in rewrite_sys

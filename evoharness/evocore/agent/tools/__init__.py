@@ -26,6 +26,7 @@ from .workspace import (
     resolve_workspace_path,
 )
 from .preflight import RunPreflightTool
+from .inspect_candidate import InspectCandidateTool
 from .inspect_eval import InspectParentEvalTool
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "AgentToolContext",
     "AgentToolError",
     "AgentToolRegistry",
+    "InspectCandidateTool",
     "InspectParentEvalTool",
     "RunPreflightTool",
     "RunTool",

@@ -7,6 +7,7 @@ import pytest
 
 from evoharness.evocore import (
     Candidate,
+    EvalReport,
     LLMToolCall,
     PreflightPipeline,
     ProposalPreflight,
@@ -414,3 +415,42 @@ def test_read_dedup_is_per_session(tmp_path):
     other = make_context(tmp_path / "other")
     _, fresh, _, _ = invoke(tool, other, path="main.py", offset=1, limit=100)
     assert "content" in fresh and not fresh.get("unchanged")
+
+
+def test_inspect_candidate_lists_then_reads(tmp_path):
+    """Reference programs reach the prompt as an inventory; this is how the
+    agent expands one. Full rendering is the only prompt section whose size
+    tracks the evolved program rather than a budget."""
+    from evoharness.evocore.agent.tools import InspectCandidateTool
+
+    ctx = make_context(tmp_path)
+    other = Candidate(
+        id="other", code=GitWorkspace(
+            base_files={"main.py": "value = 2\n", "extra.py": "x = 1\ny = 2\n"},
+            main_file="main.py",
+        ).serialize(),
+        generation=1, parent_id=None, island_idx=0, operator="revise",
+        workspace_kind="git", change_title="tweak",
+        report=EvalReport(fitness=0.75, passed=True),
+    )
+
+    class _Store:
+        def get(self, cid):
+            return other if cid == "other" else None
+
+    tool = InspectCandidateTool(_Store())
+
+    _, listing, _, _ = invoke(tool, ctx, candidate_id="other", path=None)
+    assert listing["files"] == {"extra.py": 2, "main.py": 1}
+    assert listing["fitness"] == 0.75 and listing["change_title"] == "tweak"
+    assert "content" not in listing          # inventory only
+
+    _, body, _, _ = invoke(tool, ctx, candidate_id="other", path="extra.py")
+    assert body["content"] == "x = 1\ny = 2\n" and not body["truncated"]
+
+    # the registry converts tool errors into error results, not exceptions
+    _, missing, _, _ = invoke(tool, ctx, candidate_id="ghost", path=None)
+    assert missing["error"]["code"] == "unknown-candidate"
+    _, bad_path, _, _ = invoke(tool, ctx, candidate_id="other", path="nope.py")
+    assert bad_path["error"]["code"] == "unknown-path"
+    assert "extra.py" in bad_path["error"]["message"]   # names what exists
