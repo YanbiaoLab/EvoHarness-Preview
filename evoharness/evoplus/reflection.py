@@ -67,6 +67,13 @@ space on concrete "Unexplored directions" rather than more warnings.
 State each successful pattern as something to DO, not as the absence of
 a mistake.
 
+The scratchpad must not contradict itself. If one entry recommends what
+another forbids, the next mutation has no usable direction and will
+oscillate between them — worse than having no memory at all. When the
+evidence points both ways, write ONE conditional entry naming when each
+side applies, rather than a rule in one section and its negation in
+another.
+
 Respond with ONLY a JSON object, no prose, no code fences:
 {{"lessons": [{{"child_id": "...", "verdict": "...", "why": "...",
 "advice": "...", "tags": ["..."]}}], "scratchpad": "..."}}
@@ -74,15 +81,23 @@ Respond with ONLY a JSON object, no prose, no code fences:
 
 _CONSOLIDATE_SYS = """\
 You maintain the lesson memory of an evolutionary program-search loop.
-The lessons below have accumulated tag drift and redundancy. Produce:
+The lessons below have accumulated tag drift, redundancy, and — most
+damaging — contradictions. Produce:
 1. "tag_map": merge synonymous failure-mode tags — map each alias to ONE
    canonical lowercase slug. Identity mappings may be omitted.
-2. "rewrites": for lessons marked REDEEMED (their regression later led to
-   an improvement), rewrite "advice" as a stepping-stone lesson: the
-   direction was worth pursuing despite the short-term loss; recommend
-   keeping the direction with smaller, safer steps.
-Do not invent new lessons or touch unlisted ones. Respond with ONLY a
-JSON object:
+2. "rewrites": rewrite the "advice" of specific lessons. Two cases:
+   a. CONTRADICTIONS. Two lessons that tell the next mutation opposite
+      things (one recommends what the other forbids) leave it with no
+      usable direction, and it will oscillate between them. Find every
+      such pair and rewrite BOTH sides into one conditional rule naming
+      the circumstance under which each holds. If the evidence cannot
+      support a distinction, keep the better-supported side and neutralise
+      the other into an open question.
+   b. REDEEMED lessons (a regression that later led to an improvement):
+      rewrite as a stepping stone — the direction was worth pursuing
+      despite the short-term loss; keep it with smaller, safer steps.
+Do not invent new lessons or touch lessons that are neither contradicted
+nor redeemed. Respond with ONLY a JSON object:
 {"tag_map": {"alias": "canonical"}, "rewrites": [{"child_id": "...",
 "advice": "..."}]}
 """
@@ -260,9 +275,10 @@ class MutationReflector:
                     seen.add(canon)
                     tags.append(canon)
             changed = tags != lesson.get("tags", [])
-            # Rewrites apply ONLY to redeemed entries: the LLM must not
-            # rewrite arbitrary advice.
-            if e.redeemed_by and e.child_id in rewrites:
+            # Rewrites may touch any lesson that was actually shown — both
+            # halves of a contradiction need fixing, not just redeemed ones
+            # — but never a child_id the consolidator invented.
+            if e.child_id in rewrites:
                 lesson["advice"] = rewrites[e.child_id]
                 changed = True
             if changed:

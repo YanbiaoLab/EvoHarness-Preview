@@ -494,7 +494,7 @@ def test_contributor_scratchpad_hint(tmp_path):
 
 # -- L2 consolidation + wiring (items 9-10) ---------------------------------------
 
-def test_reflector_consolidation_merges_tags_and_rewrites_redeemed(tmp_path):
+def test_reflector_consolidation_merges_tags_and_resolves_contradictions(tmp_path):
     import json
     from evoharness.evoplus import MutationReflector
 
@@ -521,7 +521,8 @@ def test_reflector_consolidation_merges_tags_and_rewrites_redeemed(tmp_path):
             "rewrites": [
                 {"child_id": "l",
                  "advice": "stepping stone: keep direction, smaller steps"},
-                {"child_id": "w", "advice": "MUST NOT APPLY"},  # not redeemed
+                {"child_id": "w", "advice": "cache only hot paths"},
+                {"child_id": "ghost", "advice": "MUST NOT APPLY"},  # invented
             ],
         }
         return LLMResponse(text=json.dumps(body), model=model)
@@ -534,7 +535,13 @@ def test_reflector_consolidation_merges_tags_and_rewrites_redeemed(tmp_path):
     w_entry = next(e for e in xs.entries if e.child_id == "w")
     assert l_entry.lesson["tags"] == ["missing-case"]      # synonym merged
     assert "stepping stone" in l_entry.lesson["advice"]    # redeemed rewrite
-    assert w_entry.lesson["advice"] == "keep caching"      # guard held
+    # contradictions need BOTH sides rewritten, so a non-redeemed lesson may
+    # be rewritten too — but only one that was actually shown
+    assert w_entry.lesson["advice"] == "cache only hot paths"
+    assert all(
+        "MUST NOT APPLY" not in (e.lesson or {}).get("advice", "")
+        for e in xs.entries
+    )
     assert reflector.consolidated_at == 2  # w+l lessoned; r still pending
     # consolidated lessons survive the jsonl roundtrip
     reloaded = ExperienceStore(tmp_path / "exp.jsonl")
@@ -684,3 +691,37 @@ def test_lesson_age_is_rendered_as_a_staleness_caveat(tmp_path):
     stale = contrib.contribute(MutationContext(parent, [], [], "revise", 12))
     assert "9 generations ago" in stale
     assert "verify before relying on it" in stale
+
+
+def test_regression_soft_penalty_discounts_a_dead_parent():
+    """children_count discounts a parent by how MANY children it produced;
+    nothing discounted it by how they turned out, so one island re-selected
+    the same parent five times while every child regressed."""
+    from evoharness.evoplus import RegressionSoftPenalty
+
+    pop = PopulationStore(PopulationConfig())
+    parent = make_candidate("p", 1.0)
+    pop.insert(parent)
+    policy = RegressionSoftPenalty(decay=0.6, floor=0.1)
+
+    assert policy.weight_multiplier(parent) == 1.0        # untried
+    for i in range(3):
+        child = make_candidate(f"r{i}", 0.5, parent_id="p", generation=i + 1)
+        policy.on_candidate_graded(child, pop)
+    assert policy.weight_multiplier(parent) == pytest.approx(0.6 ** 3)
+
+    # a single improving child clears the record — the regressed lineage
+    # stays selectable, which is the whole point of a soft gate
+    winner = make_candidate("w", 1.4, parent_id="p", generation=9)
+    policy.on_candidate_graded(winner, pop)
+    assert policy.weight_multiplier(parent) == 1.0
+
+    # the discount never reaches zero
+    for i in range(40):
+        child = make_candidate(f"x{i}", 0.5, parent_id="p", generation=20 + i)
+        policy.on_candidate_graded(child, pop)
+    assert policy.weight_multiplier(parent) == 0.1
+
+    fresh = RegressionSoftPenalty()
+    fresh.set_state(policy.state())
+    assert fresh.streaks == policy.streaks

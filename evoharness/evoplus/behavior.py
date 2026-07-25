@@ -74,3 +74,56 @@ class BehavioralNoveltyPolicy:
             distinct_signatures=len(set(store.all_signatures())),
             duplicates_marked=self._duplicates_marked,
         )
+
+
+class RegressionSoftPenalty:
+    """Implements LoopObserver + SamplingWeightPolicy (framework-evo backlog
+    item 3: a SOFT validation gate).
+
+    `children_count` already discounts a parent by how MANY children it has
+    produced; nothing discounts it by how those children turned out. Live
+    run 2026-07-24: one island re-selected the same parent for five
+    consecutive generations while every child regressed, because it stayed
+    the fittest candidate on the island.
+
+    So: a parent whose recent children keep regressing is progressively
+    down-weighted, and any single improving child clears the record. It is
+    deliberately not a hard gate — the regressed candidate itself stays in
+    the population and stays selectable. SkillOpt's strict-improvement gate
+    would have deleted the g6 regression that later produced the run's best
+    program; a penalty that decays but never reaches zero keeps that path
+    open while stopping the loop from grinding on a dead parent.
+    """
+
+    def __init__(self, decay: float = 0.6, floor: float = 0.1):
+        if not 0.0 < decay <= 1.0:
+            raise ValueError("decay must be in (0, 1]")
+        if not 0.0 < floor <= 1.0:
+            raise ValueError("floor must be in (0, 1]")
+        self.decay = decay
+        self.floor = floor
+        self.streaks: dict[str, int] = {}
+
+    def on_candidate_graded(
+        self, cand: Candidate, store: PopulationStore
+    ) -> None:
+        if not cand.parent_id or cand.report is None:
+            return
+        parent = store.get(cand.parent_id)
+        if parent is None or parent.report is None:
+            return
+        improved = cand.report.passed and cand.report.fitness > parent.report.fitness
+        if improved:
+            self.streaks.pop(cand.parent_id, None)
+        else:
+            self.streaks[cand.parent_id] = self.streaks.get(cand.parent_id, 0) + 1
+
+    def weight_multiplier(self, cand: Candidate) -> float:
+        streak = self.streaks.get(cand.id, 0)
+        return max(self.floor, self.decay ** streak)
+
+    def state(self) -> dict:
+        return {"streaks": dict(self.streaks)}
+
+    def set_state(self, state: dict) -> None:
+        self.streaks = {str(k): int(v) for k, v in state.get("streaks", {}).items()}

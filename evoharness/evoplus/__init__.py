@@ -2,7 +2,12 @@
 experience), plugged into evocore via its extension interfaces."""
 
 from .bandit import OperatorBandit
-from .behavior import BehavioralNoveltyPolicy, CoverageStats, SignatureRecorder
+from .behavior import (
+    BehavioralNoveltyPolicy,
+    CoverageStats,
+    RegressionSoftPenalty,
+    SignatureRecorder,
+)
 from .brief import StaticBriefContributor
 from .directives import (
     Directive,
@@ -42,6 +47,7 @@ __all__ = [
     "LineageVetoPolicy",
     "MutationReflector",
     "OperatorBandit",
+    "RegressionSoftPenalty",
     "append_directive",
     "ItemResult",
     "SignatureRecorder",

@@ -21,11 +21,14 @@ from evoharness.evocore.preflight import (
 )
 from evoharness.evoguard import BudgetMeter, Sandbox
 from evoharness.evoplus import (
+    BehavioralNoveltyPolicy,
     ExperienceContributor,
     ExperienceStore,
     LessonDirectiveContributor,
     MutationReflector,
     OperatorBandit,
+    RegressionSoftPenalty,
+    SignatureRecorder,
 )
 from evoharness.evoplus.config import PlusConfig
 from recipes.common import RecipeContext, assemble
@@ -308,7 +311,24 @@ def run_experiment(
     # E5r=lessons, E5s=lessons+scratchpad. The reflector (and its LLM cost)
     # only exists on lessons arms so E3r/E4a stay v1-faithful baselines.
     experience_store = ExperienceStore(run_dir / "experience.jsonl")
-    observers: list[object] = [experience_store]
+    # C1/C2 behaviour tracking, always on: without a recorded signature the
+    # archive's behaviour-duplicate filter is a no-op and two candidates
+    # that score identically cannot be told apart from genuine duplicates.
+    # SignatureRecorder MUST precede the policy that reads its output.
+    behaviour_policy = BehavioralNoveltyPolicy(
+        hamming_threshold=ctx.plus.hamming_threshold,
+        duplicate_penalty=ctx.plus.duplicate_penalty,
+    )
+    # Soft validation gate (backlog item 3): discount a parent whose recent
+    # children keep regressing, without removing it from the population.
+    regression_penalty = RegressionSoftPenalty()
+    observers: list[object] = [
+        SignatureRecorder(),
+        behaviour_policy,
+        regression_penalty,
+        experience_store,
+    ]
+    weight_policies: list[object] = [behaviour_policy, regression_penalty]
     reflector = None
     if experience_mode.startswith("lessons"):
         # batch_size=4 (not the module default 8): with max_candidates=15
@@ -346,6 +366,7 @@ def run_experiment(
         ctx,
         contributors=contributors,
         observers=observers,
+        weight_policies=weight_policies,
         operator_selector=selector,
     )
     manifest = RunManifest(
