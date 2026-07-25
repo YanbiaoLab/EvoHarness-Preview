@@ -29,15 +29,22 @@ def _island_with_embedding(vec):
     return IslandView(island_idx=0, candidates=[existing])
 
 
+# These three cover the upstream-parity "similarity" path explicitly; the
+# default mode is identity (see NoveltyGate for why fuzzy needs a semantic
+# embedder to be meaningful).
 def test_gate_accepts_below_threshold():
-    gate = NoveltyGate(embed_fn=lambda code: [0.0, 1.0], threshold=0.9)
+    gate = NoveltyGate(
+        embed_fn=lambda code: [0.0, 1.0], threshold=0.9, mode="similarity"
+    )
     verdict = gate.check("new code", _island_with_embedding([1.0, 0.0]))
     assert verdict.accepted and verdict.max_similarity == 0.0
     assert verdict.embedding == [0.0, 1.0]
 
 
 def test_gate_rejects_identical_without_judge():
-    gate = NoveltyGate(embed_fn=lambda code: [1.0, 0.0], threshold=0.99)
+    gate = NoveltyGate(
+        embed_fn=lambda code: [1.0, 0.0], threshold=0.99, mode="similarity"
+    )
     verdict = gate.check("dup", _island_with_embedding([1.0, 0.0]))
     assert not verdict.accepted and verdict.most_similar_id == "e"
 
@@ -53,6 +60,7 @@ def test_gate_judge_overrides():
         embed_fn=lambda code: [1.0, 0.0],
         threshold=0.99,
         judge_fn=fake_judge,
+        mode="similarity",
     )
     verdict = gate.check("dup", _island_with_embedding([1.0, 0.0]))
     assert verdict.accepted and verdict.judged

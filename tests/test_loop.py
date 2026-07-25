@@ -211,7 +211,9 @@ def test_loop_novelty_rejection_path(tmp_path):
     loop, store = build_loop(
         make_rewrite_transport(), ["rewrite"], [1.0], tmp_path, generations=4
     )
-    loop.novelty_gate = NoveltyGate(embed_fn=lambda code: [1.0, 0.0], threshold=0.99)
+    loop.novelty_gate = NoveltyGate(
+        embed_fn=lambda code: [1.0, 0.0], threshold=0.99, mode="similarity"
+    )
     report = loop.run(INITIAL)
 
     assert report.novelty_rejections >= 1

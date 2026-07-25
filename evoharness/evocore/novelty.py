@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import zlib
 from dataclasses import dataclass
 from typing import Callable
@@ -87,13 +88,30 @@ def parse_judge_verdict(text: str) -> bool:
     return head.startswith("NOVEL") and not head.startswith("NOT NOVEL")
 
 
-class NoveltyGate:
-    """Rejects proposals too similar to existing candidates in the island.
+def content_digest(text: str) -> str:
+    """Whitespace-insensitive identity of a candidate's content."""
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
 
-    Flow ([parity]): embed the proposal, compare against all embedded
-    candidates in the island; accept if max cosine similarity <= threshold;
-    otherwise consult the LLM judge if enabled, else reject. The retry loop
-    (max_novelty_attempts, re-sampling a parent) lives in SearchLoop.
+
+class NoveltyGate:
+    """Rejects proposals that add nothing new to the island.
+
+    Two modes:
+
+    "identity" (default) rejects only a proposal whose workspace is, up to
+    whitespace, one an island candidate already has. That is the failure
+    worth spending a retry on: the proposer burned a whole session and
+    changed nothing.
+
+    "similarity" is the upstream-parity path — embed and reject above a
+    cosine threshold. It needs an embedder whose geometry matches the
+    question being asked. Ours does not: a mutation is by construction
+    almost character-identical to its own parent, and the parent sits in
+    the same island, so an n-gram gate at 0.99 rejected 40% of perfectly
+    good small edits (measured live, 2026-07-24) — each one costing a full
+    agent session. Use this mode only with a semantic embedder.
+
+    The retry loop (max_novelty_attempts) lives in SearchLoop.
     """
 
     def __init__(
@@ -101,13 +119,33 @@ class NoveltyGate:
         embed_fn: EmbedFn,
         threshold: float = 0.99,
         judge_fn: JudgeFn | None = None,
+        mode: str = "identity",
     ):
+        if mode not in ("identity", "similarity"):
+            raise ValueError(f"unknown novelty mode {mode!r}")
         self.embed_fn = embed_fn
         self.threshold = threshold
         self.judge_fn = judge_fn
+        self.mode = mode
+
+    def _candidate_text(self, cand) -> str:
+        try:
+            return novelty_text(cand.workspace, cand.code)
+        except Exception:
+            return cand.code
 
     def check(self, code: str, island: IslandView) -> GateVerdict:
+        # The embedding is still recorded: it costs nothing, it is the
+        # observable proof the gate ran at all, and it keeps the door open
+        # for a semantic embedder later.
         embedding = list(self.embed_fn(code))
+        if self.mode == "identity":
+            digest = content_digest(code)
+            for cand in island.candidates:
+                if content_digest(self._candidate_text(cand)) == digest:
+                    return GateVerdict(False, embedding, 1.0, cand.id)
+            return GateVerdict(True, embedding, 0.0, None)
+
         vec = np.asarray(embedding, dtype=float)
         max_sim, similar = 0.0, None
         for cand in island.candidates:

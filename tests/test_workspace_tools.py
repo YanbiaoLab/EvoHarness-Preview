@@ -1,6 +1,7 @@
 """Strict workspace tool safety, paging, and edit semantics."""
 
 import json
+import os
 
 import pytest
 
@@ -345,10 +346,12 @@ def test_every_workspace_tool_has_a_strict_schema():
     )
 
 
-def test_read_dedups_an_unchanged_range_and_reissues_after_a_change(tmp_path):
-    """A re-read of an unchanged range is answered with a pointer, not a
-    second copy: every copy in the conversation is resent on every later
-    turn. Any mtime change must defeat the check."""
+def test_read_dedups_on_content_not_mtime(tmp_path):
+    """A re-read of unchanged lines is answered with a pointer, not a second
+    copy: every copy in the conversation is resent on every later turn.
+    The check is on the returned CONTENT, so an edit elsewhere in the file
+    does not force a pointless resend, and any change to these lines — from
+    the agent or from outside the harness — defeats it by construction."""
     ctx = make_context(tmp_path)
     tool = WorkspaceReadTool()
 
@@ -361,13 +364,11 @@ def test_read_dedups_an_unchanged_range_and_reissues_after_a_change(tmp_path):
     assert "content" not in second          # no second copy of the file
     assert "still current" in second["message"]
 
-    # a different range is a different fingerprint
+    # a different range is tracked separately
     _, ranged, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
     assert "content" in ranged and not ranged.get("unchanged")
-    _, ranged_again, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
-    assert ranged_again["unchanged"] is True
 
-    # editing the file must invalidate the dedup
+    # editing line 1 must reissue line 1 ...
     invoke(
         WorkspaceEditTool(),
         ctx,
@@ -375,10 +376,32 @@ def test_read_dedups_an_unchanged_range_and_reissues_after_a_change(tmp_path):
         old_text="value = 1",
         new_text="value = 42",
     )
-    _, after_edit, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
-    assert not after_edit.get("unchanged")   # mtime moved, dedup defeated
-    _, full, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
-    assert "value = 42" in full["content"]
+    _, reread, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    assert "value = 42" in reread["content"]
+    # ... but line 2 is untouched, so it still dedups (mtime would not)
+    _, untouched, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
+    assert untouched["unchanged"] is True
+
+
+def test_read_dedup_detects_an_external_edit(tmp_path):
+    """Nothing guarantees edits arrive through the tools. A writer that
+    preserves mtime, or a coarse filesystem clock, would let a timestamp
+    check declare stale text current; hashing the returned lines cannot."""
+    ctx = make_context(tmp_path)
+    tool = WorkspaceReadTool()
+    target = ctx.workdir / "main.py"
+
+    invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    original_mtime = target.stat().st_mtime_ns
+
+    # rewrite behind the harness's back and restore the timestamp
+    target.write_text("value = 999\nneedle = 'first'\n", encoding="utf-8")
+    os.utime(target, ns=(original_mtime, original_mtime))
+    assert target.stat().st_mtime_ns == original_mtime  # mtime check would pass
+
+    _, after, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    assert not after.get("unchanged")
+    assert "value = 999" in after["content"]
 
 
 def test_read_dedup_is_per_session(tmp_path):

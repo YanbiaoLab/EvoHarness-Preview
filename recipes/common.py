@@ -247,7 +247,11 @@ def assemble(
     # at 0, and the rejected_novelty experience channel could never fire.
     # The default embedder is provider-free (see hashing_embedding).
     novelty_gate = (
-        NoveltyGate(hashing_embedding, threshold=ctx.search.similarity_threshold)
+        NoveltyGate(
+            hashing_embedding,
+            threshold=ctx.search.similarity_threshold,
+            mode=ctx.search.novelty_mode,
+        )
         if ctx.search.novelty_enabled
         else None
     )

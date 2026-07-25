@@ -137,6 +137,11 @@ class SearchConfig:
     max_op_resamples: int = 3
     max_novelty_attempts: int = 3
     similarity_threshold: float = 0.99
+    # "identity" rejects only proposals identical to an island candidate —
+    # the agent-burned-a-session-and-changed-nothing case. "similarity"
+    # is the upstream cosine path and needs a semantic embedder to be
+    # meaningful (see NoveltyGate).
+    novelty_mode: str = "identity"
     novelty_llm_judge: bool = False  # deviation: simplified, off by default
     # Upstream-parity default. Turn OFF for harnesses whose proposer emits
     # duplicate programs by construction (deterministic mock transports),

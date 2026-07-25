@@ -388,3 +388,34 @@ def test_assemble_mounts_the_novelty_gate(tmp_path):
     assert cosine_similarity(np.array(a), np.array(near)) > cosine_similarity(
         np.array(a), np.array(far)
     )
+
+
+def test_novelty_gate_identity_mode_accepts_small_edits(tmp_path):
+    """A mutation is by construction almost character-identical to its own
+    parent, and the parent sits in the same island — so a fuzzy gate at 0.99
+    rejected 40% of good small edits live. Identity mode rejects only a
+    proposal that adds nothing at all."""
+    from evoharness.evocore import Candidate, EvalReport, IslandView
+    from evoharness.evocore.novelty import NoveltyGate, hashing_embedding
+
+    base = "def solve(x):\n    return x + 1\n" + "# filler\n" * 200
+    existing = Candidate(
+        id="c1", code=base, generation=1, parent_id=None, island_idx=0,
+        operator="revise", report=EvalReport(fitness=1.0, passed=True),
+    )
+    island = IslandView(island_idx=0, candidates=[existing])
+    gate = NoveltyGate(hashing_embedding)   # identity is the default
+
+    from evoharness.evocore.novelty import novelty_text
+    same = novelty_text(existing.workspace, existing.code)
+    assert gate.check(same, island).accepted is False        # nothing new
+    assert gate.check(same + "\n\n\n", island).accepted is False  # whitespace
+    tweaked = same.replace("return x + 1", "return x + 2")
+    verdict = gate.check(tweaked, island)
+    assert verdict.accepted is True                          # a real edit
+    assert verdict.embedding is not None    # still recorded as liveness proof
+
+    # the fuzzy path would have rejected that same one-token edit
+    fuzzy = NoveltyGate(hashing_embedding, mode="similarity")
+    existing.embedding = hashing_embedding(same)
+    assert fuzzy.check(tweaked, island).accepted is False
