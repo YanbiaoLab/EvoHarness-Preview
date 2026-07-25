@@ -12,6 +12,14 @@ def _equational_stub():
 
 
 def _modmul():
+    # Task packages live under experiments/ and are imported by bare name.
+    import sys
+    from pathlib import Path
+
+    experiments = str(Path(__file__).resolve().parents[1] / "experiments")
+    if experiments not in sys.path:
+        sys.path.insert(0, experiments)
+
     from modmul.task import make_task  # lazy: pulls torch/modchallenge
 
     return make_task()

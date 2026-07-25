@@ -1,7 +1,11 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
+# Task packages live under experiments/ but are imported by their bare name
+# (`modmul.grade`), matching pyproject's `include = [..., "modmul*"]`.
+sys.path.insert(1, str(_ROOT / "experiments"))
 
 from evoharness.evocore import Candidate, EvalReport  # noqa: E402
 

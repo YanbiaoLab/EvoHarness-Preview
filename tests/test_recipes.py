@@ -18,7 +18,7 @@ from evoharness.evocore import (
 from evoharness.evocore.agent import ConversationalAgentBackend
 from evoharness.evoplus.config import PlusConfig
 from recipes import load_experiment_config
-from recipes.common import RecipeContext
+from recipes.common import RecipeContext, assemble
 from tasks import get_task
 from experiments.run_evolution import main as run_evolution
 
@@ -61,6 +61,9 @@ def _ctx(tmp_path, task, generations=8, seed=3):
             num_generations=generations,
             operators=["rewrite"],
             operator_probs=[1.0],
+            # demo mock transports emit duplicate programs by design;
+            # the novelty gate would legitimately reject them all.
+            novelty_enabled=False,
             seed=seed,
             task_sys_msg=task.task_sys_msg,
         ),
@@ -355,3 +358,33 @@ def test_e3r_extras_expose_stores(tmp_path):
     assert ctx.extras["experience_store"].entries
     assert (tmp_path / "experience.jsonl").exists()
     assert (tmp_path / "metrics.jsonl").exists()
+
+
+def test_assemble_mounts_the_novelty_gate(tmp_path):
+    """Regression: assemble() used to leave novelty_gate unset, so no
+    candidate carried an embedding, novelty_rejections was pinned at 0 and
+    the rejected_novelty experience channel could never fire."""
+    import numpy as np
+
+    from evoharness.evocore.novelty import (
+        NoveltyGate,
+        cosine_similarity,
+        hashing_embedding,
+    )
+
+    task = get_task("demo_counter")
+    ctx = _ctx(tmp_path, task, generations=1)
+    ctx.search.novelty_enabled = True   # _ctx disables it for mock duplicates
+    loop = assemble(ctx)
+    assert isinstance(loop.novelty_gate, NoveltyGate)
+    assert loop.novelty_gate.threshold == ctx.search.similarity_threshold
+
+    # deterministic across processes (crc32, not salted str hashing)
+    a = hashing_embedding("def solve(x):\n    return x + 1\n")
+    assert a == hashing_embedding("def solve(x):\n    return x + 1\n")
+    assert hashing_embedding("") == [0.0] * 512
+    near = hashing_embedding("def solve(x):\n    return x + 2\n")
+    far = hashing_embedding("class Wholly:\n    different = 'code'\n" * 4)
+    assert cosine_similarity(np.array(a), np.array(near)) > cosine_similarity(
+        np.array(a), np.array(far)
+    )

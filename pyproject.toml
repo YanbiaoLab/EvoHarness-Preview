@@ -22,3 +22,6 @@ include = ["evoharness*", "modmul*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: minutes-long calibration runs (deselect with -m 'not slow')",
+]

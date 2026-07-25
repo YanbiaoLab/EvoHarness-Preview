@@ -84,6 +84,13 @@ class AgentTool(Protocol):
         ...
 
 
+# How long a tool's result stays worth resending. Every uncompacted result
+# is re-sent on every later turn, so a file dump read once is paid for many
+# times, while a failure digest earns its keep for the whole session.
+RETENTION_EPHEMERAL = "ephemeral"  # superseded once acted on (reads, greps)
+RETENTION_DURABLE = "durable"      # diagnostic context worth carrying
+
+
 def make_tool_result(
     call_id: str,
     payload: dict[str, object],
@@ -164,6 +171,20 @@ class AgentToolRegistry:
     @property
     def definitions(self) -> tuple[LLMToolDefinition, ...]:
         return tuple(tool.definition for tool in self.tools)
+
+    def retention_of(self, name: str) -> str:
+        """Retention class of a tool's results. Unknown or undeclared tools
+        are treated as durable: dropping context must never be the default
+        for something the runtime does not understand."""
+        tool = self._by_name.get(name)
+        if tool is None:
+            return RETENTION_DURABLE
+        value = getattr(tool, "retention", RETENTION_DURABLE)
+        return (
+            RETENTION_EPHEMERAL
+            if value == RETENTION_EPHEMERAL
+            else RETENTION_DURABLE
+        )
 
     def is_concurrency_safe(
         self,

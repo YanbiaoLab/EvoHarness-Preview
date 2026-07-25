@@ -272,7 +272,11 @@ def run_experiment(
     )
     population = PopulationConfig(
         num_islands=2,
-        archive_size=spec.optimizer_budget.max_candidates,
+        # An archive that holds every candidate is not an archive: with
+        # archive_size == max_candidates the elite filter kept regressions
+        # too, so "archive inspiration" degenerated into "random ancestor".
+        # Keep roughly the top third (floor 4 so small runs still have peers).
+        archive_size=max(4, spec.optimizer_budget.max_candidates // 3),
     )
     proposal = ProposalConfig(
         mode="agentic",

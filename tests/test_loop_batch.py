@@ -30,6 +30,9 @@ def make_ctx(tmp_path, task, grader, batch):
         search=SearchConfig(
             num_generations=3, operators=["rewrite"], operator_probs=[1.0],
             seed=3, eval_batch_size=batch, task_sys_msg=task.task_sys_msg,
+            # demo mock transports emit duplicate programs by design;
+            # the novelty gate would legitimately reject them all.
+            novelty_enabled=False,
         ),
         population=PopulationConfig(num_islands=1),
         plus=PlusConfig(),

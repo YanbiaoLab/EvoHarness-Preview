@@ -10,7 +10,12 @@ from typing import Iterable
 
 from ...llm import LLMToolCall, LLMToolDefinition, LLMToolResult
 from .run import Runner, RunnerResult
-from .base import AgentToolContext, AgentToolError, make_tool_result
+from .base import (
+    RETENTION_EPHEMERAL,
+    AgentToolContext,
+    AgentToolError,
+    make_tool_result,
+)
 
 
 _VCS_DIRECTORIES = frozenset({".git", ".hg", ".svn", ".bzr", ".jj"})
@@ -246,6 +251,9 @@ def _atomic_write(path: Path, content: str, max_write_bytes: int) -> int:
 class WorkspaceReadTool:
     """Read a bounded line range from one UTF-8 workspace file."""
 
+    # File dumps go stale as soon as the agent acts on them.
+    retention = RETENTION_EPHEMERAL
+
     definition = LLMToolDefinition(
         name="workspace_read",
         description=(
@@ -328,6 +336,8 @@ class WorkspaceReadTool:
 class WorkspaceGlobTool:
     """Find workspace files by glob pattern with deterministic pagination."""
 
+    retention = RETENTION_EPHEMERAL
+
     definition = LLMToolDefinition(
         name="workspace_glob",
         description=(
@@ -402,6 +412,8 @@ class WorkspaceGlobTool:
 
 class WorkspaceGrepTool:
     """Search workspace text with an injected, timeout-bounded ripgrep runner."""
+
+    retention = RETENTION_EPHEMERAL
 
     definition = LLMToolDefinition(
         name="workspace_grep",

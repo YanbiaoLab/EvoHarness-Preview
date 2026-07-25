@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,6 +30,45 @@ class GateVerdict:
     max_similarity: float = 0.0
     most_similar_id: str | None = None
     judged: bool = False
+
+
+def hashing_embedding(text: str, dims: int = 512, ngram: int = 5) -> list[float]:
+    """Provider-free character-n-gram hashing embedding.
+
+    Upstream embeds with a paid model. At the 0.99 similarity threshold the
+    gate only needs to recognise near-identical programs, which n-gram
+    overlap captures well — so the default gate costs nothing and works
+    offline. Swap in a real embedder when semantic novelty matters.
+    """
+    vec = np.zeros(dims, dtype=float)
+    normalized = " ".join(text.split())
+    if not normalized:
+        return [0.0] * dims
+    for i in range(max(1, len(normalized) - ngram + 1)):
+        chunk = normalized[i : i + ngram]
+        # crc32, not hash(): str hashing is salted per process, which would
+        # make embeddings persisted before a resume incomparable after it.
+        vec[zlib.crc32(chunk.encode("utf-8")) % dims] += 1.0
+    norm = float(np.linalg.norm(vec))
+    return list(vec / norm) if norm else list(vec)
+
+
+def novelty_text(workspace, fallback: str) -> str:
+    """The text the gate should judge: the WHOLE workspace, not main_text.
+
+    Multi-file candidates often mutate a non-main file (IMO edits live in
+    prompts.py while solver.py never moves), so judging main_text alone
+    scored 45/55 real sibling pairs above the 0.99 threshold — the gate
+    would have rejected ~82% of proposals. Over the same candidates the
+    whole-workspace rendering puts only 4/55 pairs above it.
+    """
+    try:
+        texts = workspace.texts()
+    except Exception:
+        return fallback
+    if not texts:
+        return fallback
+    return "\n".join(f"# {path}\n{texts[path]}" for path in sorted(texts))
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

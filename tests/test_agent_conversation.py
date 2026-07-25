@@ -25,7 +25,11 @@ from evoharness.evocore import (
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import AgentToolRegistry, make_tool_result
+from evoharness.evocore.agent import (
+    RETENTION_EPHEMERAL,
+    AgentToolRegistry,
+    make_tool_result,
+)
 
 
 class QueueTransport:
@@ -127,6 +131,12 @@ class LargeResultTool(RecordingTool):
             call.call_id,
             {"ok": True, "label": label, "payload": label * 120},
         )
+
+
+class EphemeralResultTool(LargeResultTool):
+    """Same payload, but declared as expiring on use (like workspace_read)."""
+
+    retention = RETENTION_EPHEMERAL
 
 
 def make_parent():
@@ -895,3 +905,59 @@ def test_event_sink_failure_stops_before_next_model_turn(tmp_path):
         AgentEventKind.TOOL_RESULT,
         AgentEventKind.TERMINATION,
     ]
+
+
+def _tiered_compaction_backend(max_input_tokens):
+    """Two large results (one expiring, one diagnostic) plus a recent one."""
+    calls = (
+        LLMToolCall("call-read", "record_ephemeral", {"label": "old"}),
+        LLMToolCall("call-diag", "record", {"label": "diag"}),
+        LLMToolCall("call-recent", "record_ephemeral", {"label": "new"}),
+    )
+    transport = QueueTransport(
+        LLMResponse(
+            "",
+            "model",
+            tool_calls=calls,
+            stop_reason=LLMStopReason.TOOL_CALLS,
+        ),
+        LLMResponse("done", "model"),
+    )
+    ephemeral_tool = EphemeralResultTool()
+    ephemeral_tool.definition = replace(
+        ephemeral_tool.definition, name="record_ephemeral"
+    )
+    return make_backend(
+        transport,
+        estimator=ContentEstimator(),
+        registry=AgentToolRegistry((LargeResultTool(), ephemeral_tool)),
+        max_input_tokens=max_input_tokens,
+        recent_tool_results_to_keep=1,
+    )
+
+
+def test_compaction_holds_off_until_context_pressure(tmp_path):
+    """Rewriting history drops the provider prompt cache, so a roomy
+    session must not trickle one compaction per turn."""
+    backend = _tiered_compaction_backend(10_000_000)
+
+    result = backend.run(make_request(tmp_path))
+    results = backend._sessions.get(result.session_id).messages[3].tool_results
+
+    assert result.termination is AgentTermination.COMPLETED
+    assert all('"compacted":true' not in item.content for item in results)
+
+
+def test_pressure_compaction_drops_only_expiring_results(tmp_path):
+    """Past the trigger ratio (but below the hard ceiling) the stale tail is
+    cleared in bulk — yet only results whose value expires on use."""
+    backend = _tiered_compaction_backend(1_400)
+
+    result = backend.run(make_request(tmp_path))
+    results = backend._sessions.get(result.session_id).messages[3].tool_results
+    by_id = {item.call_id: item.content for item in results}
+
+    assert result.termination is AgentTermination.COMPLETED  # never aborts
+    assert '"compacted":true' in by_id["call-read"]      # expiring, trimmed
+    assert '"compacted":true' not in by_id["call-diag"]  # diagnostic, kept
+    assert '"compacted":true' not in by_id["call-recent"]  # keep window

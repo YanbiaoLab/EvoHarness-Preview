@@ -43,6 +43,7 @@ from evoharness.evocore.agent import (
     make_default_agent_tools,
 )
 from evoharness.evocore.interfaces import BudgetLike, Grader
+from evoharness.evocore.novelty import NoveltyGate, hashing_embedding
 from evoharness.evocore.preflight import PreflightValidator
 from evoharness.evoguard import Sandbox
 from evoharness.evoplus.config import PlusConfig
@@ -141,6 +142,7 @@ def _build_proposer(
         recent_tool_results_to_keep=(
             ctx.proposal.recent_tool_results_to_keep
         ),
+        compact_trigger_ratio=ctx.proposal.compact_trigger_ratio,
     )
     if mode == "conversational":
         backend = ConversationalAgentBackend(
@@ -171,6 +173,7 @@ def _build_proposer(
         "recent_tool_results_to_keep": (
             ctx.proposal.recent_tool_results_to_keep
         ),
+        "compact_trigger_ratio": ctx.proposal.compact_trigger_ratio,
         "tools": [definition.name for definition in registry.definitions],
         "preflight_validators": [
             validator.name for validator in ctx.preflight_validators
@@ -239,6 +242,15 @@ def assemble(
     weight_policies.append(LineageVetoPolicy(book, store))
     ctx.extras["directive_book"] = book
     model_router = StaticRouter(ctx.search.llm_models)
+    # Upstream's rejection sampling was never actually mounted here: with no
+    # gate, candidates carried no embeddings, novelty_rejections was pinned
+    # at 0, and the rejected_novelty experience channel could never fire.
+    # The default embedder is provider-free (see hashing_embedding).
+    novelty_gate = (
+        NoveltyGate(hashing_embedding, threshold=ctx.search.similarity_threshold)
+        if ctx.search.novelty_enabled
+        else None
+    )
     proposer, hybrid_agent_proposer = _build_proposer(ctx, model_router)
     assembly_fingerprint = {
         "contributors": [
@@ -295,6 +307,7 @@ def assemble(
         parent_selector=make_parent_selector(ctx.population, weight_policies),
         inspiration_selector=InspirationSelector(ctx.population),
         model_router=model_router,
+        novelty_gate=novelty_gate,
         observers=observers or [],
         budget=ctx.budget,
         workdir=ctx.run_dir,

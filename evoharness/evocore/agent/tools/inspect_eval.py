@@ -60,7 +60,11 @@ class InspectParentEvalTool:
         sanitizer: TraceSanitizer,
         *,
         audience: str = "optimizer",
-        max_field_chars: int = 6_000,
+        # Every item result stays in the conversation and is resent on each
+        # subsequent turn, so a generous per-field cap is paid many times
+        # over (live run: 2.1M prompt tokens across 9 sessions). Keep the
+        # full-item view useful but bounded; use failed_digest for breadth.
+        max_field_chars: int = 2_000,
         digest_field_chars: int = 300,
     ):
         if max_field_chars < 32:

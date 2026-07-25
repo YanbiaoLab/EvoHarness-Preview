@@ -5,6 +5,8 @@ concrete tools (whose transitive imports reach back into this package).
 """
 
 from .base import (
+    RETENTION_DURABLE,
+    RETENTION_EPHEMERAL,
     AgentTool,
     AgentToolContext,
     AgentToolError,
@@ -27,6 +29,8 @@ from .preflight import RunPreflightTool
 from .inspect_eval import InspectParentEvalTool
 
 __all__ = [
+    "RETENTION_DURABLE",
+    "RETENTION_EPHEMERAL",
     "AgentTool",
     "AgentToolContext",
     "AgentToolError",

@@ -25,7 +25,13 @@ class ProposalConfig:
     max_repair_rounds: int = 3
     max_input_tokens: int = 32_768
     max_parallel_tools: int = 4
-    recent_tool_results_to_keep: int = 8
+    # Mirrors the validated keep-recent-5 window used by production
+    # tool-using agents; older results of expiring tools are cleared.
+    recent_tool_results_to_keep: int = 5
+    # Fraction of max_input_tokens at which stale results are cleared in
+    # bulk. Compaction rewrites history and drops the provider prompt
+    # cache, so it must be rare and decisive rather than per-turn.
+    compact_trigger_ratio: float = 0.6
     hybrid_agent_probability: float = 0.1
     hybrid_stagnation_generations: int = 5
 
@@ -132,6 +138,10 @@ class SearchConfig:
     max_novelty_attempts: int = 3
     similarity_threshold: float = 0.99
     novelty_llm_judge: bool = False  # deviation: simplified, off by default
+    # Upstream-parity default. Turn OFF for harnesses whose proposer emits
+    # duplicate programs by construction (deterministic mock transports),
+    # where every proposal would be a legitimate near-duplicate rejection.
+    novelty_enabled: bool = True
     repair_enabled: bool = True
     # Throttle for the repair-first policy: with a failed candidate pending,
     # repair is chosen with this probability, else a normal proposal proceeds.

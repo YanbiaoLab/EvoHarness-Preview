@@ -97,7 +97,9 @@ class ScorableTask:
     task_sys_msg: str = ""
     transport: LLMTransport | None = None
     research_brief: str = ""
-    extra_seeds: list[str] = field(default_factory=list)
+    # Island seeds: a whole Workspace (multi-file family) or a bare main-file
+    # string, which the loop lifts into the primary workspace's kind.
+    extra_seeds: list[str | Workspace] = field(default_factory=list)
     preflight_validators: tuple[PreflightValidator, ...] = ()
     runner: Runner | None = None
 
@@ -110,7 +112,7 @@ class ScorableTask:
         task_sys_msg: str,
         transport: LLMTransport | None,
         research_brief: str,
-        extra_seeds: Sequence[str] | None,
+        extra_seeds: Sequence[str | Workspace] | None,
         preflight_validators: Sequence[PreflightValidator],
         runner: Runner | None,
     ) -> "ScorableTask":
@@ -137,7 +139,7 @@ class ScorableTask:
         task_sys_msg: str = "",
         transport: LLMTransport | None = None,
         research_brief: str = "",
-        extra_seeds: Sequence[str] | None = None,
+        extra_seeds: Sequence[str | Workspace] | None = None,
         preflight_validators: Sequence[PreflightValidator] = (),
         runner: Runner | None = None,
     ) -> "ScorableTask":
@@ -167,7 +169,7 @@ class ScorableTask:
         task_sys_msg: str = "",
         transport: LLMTransport | None = None,
         research_brief: str = "",
-        extra_seeds: Sequence[str] | None = None,
+        extra_seeds: Sequence[str | Workspace] | None = None,
         preflight_validators: Sequence[PreflightValidator] = (),
         runner: Runner | None = None,
     ) -> "ScorableTask":

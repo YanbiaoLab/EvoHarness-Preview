@@ -37,7 +37,7 @@ from .interfaces import (
 )
 from .llm import LLMClient
 from .metrics import MetricLog
-from .novelty import NoveltyGate
+from .novelty import NoveltyGate, novelty_text
 from .operators import PromptBuilder, sample_operator
 from .population import Candidate, PopulationStore
 from .proposer import (
@@ -187,11 +187,26 @@ class SearchLoop:
 
     # -- seeding ---------------------------------------------------------------
 
+    @staticmethod
+    def _as_seed_workspace(
+        entry: str | Workspace,
+        initial_workspace: Workspace | None,
+    ) -> Workspace | None:
+        """Normalize one extra seed to a Workspace (None = legacy raw string).
+
+        Returning None for the single-file legacy path keeps old run.db rows
+        byte-identical: `code` stays the raw program text."""
+        if not isinstance(entry, str):
+            return entry
+        if initial_workspace is None or initial_workspace.kind == "file":
+            return None
+        return initial_workspace.with_main_text(entry)
+
     def _seed(
         self,
         initial_code: str,
         report: RunReport,
-        extra_seeds: list[str] | None = None,
+        extra_seeds: list[str | Workspace] | None = None,
         initial_workspace: Workspace | None = None,
     ) -> None:
         seed_code = (
@@ -220,10 +235,21 @@ class SearchLoop:
         # Heterogeneous island seeding: each extra seed lands on its own
         # island (alongside the primary copy — selection arbitrates). A failed
         # extra seed does not kill the run: every island still has the primary.
-        for i, code in enumerate(extra_seeds or []):
+        # An extra seed may be a whole Workspace (multi-file genome) or a bare
+        # main-file string; a string is lifted into the primary's workspace so
+        # `workspace_kind` never disagrees with what `code` actually holds.
+        for i, entry in enumerate(extra_seeds or []):
+            variant_ws = self._as_seed_workspace(entry, initial_workspace)
             variant = Candidate(
                 id=Candidate.new_id(),
-                code=code,
+                code=(
+                    entry
+                    if variant_ws is None
+                    else variant_ws.serialize()
+                ),
+                workspace_kind=(
+                    "file" if variant_ws is None else variant_ws.kind
+                ),
                 generation=0,
                 parent_id=None,
                 island_idx=(i + 1) % self.pop_cfg.num_islands,
@@ -378,7 +404,14 @@ class SearchLoop:
 
             embedding = None
             if self.novelty_gate is not None:
-                verdict = self.novelty_gate.check(proposal.code, island)
+                # Judge the whole workspace: a mutation that only touches a
+                # non-main file leaves main_text identical (see novelty_text).
+                verdict = self.novelty_gate.check(
+                    novelty_text(
+                        proposal.workspace or parent.workspace, proposal.code
+                    ),
+                    island,
+                )
                 if not verdict.accepted:
                     report.novelty_rejections += 1
                     self._notify_rejected(
@@ -509,7 +542,7 @@ class SearchLoop:
     def run(
         self,
         initial_code: str,
-        extra_seeds: list[str] | None = None,
+        extra_seeds: list[str | Workspace] | None = None,
         initial_workspace: Workspace | None = None,
     ) -> RunReport:
         report = RunReport()

@@ -31,7 +31,12 @@ from .contracts import (
     EventSink,
 )
 from .feedback import render_preflight_feedback
-from .tools import AgentToolContext, AgentToolRegistry, make_tool_error
+from .tools import (
+    RETENTION_EPHEMERAL,
+    AgentToolContext,
+    AgentToolRegistry,
+    make_tool_error,
+)
 
 
 _MAX_TOKENS_CONTINUATION = (
@@ -524,7 +529,8 @@ class NativeToolAgentBackend:
         max_parallel_tools: int = 4,
         clock: Callable[[], float] = monotonic,
         session_id_factory: Callable[[], str] = _new_session_id,
-        recent_tool_results_to_keep: int = 8,
+        recent_tool_results_to_keep: int = 5,
+        compact_trigger_ratio: float = 0.6,
     ):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("agent model must be non-empty")
@@ -555,7 +561,16 @@ class NativeToolAgentBackend:
             raise ValueError(
                 "recent_tool_results_to_keep must be a nonnegative integer"
             )
+        if not 0.0 < compact_trigger_ratio <= 1.0:
+            raise ValueError("compact_trigger_ratio must be in (0, 1]")
+
         self.recent_tool_results_to_keep = recent_tool_results_to_keep
+        # Rewriting history invalidates the provider's prompt-prefix cache
+        # from the earliest edited message onward, and cached input is
+        # billed at a fraction of fresh input. Trickling one compaction per
+        # turn therefore pays that penalty over and over; wait for real
+        # pressure, then clear the whole stale tail at once.
+        self.compact_trigger_ratio = compact_trigger_ratio
 
         self.client = client
         self.model = model
@@ -1319,7 +1334,11 @@ class NativeToolAgentBackend:
         run: _RunState,
     ) -> AgentSessionResult | None:
         estimated_before = self._estimate_input_tokens(state)
-        if estimated_before <= self.max_input_tokens:
+        over_budget = estimated_before > self.max_input_tokens
+        under_pressure = estimated_before > (
+            self.compact_trigger_ratio * self.max_input_tokens
+        )
+        if not over_budget and not under_pressure:
             return None
 
         locations: list[tuple[int, int, LLMToolResult]] = []
@@ -1336,6 +1355,34 @@ class NativeToolAgentBackend:
 
         keep = self.recent_tool_results_to_keep
         compactable = locations[:-keep] if keep else locations
+
+        # Compaction used to wait for the input ceiling, which a 20-turn
+        # session rarely reaches per request — yet every stale tool result
+        # is resent on every later turn, so the run pays for it repeatedly.
+        # Trim proactively, but only results whose value expires on use
+        # (file dumps); diagnostic results are surrendered solely under a
+        # genuine ceiling breach, and even then only after the ephemeral
+        # ones are gone.
+        tool_names = {
+            call.call_id: call.name
+            for message in state.messages
+            for call in message.tool_calls
+        }
+
+        def _is_ephemeral(location) -> bool:
+            name = tool_names.get(location[2].call_id, "")
+            return self.registry.retention_of(name) == RETENTION_EPHEMERAL
+
+        ephemeral = [loc for loc in compactable if _is_ephemeral(loc)]
+        if over_budget:
+            compactable = ephemeral + [
+                loc for loc in compactable if not _is_ephemeral(loc)
+            ]
+        else:
+            compactable = ephemeral
+
+        if not over_budget and not compactable:
+            return None
 
         if not compactable:
             return self._finish(
@@ -1371,8 +1418,13 @@ class NativeToolAgentBackend:
 
             compacted_call_ids.append(result.call_id)
             estimated_after = candidate_estimate
-            if estimated_after <= self.max_input_tokens:
+            # Under budget the goal is the whole stale tail, not just enough
+            # to clear a ceiling we are not touching.
+            if over_budget and estimated_after <= self.max_input_tokens:
                 break
+
+        if not compacted_call_ids and not over_budget:
+            return None
 
         if not compacted_call_ids:
             return self._finish(

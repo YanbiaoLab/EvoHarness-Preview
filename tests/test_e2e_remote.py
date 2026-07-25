@@ -106,6 +106,9 @@ def test_evolution_loop_over_remote_grader(remote, tmp_path):
             num_generations=8,
             operators=["rewrite"],
             operator_probs=[1.0],
+            # demo mock transports emit duplicate programs by design;
+            # the novelty gate would legitimately reject them all.
+            novelty_enabled=False,
             seed=3,
             task_sys_msg=task.task_sys_msg,
         ),

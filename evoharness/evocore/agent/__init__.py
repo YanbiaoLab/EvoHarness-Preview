@@ -23,6 +23,8 @@ from .transcript import (
     render_workspace_patch,
 )
 from .tools import (
+    RETENTION_DURABLE,
+    RETENTION_EPHEMERAL,
     AgentTool,
     AgentToolContext,
     AgentToolError,
@@ -61,6 +63,8 @@ def make_default_agent_tools(runner: Runner) -> tuple[AgentTool, ...]:
     )
 
 __all__ = [
+    "RETENTION_DURABLE",
+    "RETENTION_EPHEMERAL",
     "AgentBackend",
     "AgentEvent",
     "AgentEventKind",

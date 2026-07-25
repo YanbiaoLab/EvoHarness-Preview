@@ -28,6 +28,9 @@ def make_ctx(tmp_path, task, grader, islands=1, repair_probability=1.0):
         search=SearchConfig(
             num_generations=4, operators=["rewrite"], operator_probs=[1.0],
             seed=3, repair_probability=repair_probability,
+            # demo mock transports emit duplicate programs by design;
+            # the novelty gate would legitimately reject them all.
+            novelty_enabled=False,
             task_sys_msg=task.task_sys_msg,
         ),
         population=PopulationConfig(num_islands=islands),
@@ -60,6 +63,55 @@ def test_repair_probability_one_repairs(tmp_path):
     )
     report = loop.run(task.initial_code)
     assert "repair" in ops_history(report)        # parity behaviour intact
+
+
+def test_workspace_extra_seed_keeps_its_kind(tmp_path):
+    """Multi-file island seeds: `code` holds a serialized workspace, so
+    `workspace_kind` must say so — otherwise the store rebuilds the genome as
+    a single file and the seed's side files vanish."""
+    from evoharness.evocore.workspace import GitWorkspace
+
+    task = get_task("s8_multifile")
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, task.grader, islands=2)
+    )
+    variant = GitWorkspace(
+        base_files={**task.initial_workspace.base_files,
+                    "metadata.py": 'VERSION = "1"\n'},
+    )
+    loop.run(
+        task.initial_code,
+        extra_seeds=[variant],
+        initial_workspace=task.initial_workspace,
+    )
+
+    seeded = [c for c in loop.store.all_candidates() if c.island_idx == 1
+              and c.operator == "seed" and c.generation == 0]
+    assert seeded, "variant did not reach island 1"
+    variant_cand = seeded[-1]
+    assert variant_cand.workspace_kind == "git"
+    assert variant_cand.workspace.texts()["metadata.py"] == 'VERSION = "1"\n'
+
+
+def test_string_extra_seed_is_lifted_into_the_primary_workspace(tmp_path):
+    """A bare main-file string still works in multi-file mode: it is lifted
+    into the primary genome so the side files come along."""
+    task = get_task("s8_multifile")
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, task.grader, islands=2)
+    )
+    loop.run(
+        task.initial_code,
+        extra_seeds=["# variant main\n" + task.initial_code],
+        initial_workspace=task.initial_workspace,
+    )
+
+    seeded = [c for c in loop.store.all_candidates() if c.island_idx == 1
+              and c.operator == "seed" and c.generation == 0]
+    assert seeded
+    texts = seeded[-1].workspace.texts()
+    assert texts["main.py"].startswith("# variant main")
+    assert "math_ops.py" in texts            # side files survived the lift
 
 
 def test_extra_seeds_land_on_their_own_islands(tmp_path):
