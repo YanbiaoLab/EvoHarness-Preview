@@ -3,9 +3,33 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
+
+
+def code_version(root: Path | None = None) -> str:
+    """Commit the harness ran at, suffixed '+dirty' with uncommitted edits.
+
+    The protocol fingerprint pins the benchmark, not the engine. Mechanisms
+    changed six times across one day of runs (2026-07-24), and without this
+    a finished run cannot be attributed to the code that produced it —
+    which silently invalidates any comparison spanning a change.
+    """
+    cwd = Path(root or Path(__file__).resolve().parents[2])
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd, capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return f"{sha}+dirty" if dirty else sha
 
 
 @dataclass(frozen=True)
@@ -16,6 +40,7 @@ class RunManifest:
     protocol_fingerprint: str
     evolution_seed: int
     seed_sha256: str
+    code_version: str = "unknown"
     actual: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

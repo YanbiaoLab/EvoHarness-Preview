@@ -37,7 +37,7 @@ from .evaluation.contract import EvaluationBackend, EvaluationUnavailable
 from .evaluation.engine import AdmissionGate
 from .grade import make_grade_func
 from .protocol import BenchmarkSpec
-from .result import RunManifest
+from .result import RunManifest, code_version
 from .seed import seed_directory, seed_sha256
 from evoharness.evocore.artifacts import FileArtifactStore
 from evoharness.evocore.agent.tools import InspectParentEvalTool
@@ -376,6 +376,7 @@ def run_experiment(
         protocol_fingerprint=spec.fingerprint,
         evolution_seed=evolution_seed,
         seed_sha256=seed_sha256(spec.candidate),
+        code_version=code_version(),
         actual={
             "proposal": ctx.extras["proposal_manifest"],
             "experience_mode": experience_mode,

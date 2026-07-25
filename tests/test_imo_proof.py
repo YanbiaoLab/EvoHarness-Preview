@@ -829,3 +829,31 @@ def test_transport_rejects_reasoning_without_final_answer(monkeypatch):
 
     with pytest.raises(LLMProtocolError, match="without a final answer"):
         client.query("system", "user", "openai/MiniMax-M3")
+
+
+def test_manifest_records_the_code_version(tmp_path):
+    """The protocol fingerprint pins the benchmark, not the engine. Without
+    a code version a finished run cannot be attributed to the code that
+    produced it, which silently invalidates comparisons spanning a change."""
+    from experiments.imo_proof.result import code_version
+
+    version = code_version()
+    assert version == "unknown" or len(version.split("+")[0]) == 40
+
+    manifest = RunManifest(
+        schema_version=1,
+        run_id="r1",
+        experiment_id="e1",
+        protocol_fingerprint="f" * 64,
+        evolution_seed=0,
+        seed_sha256="a" * 64,
+        code_version=version,
+    )
+    manifest.write(tmp_path / "m.json")
+    assert RunManifest.load(tmp_path / "m.json").code_version == version
+
+    # older manifests without the field still load
+    raw = json.loads((tmp_path / "m.json").read_text())
+    del raw["code_version"]
+    (tmp_path / "old.json").write_text(json.dumps(raw))
+    assert RunManifest.load(tmp_path / "old.json").code_version == "unknown"
