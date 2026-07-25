@@ -157,6 +157,25 @@ def main(argv: list[str] | None = None) -> int:
         help="experience-injection arm (design §5): E3r=retrieval, "
         "E4a=retrieval+rejected, E5r=lessons, E5s=lessons+scratchpad",
     )
+    run.add_argument(
+        "--lesson-directive",
+        action="store_true",
+        help="promote the parent's own lesson into an explicit mutation "
+        "directive (probabilistic; requires a lessons arm to have effect)",
+    )
+    run.add_argument(
+        "--reflect-batch-size",
+        type=int,
+        default=4,
+        help="graded mutations per reflection batch (small runs need small "
+        "batches so lessons arrive early enough to matter)",
+    )
+    run.add_argument(
+        "--operator-bandit",
+        action="store_true",
+        help="adaptive operator scheduling: floor+softmax over decayed "
+        "per-operator fitness deltas instead of the static probabilities",
+    )
     args = parser.parse_args(argv)
 
     spec = BenchmarkSpec.load(args.spec)
@@ -215,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
         run_dir=args.run_dir,
         evolution_seed=args.seed,
         experience_mode=args.experience_mode,
+        lesson_directive=args.lesson_directive,
+        operator_bandit=args.operator_bandit,
+        reflect_batch_size=args.reflect_batch_size,
     )
     print(json.dumps(summary, indent=2))
     return 0

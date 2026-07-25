@@ -618,3 +618,63 @@ class ExperienceContributor:
         return (
             f"# Evolution cheatsheet (v{current.version})\n{current.text}"
         )
+
+
+class LessonDirectiveContributor:
+    """Implements PromptContributor (framework-evo backlog item 6: promote a
+    high-confidence lesson from passive context to the mutation's explicit
+    directive). Fires only when the parent's own creation lesson qualifies
+    (non-noise verdict, non-empty advice), and only with `probability` per
+    proposal — undirected mutations keep exploring. The draw is seeded by
+    (generation, parent) so reruns and checkpoints stay reproducible."""
+
+    def __init__(
+        self,
+        store: ExperienceStore,
+        probability: float = 0.5,
+        max_bytes: int = 700,
+    ):
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("probability must be in [0, 1]")
+        self.store = store
+        self.probability = probability
+        self.max_bytes = max_bytes
+
+    def contribute(self, ctx: MutationContext) -> str | None:
+        lesson = None
+        for e in self.store.entries:
+            if e.kind == "evaluated" and e.child_id == ctx.parent.id and e.lesson:
+                lesson = e.lesson
+                break
+        if not lesson:
+            return None
+        verdict = lesson.get("verdict")
+        advice = str(lesson.get("advice", "")).strip()
+        if verdict == "noise" or not advice:
+            return None
+        rng = random.Random(f"directive:{ctx.generation}:{ctx.parent.id}")
+        if rng.random() >= self.probability:
+            return None
+        if verdict == "regressed":
+            framing = (
+                "The edit that produced the current program HURT fitness"
+            )
+            action = "Apply the directive to repair this in the current mutation"
+        else:
+            framing = (
+                "The edit that produced the current program HELPED fitness"
+            )
+            action = (
+                "Continue in this direction with one meaningful variation "
+                "(do not repeat the same edit verbatim)"
+            )
+        why = str(lesson.get("why", "")).strip()
+        lines = [
+            "# Mutation directive (apply THIS in the current mutation)",
+            f"{framing}." + (f" Attribution: {why}" if why else ""),
+            f"Directive: {advice}",
+            f"{action}; keep unrelated parts of the program unchanged. "
+            "If the directive conflicts with what you observe, deviate and "
+            "say why in SUMMARY.",
+        ]
+        return "\n".join(lines)[: self.max_bytes]

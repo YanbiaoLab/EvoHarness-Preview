@@ -23,7 +23,9 @@ from evoharness.evoguard import BudgetMeter, Sandbox
 from evoharness.evoplus import (
     ExperienceContributor,
     ExperienceStore,
+    LessonDirectiveContributor,
     MutationReflector,
+    OperatorBandit,
 )
 from evoharness.evoplus.config import PlusConfig
 from recipes.common import RecipeContext, assemble
@@ -237,6 +239,9 @@ def run_experiment(
     run_dir: Path,
     evolution_seed: int,
     experience_mode: str = "lessons+scratchpad",
+    lesson_directive: bool = False,
+    operator_bandit: bool = False,
+    reflect_batch_size: int = 4,
 ) -> dict[str, object]:
     run_dir = Path(run_dir)
     if run_dir.exists() and any(run_dir.iterdir()):
@@ -302,11 +307,15 @@ def run_experiment(
     observers: list[object] = [experience_store]
     reflector = None
     if experience_mode.startswith("lessons"):
+        # batch_size=4 (not the module default 8): with max_candidates=15
+        # per spec, an 8-batch would produce its first lessons only after
+        # candidate ~9, leaving too few proposals to benefit.
         reflector = MutationReflector(
             experience_store,
             llm=optimizer_client,
             model=spec.optimizer.name,
             budget=budget,
+            batch_size=reflect_batch_size,
         )
         # Order is load-bearing: the store must record the graded entry
         # before the reflector counts pending work.
@@ -318,10 +327,22 @@ def run_experiment(
         model=spec.optimizer.name,
         reflector=reflector,
     )
+    contributors: list[object] = [experience_contributor]
+    if lesson_directive:
+        # Backlog item 6: promote the parent's own lesson from passive
+        # context to the mutation's explicit directive (probabilistic).
+        contributors.insert(0, LessonDirectiveContributor(experience_store))
+    selector = None
+    if operator_bandit:
+        # Backlog item 2: soft adaptive operator scheduling. Registered as
+        # an observer too so it settles rewards and rides the checkpoint.
+        selector = OperatorBandit(list(search.operators))
+        observers.append(selector)
     loop = assemble(
         ctx,
-        contributors=[experience_contributor],
+        contributors=contributors,
         observers=observers,
+        operator_selector=selector,
     )
     manifest = RunManifest(
         schema_version=1,
@@ -333,6 +354,9 @@ def run_experiment(
         actual={
             "proposal": ctx.extras["proposal_manifest"],
             "experience_mode": experience_mode,
+            "lesson_directive": lesson_directive,
+            "operator_bandit": operator_bandit,
+            "reflect_batch_size": reflect_batch_size,
         },
     )
     manifest.write(run_dir / "experiment_manifest.json")

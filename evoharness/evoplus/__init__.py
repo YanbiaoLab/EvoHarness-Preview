@@ -1,6 +1,7 @@
 """evoplus: EvoHarness research extensions (C1 feedback, C2 behavior, C3
 experience), plugged into evocore via its extension interfaces."""
 
+from .bandit import OperatorBandit
 from .behavior import BehavioralNoveltyPolicy, CoverageStats, SignatureRecorder
 from .brief import StaticBriefContributor
 from .directives import (
@@ -15,6 +16,7 @@ from .experience import (
     ExperienceContributor,
     ExperienceEntry,
     ExperienceStore,
+    LessonDirectiveContributor,
 )
 from .feedback import (
     BehaviorSignature,
@@ -36,8 +38,10 @@ __all__ = [
     "ExperienceStore",
     "FeedbackContributor",
     "HumanDirectiveContributor",
+    "LessonDirectiveContributor",
     "LineageVetoPolicy",
     "MutationReflector",
+    "OperatorBandit",
     "append_directive",
     "ItemResult",
     "SignatureRecorder",

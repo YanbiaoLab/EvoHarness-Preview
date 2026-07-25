@@ -213,6 +213,7 @@ def assemble(
     contributors: list | None = None,
     observers: list | None = None,
     weight_policies: list | None = None,
+    operator_selector: object | None = None,
 ) -> SearchLoop:
     """One canonical wiring; recipes differ only in the plugin lists.
 
@@ -305,4 +306,5 @@ def assemble(
             ctx.proposal,
             assembly_fingerprint,
         ),
+        operator_selector=operator_selector,
     )

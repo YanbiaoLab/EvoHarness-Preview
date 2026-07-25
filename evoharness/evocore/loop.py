@@ -32,6 +32,7 @@ from .interfaces import (
     LoopObserver,
     MutationContext,
     NullBudget,
+    OperatorSelector,
     RejectionEvent,
 )
 from .llm import LLMClient
@@ -88,6 +89,7 @@ class SearchLoop:
         proposer: Proposer | None = None,
         proposal_selector: HybridProposalSelector | None = None,
         checkpoint_configs: tuple[object, ...] = (),
+        operator_selector: OperatorSelector | None = None,
     ):
         self.cfg = cfg
         self.pop_cfg = pop_cfg
@@ -113,6 +115,7 @@ class SearchLoop:
             max_resamples=cfg.max_op_resamples,
         )
         self.proposal_selector = proposal_selector
+        self.operator_selector = operator_selector
 
     # -- checkpoint / resume -----------------------------------------------------
 
@@ -317,11 +320,15 @@ class SearchLoop:
                 inspirations = self.inspiration_selector.sample(
                     parent, self.store, self.rng
                 )
-                operator = sample_operator(
-                    self.cfg,
-                    has_inspirations=bool(inspirations[0] or inspirations[1]),
-                    rng=self.rng,
-                )
+                has_insp = bool(inspirations[0] or inspirations[1])
+                if self.operator_selector is not None:
+                    operator = self.operator_selector.sample_operator(
+                        has_insp, self.rng
+                    )
+                else:
+                    operator = sample_operator(
+                        self.cfg, has_inspirations=has_insp, rng=self.rng
+                    )
                 ctx = MutationContext(
                     parent=parent,
                     archive_inspirations=inspirations[0],

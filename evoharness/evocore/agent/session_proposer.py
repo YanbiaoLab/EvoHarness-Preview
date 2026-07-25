@@ -417,6 +417,22 @@ class _ProposalResources:
         return first_error
 
 
+def _budget_note(limits: AgentSessionLimits) -> str:
+    """Turn-budget awareness for the system prompt. Smoke-run postmortem:
+    deterministic sessions burned 11/12 turns on per-item trace inspection
+    and never edited a file; the agent must know the ceiling it is under."""
+    return (
+        "\n\n# Session budget\n"
+        f"You have at most {limits.max_turns} turns and "
+        f"{limits.max_tool_calls} tool calls; every tool call costs one "
+        "turn. Budget them: spend only the first few turns inspecting "
+        "evaluation results (prefer batch/digest tool actions over reading "
+        "items one by one), then use the remaining turns to read and EDIT "
+        "the workspace. Always reserve enough turns to complete your edits "
+        "and the final TITLE/SUMMARY response."
+    )
+
+
 class AgentSessionProposer(Proposer):
     """Run an agent session until its workspace passes final preflight."""
 
@@ -480,6 +496,7 @@ class AgentSessionProposer(Proposer):
         if not isinstance(user, str) or not user.strip():
             raise ValueError("user prompt must be non-empty")
 
+        system = system + _budget_note(self.limits)
         usage = _ProposalUsage()
         started_at = self.clock()
         deadline = started_at + self.limits.timeout_s

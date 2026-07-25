@@ -81,6 +81,15 @@ class SamplingWeightPolicy(Protocol):
 
 
 @runtime_checkable
+class OperatorSelector(Protocol):
+    """Optional replacement for the static sample_operator draw. Implemented
+    by evoplus (e.g. OperatorBandit); SearchLoop falls back to the fixed
+    config probabilities when none is supplied."""
+
+    def sample_operator(self, has_inspirations: bool, rng: object) -> str: ...
+
+
+@runtime_checkable
 class BudgetLike(Protocol):
     """Minimal budget interface; evoguard.BudgetMeter satisfies it."""
 

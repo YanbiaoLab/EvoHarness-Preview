@@ -82,3 +82,34 @@ def test_unknown_item_and_missing_trace_are_tool_errors(tmp_path):
     )
     with pytest.raises(AgentToolError):
         tool.invoke(_call("summary"), _ctx(tmp_path, orphan))
+
+
+def test_failed_digest_returns_all_failures_in_one_call(tmp_path):
+    store = FileArtifactStore(tmp_path / "artifacts")
+    long_critique = "细节冗长的批语 " * 100  # far beyond digest budget
+    ref = store.put("pcand", {
+        "summary": {"points_percentage": 0.25},
+        "items": [
+            {"item_id": "P1", "passed": True, "proof": "ok"},
+            {"item_id": "P2", "passed": False, "proof": "bad",
+             "grader_critique": long_critique, "solution": "REFERENCE"},
+            {"item_id": "P3", "passed": False, "proof": "worse",
+             "grader_critique": "短批语"},
+        ],
+    })
+    parent = Candidate(
+        id="pcand", code="x = 1", generation=0, parent_id=None,
+        island_idx=0, operator="seed",
+        report=EvalReport(fitness=0.25, passed=True, artifacts_ref=ref.encode()),
+    )
+    tool = InspectParentEvalTool(store, _sanitizer(), digest_field_chars=120)
+    out = json.loads(
+        tool.invoke(_call("failed_digest"), _ctx(tmp_path, parent)).content
+    )
+    assert out["failed_count"] == 2
+    ids = [d["item_id"] for d in out["failed_items"]]
+    assert ids == ["P2", "P3"]                      # passing P1 excluded
+    p2 = out["failed_items"][0]
+    assert len(p2["grader_critique"]) <= 140        # truncated to digest budget
+    assert "solution" not in p2                     # sanitizer still applies
+    assert out["failed_items"][1]["grader_critique"] == "短批语"

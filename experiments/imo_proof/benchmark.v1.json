@@ -40,7 +40,7 @@
     "max_candidates": 15,
     "max_tool_calls_per_candidate": 40,
     "max_total_cost_usd": null,
-    "max_turns_per_candidate": 12,
+    "max_turns_per_candidate": 20,
     "timeout_s_per_candidate": 3000.0
   },
   "schema_version": 1,

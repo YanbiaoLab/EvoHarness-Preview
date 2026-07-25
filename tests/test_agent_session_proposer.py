@@ -621,3 +621,19 @@ def test_git_workspace_captures_multi_file_agent_changes(tmp_path):
         "helper.py": "value = 1\n",
         "main.py": "from helper import value\nprint(value)\n",
     }
+
+
+def test_system_prompt_carries_session_budget_note(tmp_path):
+    captured = {}
+
+    def capture(request):
+        captured["system"] = request.system
+        (request.workdir / "main.py").write_text("x = 2\n")
+        return session_result()
+
+    result = propose(make_proposer(tmp_path, QueueBackend(capture)))
+    assert result.ok
+    assert "# Session budget" in captured["system"]
+    assert "at most 6 turns" in captured["system"]  # from the fixture limits
+    # the original system content is preserved ahead of the note
+    assert captured["system"].startswith("You are a coding agent.")

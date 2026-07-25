@@ -597,3 +597,76 @@ def test_reflector_triggers_consolidation_and_charges_budget(tmp_path):
     fresh = MutationReflector(xs, llm, budget=budget)
     fresh.set_state(reflector.state())
     assert fresh.consolidated_at == 2
+
+
+# -- OperatorBandit + LessonDirective (backlog items 2 & 6) -----------------------
+
+def test_operator_bandit_shifts_share_but_keeps_floor():
+    from evoharness.evoplus import OperatorBandit
+
+    bandit = OperatorBandit(["diff", "full", "recombine"], floor=0.1)
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 1.0))
+    # "full" keeps winning, "diff" keeps losing
+    for i in range(6):
+        good = make_candidate(f"g{i}", 1.3, parent_id="p", generation=i + 1)
+        good.operator = "full"
+        bandit.on_candidate_graded(good, pop)
+        bad = make_candidate(f"b{i}", 0.8, parent_id="p", generation=i + 1)
+        bad.operator = "diff"
+        bandit.on_candidate_graded(bad, pop)
+    ops, probs = bandit.probabilities(has_inspirations=True)
+    by_op = dict(zip(ops, probs))
+    assert by_op["full"] > by_op["diff"]          # winner gains share
+    assert all(p >= 0.1 - 1e-9 for p in probs)    # loser never starved
+    assert abs(sum(probs) - 1.0) < 1e-9
+    # recombine excluded without inspirations, probs renormalized
+    ops2, probs2 = bandit.probabilities(has_inspirations=False)
+    assert "recombine" not in ops2
+    assert abs(sum(probs2) - 1.0) < 1e-9
+
+
+def test_operator_bandit_sampling_and_state_roundtrip():
+    from evoharness.evoplus import OperatorBandit
+
+    bandit = OperatorBandit(["diff", "full"])
+    bandit.ema["full"] = 0.4
+    bandit.n["full"] = 3
+    rng = np.random.default_rng(0)
+    draws = [bandit.sample_operator(True, rng) for _ in range(200)]
+    assert draws.count("full") > draws.count("diff")
+    fresh = OperatorBandit(["diff", "full"])
+    fresh.set_state(bandit.state())
+    assert fresh.ema == bandit.ema and fresh.n == bandit.n
+    # seed/no-parent candidates are ignored, unknown operators too
+    pop = PopulationStore(PopulationConfig())
+    seed = make_candidate("s", 1.0)
+    seed.operator = "seed"
+    bandit.on_candidate_graded(seed, pop)
+    assert bandit.n == {"diff": 0, "full": 3}
+
+
+def test_lesson_directive_contributor(tmp_path):
+    from evoharness.evoplus import LessonDirectiveContributor
+
+    pop, xs = _lessoned_store(tmp_path)  # w: improved, l: regressed lessons
+    always = LessonDirectiveContributor(xs, probability=1.0)
+    never = LessonDirectiveContributor(xs, probability=0.0)
+
+    # parent l -> its creation lesson is regressed -> repair framing
+    parent_l = make_candidate("l", 0.5)
+    section = always.contribute(MutationContext(parent_l, [], [], "revise", 5))
+    assert "Mutation directive" in section
+    assert "HURT fitness" in section
+    assert "avoid raising temperature blindly" in section
+    # parent w -> improved lesson -> continue-direction framing
+    parent_w = make_candidate("w", 1.5)
+    section_w = always.contribute(MutationContext(parent_w, [], [], "revise", 5))
+    assert "HELPED fitness" in section_w and "variation" in section_w
+    # probability 0 never fires; parent without a lesson never fires
+    assert never.contribute(MutationContext(parent_l, [], [], "revise", 5)) is None
+    parent_p = make_candidate("p", 1.0)
+    assert always.contribute(MutationContext(parent_p, [], [], "revise", 5)) is None
+    # noise lessons are never promoted to directives
+    xs.attach_lesson("l", {"verdict": "noise", "why": "", "advice": "x", "tags": []})
+    assert always.contribute(MutationContext(parent_l, [], [], "revise", 5)) is None

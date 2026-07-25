@@ -691,9 +691,13 @@ def test_run_experiment_experience_mode_arm_is_recorded(tmp_path):
         run_dir=tmp_path / "run",
         evolution_seed=0,
         experience_mode="retrieval",
+        lesson_directive=True,
+        operator_bandit=True,
     )
     manifest = RunManifest.load(tmp_path / "run" / "experiment_manifest.json")
     assert manifest.actual["experience_mode"] == "retrieval"
+    assert manifest.actual["lesson_directive"] is True
+    assert manifest.actual["operator_bandit"] is True
 
 
 def test_live_transport_freezes_thinking_and_computes_declared_cost(monkeypatch):
