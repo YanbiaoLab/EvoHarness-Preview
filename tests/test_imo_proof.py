@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 
 from evoharness import ScorableTask, WorkspaceGradeFnGrader
+from evoharness.evocore.workspace import GitWorkspace
 from evoharness.evoserve import GradeContext, InfraError
 from evoharness.evocore import (
+    Candidate,
     LLMClient,
     LLMProtocolError,
     LLMResponse,
@@ -857,3 +859,41 @@ def test_manifest_records_the_code_version(tmp_path):
     del raw["code_version"]
     (tmp_path / "old.json").write_text(json.dumps(raw))
     assert RunManifest.load(tmp_path / "old.json").code_version == "unknown"
+
+
+def test_evaluate_candidate_retries_are_wall_clock_bounded(tmp_path):
+    """A retry count is not a bound: each attempt starts a fresh per-problem
+    budget, so three retries of a 3000s budget let one stuck connection hold
+    a run for 2.5h (observed live at 2h04m, process alive and silent)."""
+    from experiments.imo_proof.evolution import _evaluate_candidate
+
+    attempts = {"n": 0}
+    clock = {"t": 0.0}
+
+    class _Hanging:
+        def evaluate_directory(self, **kwargs):
+            attempts["n"] += 1
+            clock["t"] += 2000.0          # each attempt burns its budget
+            raise EvaluationUnavailable("connection stalled")
+
+    import experiments.imo_proof.evolution as evo
+    original = evo.monotonic
+    evo.monotonic = lambda: clock["t"]
+    try:
+        candidate = Candidate(
+            id="c1", code=GitWorkspace(
+                base_files={"main.py": "x = 1\n"}, main_file="main.py",
+            ).serialize(),
+            generation=0, parent_id=None, island_idx=0, operator="seed",
+            workspace_kind="git",
+        )
+        with pytest.raises(EvaluationUnavailable):
+            _evaluate_candidate(
+                _Hanging(), candidate, split="test",
+                output_dir=tmp_path, retries=3, deadline_s=1000.0,
+            )
+    finally:
+        evo.monotonic = original
+
+    # second attempt is refused because the wall clock is already spent
+    assert attempts["n"] == 1

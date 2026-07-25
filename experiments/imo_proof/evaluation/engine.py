@@ -280,6 +280,9 @@ class BudgetedLLM:
         )
         if remaining <= 0:
             raise BudgetExceeded("solver timeout exceeded")
+        # One call may not wait out the whole problem: the budget bounds the
+        # problem, request_timeout_s bounds a single stuck connection.
+        remaining = min(remaining, self.budget.request_timeout_s)
 
         response = self.client.query_messages(
             (

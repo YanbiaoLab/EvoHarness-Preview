@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from time import monotonic
 from pathlib import Path
 
 from evoharness import ScorableTask
@@ -77,12 +78,26 @@ def _evaluate_candidate(
     split: str,
     output_dir: Path,
     retries: int = 3,
+    deadline_s: float = 3600.0,
 ):
     # Final validation/test evals aren't checkpointed; a single transient
     # provider timeout would otherwise discard a whole completed run. Retry
     # the eval so a flaky call doesn't cost us the run.
+    #
+    # The retry count alone is not a bound: each attempt starts a fresh
+    # per-problem budget, so three retries of a 3000s budget let one stuck
+    # connection hold the run for 2.5h — observed live at 2h04m, with the
+    # process alive, silent, and indistinguishable from slow progress. Cap
+    # the wall clock too.
+    started = monotonic()
     last: EvaluationUnavailable | None = None
     for attempt in range(1, retries + 1):
+        if attempt > 1 and monotonic() - started > deadline_s:
+            print(
+                f"[{split}] candidate {candidate.id} retry deadline "
+                f"{deadline_s:.0f}s exhausted after {attempt - 1} attempts"
+            )
+            break
         with tempfile.TemporaryDirectory(prefix="imo_evo_candidate_") as temporary:
             candidate_root = candidate.workspace.materialize(Path(temporary))
             try:

@@ -132,6 +132,13 @@ class SolverBudget:
     max_prompt_tokens_per_problem: int = 32_768
     max_completion_tokens_per_problem: int = 16_384
     timeout_s_per_problem: float = 300.0
+    # Ceiling for ONE request, distinct from the per-problem budget above.
+    # Handing the whole problem budget to a socket makes a half-dead
+    # connection (ESTABLISHED, no bytes) hang for the full budget, once per
+    # retry: a live run stalled 2h04m on a 3000s budget before anyone
+    # noticed, because nothing distinguishes "this call is stuck" from
+    # "this problem may legitimately take a while".
+    request_timeout_s: float = 180.0
     max_cost_usd_per_problem: float | None = None
 
     def __post_init__(self) -> None:
@@ -142,6 +149,7 @@ class SolverBudget:
         ):
             _positive_int(name, getattr(self, name))
         _positive_number("timeout_s_per_problem", self.timeout_s_per_problem)
+        _positive_number("request_timeout_s", self.request_timeout_s)
         if self.max_cost_usd_per_problem is not None:
             _positive_number("max_cost_usd_per_problem", self.max_cost_usd_per_problem)
 
