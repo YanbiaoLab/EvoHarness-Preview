@@ -6,7 +6,7 @@ import json
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import monotonic
 from typing import Protocol
@@ -131,6 +131,8 @@ class _SessionState:
     lifetime_cost_usd: float = 0.0
     lifetime_prompt_tokens: int = 0
     lifetime_completion_tokens: int = 0
+
+    read_state: dict = field(default_factory=dict)
 
     output_recoveries: int = 0
     round_index: int = 0
@@ -861,6 +863,7 @@ class NativeToolAgentBackend:
                     operator=request.operator,
                     preflight=request.preflight,
                     remaining_timeout_s=remaining_s,
+                    read_state=state.read_state,
                 ),
                 deadline=run.deadline,
             )

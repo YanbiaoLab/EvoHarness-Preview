@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -40,6 +40,12 @@ class AgentToolContext:
     operator: str
     preflight: ProposalPreflight
     remaining_timeout_s: float
+    # Per-session record of what a read tool has already surfaced:
+    # display path -> (mtime_ns, offset, limit). Owned by the session so an
+    # unchanged file is never dumped into the conversation twice; mutating
+    # tools deliberately do NOT populate it (a post-edit hit would point the
+    # model at pre-edit content).
+    read_state: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         workdir = Path(self.workdir).resolve()

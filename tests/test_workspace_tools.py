@@ -343,3 +343,51 @@ def test_every_workspace_tool_has_a_strict_schema():
         == set(tool.definition.input_schema["properties"])
         for tool in tools
     )
+
+
+def test_read_dedups_an_unchanged_range_and_reissues_after_a_change(tmp_path):
+    """A re-read of an unchanged range is answered with a pointer, not a
+    second copy: every copy in the conversation is resent on every later
+    turn. Any mtime change must defeat the check."""
+    ctx = make_context(tmp_path)
+    tool = WorkspaceReadTool()
+
+    _, first, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    assert "value = 1" in first["content"]
+    assert not first.get("unchanged")
+
+    _, second, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    assert second["unchanged"] is True
+    assert "content" not in second          # no second copy of the file
+    assert "still current" in second["message"]
+
+    # a different range is a different fingerprint
+    _, ranged, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
+    assert "content" in ranged and not ranged.get("unchanged")
+    _, ranged_again, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
+    assert ranged_again["unchanged"] is True
+
+    # editing the file must invalidate the dedup
+    invoke(
+        WorkspaceEditTool(),
+        ctx,
+        path="main.py",
+        old_text="value = 1",
+        new_text="value = 42",
+    )
+    _, after_edit, _, _ = invoke(tool, ctx, path="main.py", offset=2, limit=1)
+    assert not after_edit.get("unchanged")   # mtime moved, dedup defeated
+    _, full, _, _ = invoke(tool, ctx, path="main.py", offset=1, limit=100)
+    assert "value = 42" in full["content"]
+
+
+def test_read_dedup_is_per_session(tmp_path):
+    """read_state lives on the session, so a fresh session never inherits
+    another session's belief about what the model has already seen."""
+    ctx = make_context(tmp_path)
+    tool = WorkspaceReadTool()
+    invoke(tool, ctx, path="main.py", offset=1, limit=100)
+
+    other = make_context(tmp_path / "other")
+    _, fresh, _, _ = invoke(tool, other, path="main.py", offset=1, limit=100)
+    assert "content" in fresh and not fresh.get("unchanged")

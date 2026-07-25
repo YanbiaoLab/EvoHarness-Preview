@@ -45,12 +45,27 @@ For each mutation also write:
 - "tags": 1-3 lowercase-slug failure-mode tags. REUSE an existing tag
   whenever one fits; invent a new one only for a genuinely new mode.
 
+Do NOT record anything already derivable from the data you were given:
+the diff itself, the fitness numbers, which files changed, or a restated
+error message. Record only what is surprising and could not be read off
+the mutation record — if nothing about a mutation is surprising, say so
+in "why" and keep the advice general.
+
 Then rewrite the shared scratchpad (hard limit {max_bytes} characters)
 with exactly three sections: "Successful patterns", "Ineffective
 approaches", "Unexplored directions". Merge with the previous version,
 deduplicate, stay specific. Exclude noise-verdict mutations. If many
 proposals were rejected as near-duplicates, reflect that under
 "Unexplored directions".
+
+Keep the sections BALANCED. A scratchpad that is mostly prohibitions
+makes the next mutation timid: it will avoid past mistakes while also
+drifting away from directions already shown to work, and will stop
+exploring. Never let "Ineffective approaches" outnumber the other two
+sections combined — if you have little positive evidence, spend the
+space on concrete "Unexplored directions" rather than more warnings.
+State each successful pattern as something to DO, not as the absence of
+a mistake.
 
 Respond with ONLY a JSON object, no prose, no code fences:
 {{"lessons": [{{"child_id": "...", "verdict": "...", "why": "...",

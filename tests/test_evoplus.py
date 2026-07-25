@@ -670,3 +670,17 @@ def test_lesson_directive_contributor(tmp_path):
     # noise lessons are never promoted to directives
     xs.attach_lesson("l", {"verdict": "noise", "why": "", "advice": "x", "tags": []})
     assert always.contribute(MutationContext(parent_l, [], [], "revise", 5)) is None
+
+
+def test_lesson_age_is_rendered_as_a_staleness_caveat(tmp_path):
+    pop, xs = _lessoned_store(tmp_path)   # entries created at generations 2/3
+    contrib = ExperienceContributor(xs, mode="lessons")
+    parent = pop.get("p")
+
+    fresh = contrib.contribute(MutationContext(parent, [], [], "revise", 4))
+    assert "generation ago" in fresh or "generations ago" in fresh
+    assert "verify before relying" not in fresh   # still recent
+
+    stale = contrib.contribute(MutationContext(parent, [], [], "revise", 12))
+    assert "9 generations ago" in stale
+    assert "verify before relying on it" in stale

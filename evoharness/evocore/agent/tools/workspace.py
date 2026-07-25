@@ -302,6 +302,26 @@ class WorkspaceReadTool:
         )
         path = resolve_workspace_path(ctx.workdir, raw_path)
         _require_file(path, raw_path)
+        display = _display_path(path, ctx.workdir)
+        # Re-reading an unchanged range dumps the same file into the
+        # conversation twice, and every copy is resent on every later turn.
+        # Point the model at the earlier result instead; any mtime change
+        # defeats the check and the fresh content is sent in full.
+        fingerprint = (path.stat().st_mtime_ns, offset, limit)
+        if ctx.read_state.get(display) == fingerprint:
+            return make_tool_result(
+                call.call_id,
+                {
+                    "ok": True,
+                    "path": display,
+                    "unchanged": True,
+                    "message": (
+                        "File unchanged since your earlier workspace_read of "
+                        "this same range. Refer to that result instead of "
+                        "re-reading; it is still current."
+                    ),
+                },
+            )
         content = _read_utf8(path, raw_path, self.max_file_bytes)
         lines = content.splitlines()
         start_index = offset - 1
@@ -318,11 +338,12 @@ class WorkspaceReadTool:
 
         end_line = min(start_index + len(selected), len(lines))
         has_more = end_line < len(lines)
+        ctx.read_state[display] = fingerprint
         return make_tool_result(
             call.call_id,
             {
                 "ok": True,
-                "path": _display_path(path, ctx.workdir),
+                "path": display,
                 "content": numbered,
                 "start_line": offset,
                 "end_line": end_line,

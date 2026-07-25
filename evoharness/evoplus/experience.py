@@ -540,18 +540,32 @@ class ExperienceContributor:
         )
         lines = ["# Lessons from past mutations", note]
         # Losses first, wins worst->best (strongest positive advice last).
-        lines += [self._render_lesson(e) for e in losses]
-        lines += [self._render_lesson(e) for e in reversed(wins)]
+        lines += [self._render_lesson(e, ctx.generation) for e in losses]
+        lines += [self._render_lesson(e, ctx.generation) for e in reversed(wins)]
         return "\n".join(lines)[: self.max_bytes]
 
     @staticmethod
-    def _render_lesson(e: ExperienceEntry) -> str:
+    def _render_lesson(e: ExperienceEntry, generation: int | None = None) -> str:
         lesson = e.lesson or {}
         verb = "helped" if lesson.get("verdict") == "improved" else "hurt"
         tags = ", ".join(lesson.get("tags", [])) or "-"
+        # Age in plain words, not a bare number: a lesson drawn from a
+        # program several generations removed may describe code that has
+        # since mutated away, and its specificity makes it sound more
+        # authoritative than it deserves.
+        age = ""
+        if generation is not None:
+            gap = generation - e.generation
+            if gap >= 5:
+                age = (
+                    f"; learned {gap} generations ago — the program has "
+                    "moved since, verify before relying on it"
+                )
+            elif gap > 0:
+                age = f"; learned {gap} generation{'s' if gap > 1 else ''} ago"
         line = (
             f"- [{e.operator}] {e.change_title or e.operator} — {verb} "
-            f"(Δfitness {e.fitness_delta:+.4g}; tags: {tags})"
+            f"(Δfitness {e.fitness_delta:+.4g}; tags: {tags}{age})"
         )
         if lesson.get("why"):
             line += f"\n  why: {lesson['why']}"
