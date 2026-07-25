@@ -29,10 +29,12 @@ class InspectCandidateTool:
     definition = LLMToolDefinition(
         name="inspect_candidate",
         description=(
-            "Read the source of a previously evaluated candidate program, "
-            "using an id shown in the reference-program list. Omit path to "
-            "list that candidate's files; pass a path to read one file. Use "
-            "this instead of guessing what a reference program contains."
+            "Read the source of a previously evaluated candidate program. "
+            "candidate_id must be copied verbatim from an 'id=...' shown in "
+            "the reference-program list of your prompt — it is an opaque "
+            "identifier, not a command. Pass path=null to see that "
+            "candidate's files, then pass a path to read one. If your prompt "
+            "listed no reference programs, there is nothing to inspect."
         ),
         input_schema={
             "type": "object",
@@ -68,8 +70,14 @@ class InspectCandidateTool:
             )
         candidate = self.store.get(candidate_id)
         if candidate is None:
+            # Name real ids: the first live session called this with
+            # candidate_id="list", reading the description's "list that
+            # candidate's files" as a command word.
             raise AgentToolError(
-                "unknown-candidate", f"no such candidate: {candidate_id}"
+                "unknown-candidate",
+                f"no candidate with id {candidate_id!r}. Ids are opaque and "
+                "must be copied from an 'id=...' in your prompt's "
+                "reference-program list.",
             )
         try:
             texts = candidate.workspace.texts()

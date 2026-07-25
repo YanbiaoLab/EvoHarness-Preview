@@ -186,3 +186,31 @@ def test_eval_report_artifacts_ref_roundtrip_and_backcompat():
     # Legacy rows written before the field existed still load (defaults None).
     legacy = {"fitness": 1.0, "passed": True}
     assert EvalReport.from_json(legacy).artifacts_ref is None
+
+
+def test_store_reads_survive_a_worker_thread():
+    """Agent tools read candidates from the runtime's worker threads, and
+    sqlite refuses a connection outside its creating thread — the first
+    live session's inspect_candidate call died on exactly that."""
+    import threading
+
+    store = PopulationStore(PopulationConfig())
+    store.insert(make_candidate("c1", 0.5))
+
+    results, errors = [], []
+
+    def read():
+        try:
+            results.append(store.get("c1"))
+            results.append(len(store.all_candidates()))
+        except Exception as exc:  # noqa: BLE001 — the point of the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert all(r is not None for r in results)

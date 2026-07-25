@@ -15,6 +15,7 @@ from __future__ import annotations
 from functools import cached_property
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -195,12 +196,60 @@ CREATE TABLE IF NOT EXISTS store_meta (
 """
 
 
+class _Rows(list):
+    """Cursor-shaped view over rows already fetched under the lock."""
+
+    def fetchall(self):
+        return list(self)
+
+    def fetchone(self):
+        return self[0] if self else None
+
+
+class _LockedConnection:
+    """Serializes one sqlite connection so worker threads may read it.
+
+    Rows are materialised while the lock is held: handing back a live
+    cursor would let one thread's fetch interleave with another thread's
+    execute on the same connection, which is exactly what sqlite's
+    same-thread check exists to prevent.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, *args, **kwargs) -> _Rows:
+        with self._lock:
+            return _Rows(self._conn.execute(*args, **kwargs).fetchall())
+
+    def executescript(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._conn.executescript(*args, **kwargs)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
 class PopulationStore:
     """SQLite-backed population with islands, elite archive and migration."""
 
     def __init__(self, cfg: PopulationConfig, path: Path | str = ":memory:"):
         self.cfg = cfg
-        self._conn = sqlite3.connect(str(path))
+        # Agent tools read candidates from the runtime's worker threads, and
+        # sqlite refuses a connection outside its creating thread. One
+        # connection guarded by one lock keeps the store single-writer while
+        # letting those reads through; the evolution loop itself still
+        # mutates only from the main thread.
+        self._lock = threading.RLock()
+        self._conn = _LockedConnection(
+            sqlite3.connect(str(path), check_same_thread=False), self._lock
+        )
         self._conn.executescript(_SCHEMA)
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(candidates)")}
         if "workspace_kind" not in cols:
