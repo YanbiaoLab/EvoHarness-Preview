@@ -930,8 +930,33 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
     }
 
 
-def _may_skip_training(candidate_dir: Path, ctx: GradeContext) -> bool:
-    """True when training would only reproduce weights already held.
+def _cached_train_seconds(candidate_dir: Path, ctx: GradeContext) -> float:
+    """How much training the reusable weights for this recipe represent.
+
+    Training is cumulative, so "same recipe" is not enough to skip it — the
+    same recipe run longer gives a better model. Without this the first
+    candidate to die at R0 would fill the store with 480 seconds of training,
+    and every later candidate sharing that recipe would silently inherit an
+    undertrained model and look bad for reasons having nothing to do with its
+    own mutation.
+    """
+    if not ctx.lineage_dir:
+        return 0.0
+    cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
+    marker = cached / "train_seconds"
+    if not (cached / "weights.pt").exists() or not marker.exists():
+        return 0.0
+    try:
+        return float(marker.read_text().strip())
+    except ValueError:
+        return 0.0
+
+
+def _may_skip_training(
+    candidate_dir: Path, ctx: GradeContext, through_seconds: float
+) -> bool:
+    """True when training to `through_seconds` would only reproduce weights
+    already held.
 
     `train.py` imports from `arch.py` and never from `model.py`, so a
     mutation confined to the inference contract trains to byte-identical
@@ -939,22 +964,22 @@ def _may_skip_training(candidate_dir: Path, ctx: GradeContext) -> bool:
     the loop — and it falls on the axis where the largest known win lives,
     an inference-time setting requiring no retraining at all.
     """
-    if not ctx.lineage_dir:
-        return False
-    cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
-    return (cached / "weights.pt").exists()
+    return _cached_train_seconds(candidate_dir, ctx) >= through_seconds
 
 
-def _publish_to_lineage(candidate_dir: Path, ctx: GradeContext) -> None:
+def _publish_to_lineage(
+    candidate_dir: Path, ctx: GradeContext, train_seconds: float
+) -> None:
     """Hand these trained weights to children, and to anything that would
     otherwise re-derive them."""
     if not ctx.lineage_dir:
         return
     targets = [Path(ctx.lineage_dir) / ctx.candidate_id]
     cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
-    if not (cached / "weights.pt").exists():
-        # First to train this exact recipe fills the shared entry; later ones
-        # read it instead of paying for it again.
+    # Fill the shared entry only when this run trained the recipe FURTHER than
+    # whatever is there. Otherwise a candidate cut off at the first rung would
+    # overwrite a fully trained entry with its own undertrained weights.
+    if train_seconds > _cached_train_seconds(candidate_dir, ctx):
         targets.append(cached)
     for target in targets:
         target.mkdir(parents=True, exist_ok=True)
@@ -963,6 +988,7 @@ def _publish_to_lineage(candidate_dir: Path, ctx: GradeContext) -> None:
             if source.exists():
                 shutil.copy2(source, target / name)
         (target / "arch.sha256").write_text(_arch_digest(candidate_dir) + "\n")
+        (target / "train_seconds").write_text(f"{train_seconds:.1f}\n")
 
 
 def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
@@ -997,8 +1023,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # order is load-bearing), before training: inherit the parent's weights
     # so training continues rather than restarting.
     lineage = _inherit_from_parent(candidate_dir, ctx)
-    skip_training = _may_skip_training(candidate_dir, ctx)
-    lineage["training_skipped"] = skip_training
+    lineage["training_skipped"] = 0
 
     accuracy: dict[int, float] = {}
     items: list[dict] = []
@@ -1010,7 +1035,15 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
     for index, rung in enumerate(_rungs()):
         reached = rung
-        if not skip_training:
+        # Per rung, not once: the stored weights cover a specific amount of
+        # training, so a candidate reaching further than they go still has to
+        # pay for the difference.
+        if _may_skip_training(
+            candidate_dir, ctx, train_spent + rung.train_seconds
+        ):
+            train_spent += rung.train_seconds
+            lineage["training_skipped"] += 1
+        else:
             fault = _run_training(train_runner, candidate_dir, rung.train_seconds)
             if fault:
                 return Grade(
@@ -1114,7 +1147,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
     # Hand the trained weights to this candidate's children. Only done on the
     # success path: a candidate that faulted has nothing worth inheriting.
-    _publish_to_lineage(candidate_dir, ctx)
+    _publish_to_lineage(candidate_dir, ctx, train_spent)
 
     visible = {**metrics, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}

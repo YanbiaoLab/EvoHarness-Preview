@@ -420,7 +420,7 @@ def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_p
     (seed / "train_state.json").write_text('{"steps": 5577}')
 
     ctx = GradeContext("s1", tmp_path, lineage_dir=lineage)
-    grade_module._publish_to_lineage(seed, ctx)
+    grade_module._publish_to_lineage(seed, ctx, 5400.0)
 
     # A second parentless candidate with the same arch+train hits the store.
     twin = tmp_path / "twin"
@@ -433,7 +433,7 @@ def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_p
     assert result["warm_start"] == "pretrained-full"
     assert result["inherited_steps"] == 5577
     # ...and training would only re-derive what it just loaded.
-    assert grade_module._may_skip_training(twin, twin_ctx) is True
+    assert grade_module._may_skip_training(twin, twin_ctx, 5400.0) is True
 
 
 def test_changing_the_recipe_does_not_skip_training(tmp_path):
@@ -448,7 +448,7 @@ def test_changing_the_recipe_does_not_skip_training(tmp_path):
     (seed / "train.py").write_text("LR = 1e-3\n")
     (seed / "weights.pt").write_bytes(b"w")
     grade_module._publish_to_lineage(
-        seed, GradeContext("s1", tmp_path, lineage_dir=lineage)
+        seed, GradeContext("s1", tmp_path, lineage_dir=lineage), 5400.0
     )
 
     changed = tmp_path / "changed"
@@ -456,7 +456,7 @@ def test_changing_the_recipe_does_not_skip_training(tmp_path):
     (changed / "arch.py").write_text("RADIX_BITS = 1\n")
     (changed / "train.py").write_text("LR = 3e-4   # recipe mutated\n")
     ctx = GradeContext("c1", tmp_path, lineage_dir=lineage)
-    assert grade_module._may_skip_training(changed, ctx) is False
+    assert grade_module._may_skip_training(changed, ctx, 5400.0) is False
 
 
 def test_an_inference_only_mutation_skips_training(tmp_path):
@@ -473,7 +473,7 @@ def test_an_inference_only_mutation_skips_training(tmp_path):
     (seed / "model.py").write_text("WIDTH_MARGIN = 0\n")
     (seed / "weights.pt").write_bytes(b"w")
     grade_module._publish_to_lineage(
-        seed, GradeContext("s1", tmp_path, lineage_dir=lineage)
+        seed, GradeContext("s1", tmp_path, lineage_dir=lineage), 5400.0
     )
 
     child = tmp_path / "child"
@@ -481,9 +481,10 @@ def test_an_inference_only_mutation_skips_training(tmp_path):
     (child / "arch.py").write_text("RADIX_BITS = 1\n")
     (child / "train.py").write_text("LR = 1e-3\n")
     (child / "model.py").write_text("WIDTH_MARGIN = 32   # inference policy\n")
-    assert grade_module._may_skip_training(
-        child, GradeContext("c1", tmp_path, lineage_dir=lineage)
-    ) is True
+    ctx = GradeContext("c1", tmp_path, lineage_dir=lineage)
+    assert grade_module._may_skip_training(child, ctx, 5400.0) is True
+    # ...but training beyond what the stored weights cover still has to be paid.
+    assert grade_module._may_skip_training(child, ctx, 9000.0) is False
 
 
 def test_cost_projection_recovers_the_measured_speedup_requirement():
