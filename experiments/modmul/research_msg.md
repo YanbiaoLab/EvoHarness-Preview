@@ -1,4 +1,8 @@
-<!-- modmul research_msg v2 (冻结领域简报,tier-1 knowledge)。
+<!-- modmul research_msg v3 (冻结领域简报,tier-1 knowledge)。
+     v2 -> v3 (2026-07-26):加 §7(当日实测:前沿是时间预算不是精度上限、
+     步数同时买时间与可靠性、状态宽余量是未测轴、已证否清单、model soup、
+     仪器极限)。**刻意只注入现象与死路,不注入具体设置** —— 该设多少 radix、
+     加多少位余量留给搜索答,否则"框架能否自己发现"这个论证就作废了。
      经 TaskBundle.research_brief -> StaticBriefContributor 注入,所有实验组共享,
      不是消融变量。来源:官方 rules/literature.md + NeuralHorner 公开仓库 +
      组织者 Zulip 裁决链(2026-07 合并的 commit 82510bb)+ 本项目 2026-06/07
@@ -89,8 +93,10 @@ distribution does not deliver that on its own.
 
 Five fixes have been tried against the Fermat/sparse residual by others:
 boundary curriculum, on-policy DAgger, all-family DAgger, subtract-count
-sweeps, PCGrad. Each either failed to close it or broke another family;
-EWC / L2-SP style anti-forgetting regularization is the untried suggestion.
+sweeps, PCGrad. Each either failed to close it or broke another family.
+EWC / L2-SP anti-forgetting has since been tried too and also failed: no
+usable lambda window was found — 10, 30 and 100 all merely moved the
+interference between width bands.
 **Detecting long zero runs with an if/else and branching to a shortcut is
 explicitly prohibited — that is hand-coded arithmetic.**
 
@@ -124,7 +130,9 @@ explicitly prohibited — that is hand-coded arithmetic.**
    on `p`, beats a monolithic learner; each step should be a small EXACT
    classification, not a regression.
 3. SIZE TO THE INPUT: scale loop length and state width to bit-length at
-   inference — exactness and the time budget both depend on it.
+   inference — exactness and the time budget both depend on it. **But sizing
+   the state to EXACTLY the prime's bit length is a choice, not a
+   requirement**, and it is one nobody here has tested against. See §7.
 4. MAKE THE STATE'S INFORMATION FLOW BOTH WAYS. Carries travel from low bits
    to high bits, but the mod-`p` reduction decision is determined by the high
    bits and must reach the low ones. A mechanism that only propagates one way
@@ -139,3 +147,82 @@ explicitly prohibited — that is hand-coded arithmetic.**
 7. VERIFY LIKE THE JUDGE: accuracy must collapse under weight randomization.
    If a change makes accuracy insensitive to the weights, you built a circuit,
    not a model — revert it.
+
+## 7. What was measured on 2026-07-26 (v3)
+
+### 7.1 The frontier is a time budget, not an accuracy ceiling
+
+The seed lineage was graded at full rungs for the first time:
+
+```
+tier   1   2   3   4   5   6   7   8    9    10
+acc  100 100 100 100 100 100 100 100   92     0
+```
+
+Tier 10 scored 0 **without a single case running** — the inference budget was
+already spent. Tier 9 alone took 83% of it, at 8.6x the per-problem rate the
+official evaluator allows; the full set projects to roughly 3x over budget.
+
+Two consequences that overturn the obvious strategy:
+
+- **More training, more capacity and better representations cannot move the
+  frontier while the frontier never runs.** §4 said capacity is not the
+  bottleneck; this says accuracy is not either, at the top.
+- **Total serial work per problem is the quantity that decides how far this
+  family reaches.** Steps per problem and cost per step are the two terms.
+
+### 7.2 Fewer steps buys accuracy as well as time
+
+Per-step reliability implied by the measurements: tier 9 at 92% over its step
+count works out to a per-step error of about 1.6e-5. Because a tier is exact
+only if every step is, **halving the steps roughly doubles the per-step error
+a tier can tolerate**. Step count therefore appears twice — once in the time
+budget, once in the reliability budget — and both in the same direction.
+
+Against this: a coarser schedule makes each step harder to learn, because the
+intermediate the cell must reduce spans a wider range. One team measured a
+coarser radix on a GRU cell as ~2x faster and slightly less accurate. **That
+was a different cell and the trade-off is OPEN for the scan-based cell here.**
+Whether the reliability gained from fewer steps outweighs the reliability lost
+per step is unmeasured, and is the single highest-value question open.
+
+### 7.3 The state-width margin is an untested axis with large known effects
+
+The width the cell runs at need not equal the prime's bit length; the extra
+high bits are mathematically inert. Another team measured errors across that
+margin on 576 problems per band and found a swing of more than two orders of
+magnitude between margins — **and the exactly-fits choice was not the best
+one**. The mechanism was training coverage, not mathematics: whichever margins
+appear during training are the ones that work at inference.
+
+Two things follow. First, this axis is only reachable by changing the training
+distribution and the inference width **together** — changing either alone
+either wastes the training or asks for something never trained. Second, the
+same team reports that a plausible-sounding rounding rule for choosing the
+margin landed exactly on the worst region, and that establishing this cost a
+week. Treat any specific margin rule as unverified until measured here.
+
+### 7.4 Known dead ends — do not spend mutations re-testing
+
+| tried | outcome |
+|---|---|
+| more capacity | three independent measurements: not the bottleneck (§4) |
+| L2-SP / EWC anti-forgetting | no usable lambda; moves interference, does not remove it |
+| ensembling (width committees, cross-checkpoint voting) | both forms failed |
+| re-annealing with the same recipe, alone | no gain |
+| small-prime fine-tuning without an anchor | fixes small primes, costs large-scale accuracy |
+
+### 7.5 One cheap thing that does work
+
+Averaging the weights of an annealed checkpoint with a second checkpoint
+re-annealed from it beat both endpoints on paired evaluation (one-sided
+McNemar p = 0.02, n = 1008). Cheap, and orthogonal to architecture.
+
+### 7.6 Why more training stops paying
+
+The same team measured their single-step verification floor at about 8e-6
+while their effective per-step error was already 1.8e-6. **The objective and
+the checkpoint-selection signal had both dropped below the noise of the
+measurement** — past that point additional training is a random walk. If your
+per-step error approaches your ability to measure it, the remaining gains are
+in coverage, not optimization.

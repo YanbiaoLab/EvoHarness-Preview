@@ -1,6 +1,13 @@
-<!-- modmul task_sys_msg v2 (Round-1, multi-file genome + ASHA + H90 fitness).
-     由 SearchConfig.task_sys_msg 注入每次变异的 system prompt;改动需升版本
-     并同步 serve.sh 的 --task-version。 -->
+<!-- modmul task_sys_msg v3 (2026-07-26)。由 SearchConfig.task_sys_msg 注入每次
+     变异的 system prompt;改动需升版本并同步 serve.sh 的 --task-version。
+
+     v2 -> v3:
+       * fitness 段改写 —— v2 写的 (h90+overall)/11 已被换成连续搜索信号,
+         v2 的文字在告诉优化器一个错误的目标函数(说跨阈值值 50 倍,实际 2 倍);
+       * 加"这个 seed 实际输在哪":实测 h90=9,tier 10 是推理预算墙不是精度;
+       * "一次只改一个文件"开 train.py/model.py 耦合对的例外;
+       * 补 budget_headroom / warm_start / inherited_steps 三个新指标。
+     刻意不写的:具体该把 radix 设成多少、状态宽该加多少余量 —— 那是搜索的活。 -->
 
 # Task: evolve a submission for the SAIR Modular Arithmetic Challenge
 
@@ -11,22 +18,70 @@ genuine modular REDUCTION is the skill — memorizing products is worthless.
 
 ## What fitness actually is
 
-The official leaderboard sorts by `(highest_tier_above_90, overall_accuracy)`.
-Fitness reproduces that key exactly:
+The official leaderboard sorts by `(highest_tier_above_90, overall_accuracy)`
+and that pair is reported to you as `h90` and `overall_accuracy`.
+
+Fitness is a SEARCH signal, deliberately not the same thing:
 
 ```
 h90     = highest tier (1..10) with accuracy >= 90%      (0 if none)
 overall = mean accuracy over tiers 1..10                 (unevaluated = 0)
-fitness = (h90 + overall) / 11
+fitness = continuous overall accuracy + a smoothed bonus per tier
+          approaching and crossing 90%
 ```
 
-**One more tier crossing 90% is worth more than every accuracy gain below it.**
-Pushing tier 3 from 80% to 89% is worth 0.008; getting tier 4 from 0% to 91%
-is worth more than 0.09. Aim at the frontier tier, not at polishing.
+Every point of accuracy on every tier moves fitness. Crossing 90% on a tier
+still pays more than accumulating accuracy below it — about 2x, not the 50x
+that a literal reading of the leaderboard key would give. This is on purpose:
+the leaderboard key is nearly flat between thresholds, and a search whose only
+move is a small edit gets no signal from flat ground.
 
-Reference points: the three official baseline models all have `h90 = 1` and
-`overall <= 0.127`. Anything with `h90 >= 4` is past the published state of
-this project's own work.
+So: **improving any tier is worth doing, and pushing a tier over 90% is worth
+more.** You do not have to gamble everything on the frontier tier.
+
+Reference points, measured on this seed at full rungs, not guessed:
+
+| | h90 | overall |
+|---|---|---|
+| the three official baseline models | 1 | <= 0.127 |
+| **the seed you are mutating** | **9** | **0.892** |
+| best public submission known | 10 | 0.989 |
+
+The seed already answers tiers 1-8 at 100% and tier 9 at 92%. **Accuracy on
+the tiers it reaches is not the problem.** Read the next section before
+deciding what to change.
+
+## Where this seed actually loses (measured, full rungs)
+
+```
+tier   1   2   3   4   5   6   7   8    9    10
+acc  100 100 100 100 100 100 100 100   92     0
+```
+
+Tier 10 scored 0 **without a single case being run**. It was never reached:
+the inference time budget was already spent. Tier 9 alone consumed 83% of the
+whole budget, at 8.6x the per-problem rate the official evaluator allows, and
+the full set projects to roughly 3x over budget.
+
+Read that carefully, because it inverts the obvious strategy:
+
+- The frontier is **not** an accuracy problem. More training, more capacity and
+  better representations do not move tier 10 off zero while it never runs.
+- The binding constraint is **total serial work per problem**. What decides how
+  far this family reaches is how many sequential steps a problem costs and how
+  expensive each step is.
+- Anything that cuts steps or per-step cost is worth accuracy, up to a point:
+  fewer steps also means fewer chances to make a mistake, so the per-step
+  reliability needed to finish a tier relaxes as steps fall.
+
+You are told this because it took ninety minutes of training to discover. You
+are NOT told what to set — the trade-off between step count and per-step
+learnability is real, is specific to this cell, and is yours to find.
+
+`budget_headroom` in `visible_metrics` reports this directly, measured a few
+minutes in rather than at the end: below 1.0 the top tiers cannot be scored
+however accurate the model becomes, and `1 / budget_headroom` is the speedup
+needed. `projected_infer_s_tier_N` gives the per-tier projection behind it.
 
 ## The genome: three files
 
@@ -36,9 +91,25 @@ this project's own work.
 | `arch.py` | The network. | You are changing the architecture — the usual case. |
 | `train.py` | Data distribution, curriculum, optimizer, schedule. | You are changing how it learns — the other usual case. |
 
-Prefer changing ONE file per mutation. `model.py` imports from `arch.py`, and
-the official loader puts the submission directory on `sys.path`, so plain
-`import arch` works both here and in the official harness.
+Prefer changing ONE file per mutation, with one deliberate exception:
+**`train.py` and `model.py` are coupled through the data distribution.** What
+the network is trained on and what it is asked to do at inference must agree,
+so a change to one that needs the other is a single mutation, not two. The
+known instance is the state width the cell runs at: `train.py` decides which
+widths (relative to the prime's bit length) ever appear in training, and
+`model.py` decides which width inference actually uses. Changing one alone
+either wastes the training or asks the network for something it never saw.
+
+`model.py` imports from `arch.py`, and the official loader puts the submission
+directory on `sys.path`, so plain `import arch` works both here and in the
+official harness.
+
+**Weights are inherited.** If your mutation leaves `arch.py` byte-identical to
+the parent's, the parent's trained weights carry over and training continues
+from them rather than restarting — `visible_metrics` reports `warm_start` and
+`inherited_steps`. Changing `arch.py` resets that to a cold start. This is not
+an argument against touching the architecture, but it does mean an
+architectural change must be worth throwing away accumulated training.
 
 ## File contract (violations score 0)
 
@@ -132,7 +203,16 @@ L4 human provenance review of `training_description`.
 ## Reading your feedback
 
 `visible_metrics` gives `h90`, `overall_accuracy`, `acc_tier_N`, `rung`,
-`params`, `train_seconds`, `infer_s_tier_N`. Per-problem `error_category`:
+`params`, `train_seconds`, `infer_s_tier_N`, plus:
+
+| metric | meaning |
+|---|---|
+| `budget_headroom` | below 1.0 the top tiers cannot be scored at any accuracy; `1/headroom` is the speedup needed |
+| `projected_infer_s_tier_N` | per-tier time projection behind that headroom |
+| `warm_start` | `full` = inherited the parent's weights, `cold-arch-changed` = `arch.py` differs so training restarted |
+| `inherited_steps` | training steps carried over from the parent |
+
+Per-problem `error_category`:
 
 | category | what it means | what to do |
 |---|---|---|
