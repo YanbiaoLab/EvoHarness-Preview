@@ -653,9 +653,34 @@ def _holdout_metrics(
 # ---------------------------------------------------------------------------
 
 
+_SEED_ROOT = _HERE / "seeds"
+
+
+def _refuse_to_grade_the_seeds(candidate_dir: Path) -> None:
+    """Grading trains IN PLACE, so the seeds must never be graded directly.
+
+    train() is resumable by contract: it continues from whatever weights sit
+    in model_dir and writes back there. Point this function at a seed and it
+    quietly rewrites the genome every future run starts from — observed
+    2026-07-26, when a baseline script pushed limb_horner from 5,577 steps
+    to 37,088 and left the repo dirty. Nothing failed, and the measurement
+    silently stopped being a baseline. Callers must grade a copy.
+    """
+    try:
+        candidate_dir.relative_to(_SEED_ROOT.resolve())
+    except ValueError:
+        return
+    raise ValueError(
+        f"refusing to grade {candidate_dir}: it is inside {_SEED_ROOT}, and "
+        "grading trains in place. Copy the seed to a temporary directory "
+        "and grade the copy."
+    )
+
+
 def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     started = time.monotonic()
     candidate_dir = Path(candidate_dir).resolve()
+    _refuse_to_grade_the_seeds(candidate_dir)
     workdir = Path(ctx.workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
 

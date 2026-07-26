@@ -15,6 +15,7 @@ even when ASHA would have cut the candidate off early. Usage:
 
 import json
 import os
+import shutil
 import statistics
 import sys
 import tempfile
@@ -41,11 +42,21 @@ def main() -> int:
         started = time.monotonic()
         print(f"\n=== seed {name} (full rungs, this takes ~1.5h of training)")
         with tempfile.TemporaryDirectory(prefix=f"modmul_base_{name}_") as tmp:
+            # Grade a COPY. Training is resumable by contract — train() picks
+            # up from whatever weights already sit in model_dir and writes
+            # back there — so handing grade_workspace a repo path retrains
+            # the committed seed in place. The first version of this script
+            # did exactly that and pushed limb_horner from 5,577 steps to
+            # 37,088, which both invalidated the measurement (it was no
+            # longer a baseline) and moved the starting point of every
+            # future run.
+            candidate = Path(tmp) / "candidate"
+            shutil.copytree(_SEEDS / name, candidate)
             grade = grade_workspace(
-                _SEEDS / name,
+                candidate,
                 GradeContext(
                     candidate_id=f"baseline-{name}",
-                    workdir=Path(tmp),
+                    workdir=Path(tmp) / "work",
                     operator="seed",
                     generation=0,
                 ),
