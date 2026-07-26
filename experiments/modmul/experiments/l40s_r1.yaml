@@ -25,7 +25,7 @@ search:
                                       # 判据在 30-40 代就能读(见
                                       # todo/modmul_evolution_validation.md)
   eval_batch_size: 16                 # ← 唯一一处调大;依据见上表
-  llm_models: ["qwen3-coder-plus"]
+  llm_models: ["MiniMax-M3"]          # 2026-07-27 换 provider(原 qwen key 过期)
   llm_max_tokens: 16384               # 多文件基因组,整文件重写需要
   seed: 21
   operator_probs: [0.45, 0.45, 0.1]   # revise / rewrite / recombine

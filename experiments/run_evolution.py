@@ -73,7 +73,21 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(
                 "--live requires EVOHARNESS_API_BASE and EVOHARNESS_API_KEY"
             )
-        transport = make_openai_compat_transport(api_base, api_key)
+        # Reasoning models spend minutes before the first token, and this
+        # task's prompt is large (task brief + research brief + a
+        # multi-file genome). The 120s default timed out every proposal on
+        # MiniMax-M3, which the proposer breaker correctly reads as a dead
+        # proposer — a healthy model would be mistaken for a broken one.
+        transport = make_openai_compat_transport(
+            api_base,
+            api_key,
+            # Measured on MiniMax-M3 with this task's ~12k-token prompt: a
+            # complete proposal takes ~105s. Sized to 3x that, not to the
+            # worst imaginable case — an over-long timeout does not make a
+            # slow call succeed, it only lets a stalled socket hold the run,
+            # which is how a previous run sat dead for 2h04m looking healthy.
+            timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 300)),
+        )
 
     # Only the run knows where lineage state can live, and only graders that
     # opted in have the attribute at all.
