@@ -75,7 +75,7 @@ def make_rewrite_transport():
     return transport
 
 
-def build_loop(grader, tmp_path, generations=10, breaker=5):
+def build_loop(grader, tmp_path, generations=10, breaker=5, transport=None):
     cfg = SearchConfig(
         num_generations=generations,
         operators=["rewrite"],
@@ -90,7 +90,9 @@ def build_loop(grader, tmp_path, generations=10, breaker=5):
         pop_cfg=pop_cfg,
         store=store,
         grader=grader,
-        llm=LLMClient(transport=make_rewrite_transport(), sleep=lambda s: None),
+        llm=LLMClient(
+            transport=transport or make_rewrite_transport(), sleep=lambda s: None
+        ),
         prompt_builder=PromptBuilder("maximize increments"),
         parent_selector=make_parent_selector(pop_cfg),
         inspiration_selector=InspirationSelector(pop_cfg),
@@ -144,3 +146,43 @@ def test_ungradeable_seed_is_fatal(tmp_path):
     loop, _ = build_loop(FlakyGrader(fail_seed=True), tmp_path)
     with pytest.raises(EvalInfraError, match="seeding"):
         loop.run(INITIAL)
+
+
+def dead_proposer_transport(messages, model, **kw):
+    """What an unreachable LLM endpoint looks like to the loop: a response
+    the parser cannot turn into a proposal."""
+    return LLMResponse(text="", model=model, cost=0.0)
+
+
+def test_a_dead_proposer_stops_the_run_instead_of_draining_it(tmp_path):
+    """A run that produces no offspring must say so.
+
+    The eval service had a circuit breaker; the proposer had none. With the
+    LLM unreachable every generation recorded "skipped", the loop ran to the
+    end, and stopped_reason came out "completed" — observed live on the L40S,
+    where a two-generation run reported success having produced only its
+    seeds. Over a multi-day schedule an expired credential would burn the
+    entire run and still look healthy in the summary.
+    """
+    loop, store = build_loop(
+        FlakyGrader(), tmp_path, generations=30, breaker=5,
+        transport=dead_proposer_transport,
+    )
+
+    report = loop.run(INITIAL)
+
+    assert report.stopped_reason == "proposer_dead"
+    # It must give up early rather than walking the whole schedule.
+    assert report.generations_completed <= 6
+    # Only the seed made it into the population.
+    assert len([c for c in store.all_candidates() if c.operator != "seed"]) == 0
+
+
+def test_a_healthy_proposer_never_trips_the_new_breaker(tmp_path):
+    """The breaker must not fire on a run that is working — a guard that
+    misfires is worse than the defect it guards against."""
+    loop, store = build_loop(FlakyGrader(), tmp_path, generations=10, breaker=5)
+    report = loop.run(INITIAL)
+
+    assert report.stopped_reason == "completed"
+    assert report.generations_completed == 10

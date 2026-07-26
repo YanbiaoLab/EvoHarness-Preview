@@ -469,11 +469,12 @@ class SearchLoop:
 
     def _run_batch_generation(
         self, generation: int, report: RunReport, infra_streak: int
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Propose eval_batch_size candidates, grade them CONCURRENTLY, absorb
         sequentially. Threads touch ONLY grader.grade(); population, budget
-        and router mutations stay on the main thread. Returns updated
-        infra_streak (same drop semantics as the serial path)."""
+        and router mutations stay on the main thread. Returns the updated
+        infra_streak (same drop semantics as the serial path) and whether the
+        generation produced any candidate at all."""
         cands: list[Candidate] = []
         for _ in range(self.cfg.eval_batch_size):
             cand = self._propose(generation, report)
@@ -481,7 +482,7 @@ class SearchLoop:
                 cands.append(cand)
         if not cands:
             report.history.append({"generation": generation, "status": "skipped"})
-            return infra_streak
+            return infra_streak, False
 
         def _grade_only(cand: Candidate):
             gen_dir = self.workdir / f"gen_{cand.generation}_{cand.id}"
@@ -535,7 +536,7 @@ class SearchLoop:
         best = self.store.best()
         if best is not None:
             report.best_id, report.best_fitness = best.id, best.fitness
-        return infra_streak
+        return infra_streak, True
 
     # -- main loop ---------------------------------------------------------------
 
@@ -574,19 +575,30 @@ class SearchLoop:
             report.stopped_reason = "running"
 
         infra_streak = 0  # consecutive EvalInfraError drops (circuit breaker)
+        # A dead PROPOSER used to have no breaker at all. When the LLM
+        # endpoint is unreachable every generation records "skipped", the
+        # loop runs to the end, and stopped_reason becomes "completed" —
+        # observed on the L40S, where a run reported 2 completed generations
+        # while producing zero offspring. On a multi-day run an expired
+        # credential would drain the whole schedule and still look fine.
+        propose_streak = 0
         for generation in range(start_generation, self.cfg.num_generations + 1):
             if self.budget.should_stop():
                 report.stopped_reason = "budget"
                 break
 
             if self.cfg.eval_batch_size > 1:
-                infra_streak = self._run_batch_generation(
+                infra_streak, produced = self._run_batch_generation(
                     generation, report, infra_streak
                 )
+                propose_streak = 0 if produced else propose_streak + 1
                 report.generations_completed = generation
                 self._save_checkpoint(generation, report)
                 if infra_streak >= self.cfg.max_consecutive_infra_failures:
                     report.stopped_reason = "eval_infra"
+                    break
+                if propose_streak >= self.cfg.max_consecutive_infra_failures:
+                    report.stopped_reason = "proposer_dead"
                     break
                 continue
 
@@ -595,9 +607,17 @@ class SearchLoop:
                 report.history.append(
                     {"generation": generation, "status": "skipped"}
                 )
+                propose_streak += 1
                 report.generations_completed = generation
                 self._save_checkpoint(generation, report)
+                if propose_streak >= self.cfg.max_consecutive_infra_failures:
+                    # Same reasoning as the eval breaker: a run that cannot
+                    # produce offspring must stop and say so, not drain the
+                    # generation schedule and report success.
+                    report.stopped_reason = "proposer_dead"
+                    break
                 continue
+            propose_streak = 0
 
             parent = self.store.get(cand.parent_id) if cand.parent_id else None
             try:
