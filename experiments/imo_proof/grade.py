@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from evoharness.evocore.artifacts import ArtifactStore
@@ -15,9 +16,28 @@ from .evaluation.contract import (
     EvaluationUnavailable,
 )
 
+# Above this share of unscored problems the fitness stops describing the
+# program. 1/4 is deliberately loose: one or two transient faults are part
+# of life, half the set being cut off is not.
+_UNSCORED_FAULT_RATIO = 0.25
+
+
 def _error_category(item) -> str:
+    """Keep the REASON, not just the exception class.
+
+    This used to be `failure.split(":", 1)[0]`, which collapsed every
+    budget exhaustion, timeout and transport fault into one bucket named
+    "CandidateExecutionError" — and this string is the ONLY description of
+    a failure that reaches the mutation prompt or the reflector. Run
+    e5s_r2: a candidate that raised max_revisions from 3 to 5 had 9 of 12
+    problems cut off at the per-problem call limit, and the reflector,
+    seeing only the class name, wrote it up as "over-editing valid
+    solutions" and advised capping revision loops at 3. That invented
+    advice was then injected into later prompts.
+    """
     if item.failure:
-        return "exec:" + item.failure.split(":", 1)[0].strip()
+        kind, _, detail = item.failure.partition(":")
+        return "exec:" + (detail.strip() or kind.strip())[:60]
     return item.label      # incorrect | partial | almost | correct
 
 
@@ -76,10 +96,30 @@ def to_grade(evaluation: CandidateEvaluation) -> Grade:
 
     n = len(evaluation.problems)
 
+    # A problem carrying a `failure` produced no answer at all. Scoring it
+    # zero is right — nothing was delivered — but counting it as an ordinary
+    # wrong answer is not: 4 of 15 candidates in run e5s_r2 scored exactly
+    # 0.25 this way and were indistinguishable from a program that genuinely
+    # solved 3 of 12. Nothing anywhere recorded the difference.
+    unscored = [item for item in evaluation.problems if item.failure]
+    reasons = Counter(_error_category(item) for item in unscored)
+    starved = len(unscored) > _UNSCORED_FAULT_RATIO * n
+
     return Grade(
         fitness=evaluation.points_percentage,
-        passed=True,
+        # Not a verdict on the program: we failed to obtain one. Marking it
+        # unpassed keeps it out of the archive and out of parent selection,
+        # which is what an unmeasurable candidate deserves.
+        passed=not starved,
+        fault=(
+            f"unscored: {len(unscored)}/{n} problems produced no answer "
+            f"({reasons.most_common(1)[0][0]}); this fitness does not "
+            "measure the program"
+            if starved
+            else None
+        ),
         visible_metrics={
+            "unscored_items": len(unscored),
             "points_percentage": evaluation.points_percentage,
             "correct_percentage": evaluation.correct_percentage,
             "solver_calls": evaluation.solver_usage.calls,

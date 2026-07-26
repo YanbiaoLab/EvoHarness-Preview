@@ -897,3 +897,65 @@ def test_evaluate_candidate_retries_are_wall_clock_bounded(tmp_path):
 
     # second attempt is refused because the wall clock is already spent
     assert attempts["n"] == 1
+
+
+def _mixed_evaluation(n_failed: int, n_total: int = 12) -> CandidateEvaluation:
+    """`n_failed` problems cut off before producing an answer."""
+    problems = []
+    for index in range(n_total):
+        failed = index < n_failed
+        problems.append(
+            ProblemResult(
+                problem_id=f"problem-{index}",
+                label="incorrect" if failed else "correct",
+                points=0 if failed else 7,
+                max_points=7,
+                proof="",
+                failure=(
+                    "CandidateExecutionError: solver call limit exceeded"
+                    if failed
+                    else None
+                ),
+                solver_usage=ModelUsage(calls=8),
+                grader_usage=ModelUsage(calls=0 if failed else 1),
+                elapsed_s=0.1,
+            )
+        )
+    return CandidateEvaluation(
+        candidate_id="candidate", split="train", admitted=True,
+        problems=tuple(problems),
+    )
+
+
+def test_error_category_keeps_the_reason_not_the_exception_class():
+    """The category is the only failure description that reaches the
+    mutation prompt and the reflector. Collapsing every fault into
+    "CandidateExecutionError" is what let the reflector invent causes."""
+    from experiments.imo_proof.grade import to_grade
+
+    grade = to_grade(_mixed_evaluation(n_failed=9))
+    categories = {
+        item["error_category"]
+        for item in grade.structured_feedback["items"]
+        if not item["passed"]
+    }
+    assert categories == {"exec:solver call limit exceeded"}
+
+
+def test_mostly_unscored_candidate_is_not_reported_as_an_ordinary_low_score():
+    from experiments.imo_proof.grade import to_grade
+
+    grade = to_grade(_mixed_evaluation(n_failed=9))
+    assert grade.visible_metrics["unscored_items"] == 9
+    assert grade.passed is False
+    assert "9/12" in grade.fault and "solver call limit exceeded" in grade.fault
+
+
+def test_a_couple_of_faults_still_count_as_a_real_measurement():
+    """One transient fault must not disqualify a run — otherwise the gate
+    fires more often than the defect it guards against."""
+    from experiments.imo_proof.grade import to_grade
+
+    grade = to_grade(_mixed_evaluation(n_failed=2))
+    assert grade.visible_metrics["unscored_items"] == 2
+    assert grade.passed is True and grade.fault is None

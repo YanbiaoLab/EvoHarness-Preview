@@ -23,7 +23,13 @@ from .feedback import StructuredFeedback
 
 logger = logging.getLogger(__name__)
 
-VERDICTS = ("improved", "regressed", "noise")
+# "unscored" is the escape hatch. With only three verdicts the model had to
+# claim the edit caused something even when the evaluation never ran: in run
+# e5s_r2 a child whose problems were cut off at the call limit was attributed
+# to "over-editing valid solutions", and that invented cause became advice.
+# ExperienceContributor injects only improved/regressed lessons, so this
+# verdict also keeps such an entry out of every later prompt.
+VERDICTS = ("improved", "regressed", "noise", "unscored")
 
 _REFLECT_SYS = """\
 You are the attribution analyst for an evolutionary program-search loop.
@@ -36,6 +42,13 @@ For EACH mutation decide a verdict:
 - "noise": the outcome is within evaluation noise (small delta, few
   behavior flips) — no lesson should be drawn. Prefer "noise" when the
   evidence is weak: a wrong lesson is worse than no lesson.
+- "unscored": the child's failures are dominated by execution or budget
+  faults (error categories starting with "exec:"), so the evaluation
+  never measured the edit at all. You MUST use this verdict whenever the
+  record says the child has UNSCORED items, and "why" must quote the
+  fault verbatim. Never invent a mathematical or logical cause for a run
+  that was cut off — the invented cause becomes advice, and advice steers
+  every later mutation.
 
 For each mutation also write:
 - "why": one sentence attributing the outcome to something concrete in
@@ -54,7 +67,8 @@ in "why" and keep the advice general.
 Then rewrite the shared scratchpad (hard limit {max_bytes} characters)
 with exactly three sections: "Successful patterns", "Ineffective
 approaches", "Unexplored directions". Merge with the previous version,
-deduplicate, stay specific. Exclude noise-verdict mutations. If many
+deduplicate, stay specific. Exclude noise- and unscored-verdict
+mutations — neither measured anything. If many
 proposals were rejected as near-duplicates, reflect that under
 "Unexplored directions".
 
@@ -332,6 +346,20 @@ class MutationReflector:
             lines.append(f"diff: {e.change_summary}")
         lines.append(f"fitness delta: {e.fitness_delta:+.4g}")
         child = pop.get(e.child_id)
+        # State it rather than leaving it to be inferred from the failure
+        # list: the whole point of the "unscored" verdict is that the model
+        # cannot tell a cut-off run from a wrong answer unless told.
+        unscored = 0
+        if child is not None and child.report is not None:
+            unscored = int(
+                (child.report.visible_metrics or {}).get("unscored_items", 0)
+            )
+        if unscored:
+            lines.append(
+                f"UNSCORED: {unscored} problems produced no answer at all "
+                "(execution or budget fault, NOT a wrong answer) — the "
+                'verdict MUST be "unscored".'
+            )
         parent = pop.get(e.parent_id) if e.parent_id else None
         child_sig, parent_sig = _signature(child), _signature(parent)
         if child_sig is not None and parent_sig is not None:

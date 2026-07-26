@@ -315,8 +315,8 @@ def test_experience_contributor_global_distills_on_interval(tmp_path):
 
 # -- L1 reflection (items 6-7) --------------------------------------------------
 
-def _reflect_transport(captured):
-    """Echoes an 'improved' lesson per '### mutation <id>' block it sees."""
+def _reflect_transport(captured, verdict: str = "improved"):
+    """Echoes one lesson per '### mutation <id>' block it sees."""
     import json
     import re
 
@@ -327,7 +327,7 @@ def _reflect_transport(captured):
             "lessons": [
                 {
                     "child_id": i,
-                    "verdict": "improved",
+                    "verdict": verdict,
                     "why": f"why-{i}",
                     "advice": f"advice-{i}",
                     "tags": ["Missing Case"],
@@ -725,3 +725,45 @@ def test_regression_soft_penalty_discounts_a_dead_parent():
     fresh = RegressionSoftPenalty()
     fresh.set_state(policy.state())
     assert fresh.streaks == policy.streaks
+
+
+def test_reflector_is_told_when_the_evaluation_never_ran(tmp_path):
+    """Run e5s_r2: a child whose problems were cut off at the solver call
+    limit was attributed to "over-editing valid solutions", and that
+    invented cause was injected into later prompts as advice. The model
+    cannot tell a cut-off run from a wrong answer unless the record says
+    so — and an "unscored" lesson must not reach any prompt."""
+    from evoharness.evoplus import ExperienceContributor, MutationReflector
+
+    pop = PopulationStore(PopulationConfig())
+    parent = make_candidate("p", 1.0)
+    pop.insert(parent)
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    captured: list[str] = []
+    llm = LLMClient(
+        transport=_reflect_transport(captured, verdict="unscored"),
+        sleep=lambda s: None,
+    )
+    reflector = MutationReflector(xs, llm, model="m", batch_size=1)
+
+    child = make_candidate("c0", 0.8, parent_id="p", generation=1)
+    child.report.visible_metrics = {"unscored_items": 9}
+    pop.insert(child)
+    xs.on_candidate_graded(child, pop)
+    reflector.on_candidate_graded(child, pop)
+
+    assert "UNSCORED: 9 problems produced no answer" in captured[0]
+    assert xs.entries[0].lesson["verdict"] == "unscored"
+    # An unscored lesson carries no usable direction: it must stay out of
+    # the prompt rather than steer the next mutation.
+    contributor = ExperienceContributor(xs, mode="lessons")
+    rendered = contributor.contribute(
+        MutationContext(
+            parent=parent,
+            operator="revise",
+            generation=2,
+            archive_inspirations=[],
+            top_k_inspirations=[],
+        )
+    )
+    assert rendered is None or "advice-c0" not in rendered
