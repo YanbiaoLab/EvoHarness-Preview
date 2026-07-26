@@ -336,3 +336,100 @@ def test_feedback_carries_per_tier_accuracy_and_metrics(tmp_path):
     assert report.visible_metrics["acc_tier_1"] > 0      # a=0 / b=0 edge cases
     assert "leaderboard key" in report.structured_feedback["summary"]
     assert json.dumps(report.structured_feedback)        # JSON-serializable
+
+
+# -- lineage: trained weights are not in the genome -------------------------
+
+
+def test_weights_are_inherited_when_the_architecture_is_unchanged(tmp_path):
+    """The genome is three text files, so without a lineage channel every
+    candidate trains from random init and a 120-generation run discards its
+    whole compute budget, each generation throwing away the last."""
+    from evoharness.evoserve import GradeContext
+
+    lineage = tmp_path / "lineage"
+    parent = lineage / "p1"
+    parent.mkdir(parents=True)
+    (parent / "weights.pt").write_bytes(b"trained-weights")
+    (parent / "optimizer.pt").write_bytes(b"opt")
+    (parent / "train_state.json").write_text('{"steps": 12345}')
+
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "arch.py").write_text("D_MODEL = 64\n")
+    (parent / "arch.sha256").write_text(
+        grade_module._arch_digest(child) + "\n"
+    )
+
+    result = grade_module._inherit_from_parent(
+        child,
+        GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage),
+    )
+
+    assert result == {"warm_start": "full", "inherited_steps": 12345}
+    assert (child / "weights.pt").read_bytes() == b"trained-weights"
+    assert (child / "optimizer.pt").exists()
+
+
+def test_a_changed_architecture_cold_starts_rather_than_loading_junk(tmp_path):
+    """Tensor shapes follow arch.py, so inheriting across a changed
+    architecture would load weights that do not fit the model."""
+    from evoharness.evoserve import GradeContext
+
+    lineage = tmp_path / "lineage"
+    parent = lineage / "p1"
+    parent.mkdir(parents=True)
+    (parent / "weights.pt").write_bytes(b"trained-weights")
+    (parent / "arch.sha256").write_text("a" * 64 + "\n")
+
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "arch.py").write_text("D_MODEL = 128   # architecture mutated\n")
+
+    result = grade_module._inherit_from_parent(
+        child,
+        GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage),
+    )
+
+    assert result["warm_start"] == "cold-arch-changed"
+    assert not (child / "weights.pt").exists()
+
+
+def test_no_lineage_channel_means_todays_behaviour(tmp_path):
+    """Every task that has not opted in must keep cold-starting."""
+    from evoharness.evoserve import GradeContext
+
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "arch.py").write_text("D_MODEL = 64\n")
+    result = grade_module._inherit_from_parent(
+        child, GradeContext("c1", tmp_path)
+    )
+    assert result == {"warm_start": "cold", "inherited_steps": 0}
+
+
+def test_publishing_makes_a_candidate_inheritable_by_its_children(tmp_path):
+    from evoharness.evoserve import GradeContext
+
+    lineage = tmp_path / "lineage"
+    cand = tmp_path / "cand"
+    cand.mkdir()
+    (cand / "arch.py").write_text("D_MODEL = 64\n")
+    (cand / "weights.pt").write_bytes(b"w")
+    (cand / "train_state.json").write_text('{"steps": 7}')
+
+    ctx = GradeContext("c1", tmp_path, lineage_dir=lineage)
+    grade_module._publish_to_lineage(cand, ctx)
+
+    published = lineage / "c1"
+    assert (published / "weights.pt").read_bytes() == b"w"
+    assert (published / "arch.sha256").read_text().strip() == (
+        grade_module._arch_digest(cand)
+    )
+    # A child with the same arch.py must now inherit it.
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "arch.py").write_text("D_MODEL = 64\n")
+    assert grade_module._inherit_from_parent(
+        child, GradeContext("c2", tmp_path, parent_id="c1", lineage_dir=lineage)
+    ) == {"warm_start": "full", "inherited_steps": 7}

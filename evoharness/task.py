@@ -53,8 +53,14 @@ def adapt_source_grade_fn(
 class WorkspaceGradeFnGrader:
     """Framework Grader adapter for a user-authored workspace grade function."""
 
-    def __init__(self, grade_func: WorkspaceGradeFn):
+    def __init__(
+        self, grade_func: WorkspaceGradeFn, lineage_dir: Path | None = None
+    ):
         self._grade_func = grade_func
+        # Set by whoever knows the run directory (see run_evolution). Left
+        # None the domain simply gets no lineage and cold-starts, which is
+        # the behaviour every existing task already has.
+        self.lineage_dir = lineage_dir
 
     def grade(self, cand: "Candidate", workdir: Path) -> EvalReport:
         workdir = Path(workdir).resolve()
@@ -65,6 +71,8 @@ class WorkspaceGradeFnGrader:
             workdir=workdir,
             operator=cand.operator,
             generation=cand.generation,
+            parent_id=cand.parent_id,
+            lineage_dir=self.lineage_dir,
         )
         started = time.monotonic()
         try:

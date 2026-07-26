@@ -21,9 +21,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -733,6 +735,78 @@ def _refuse_to_grade_the_seeds(candidate_dir: Path) -> None:
     )
 
 
+_INHERITED = ("weights.pt", "optimizer.pt", "train_state.json")
+
+
+def _arch_digest(candidate_dir: Path) -> str:
+    """Hash of the architecture file — what decides weight compatibility."""
+    path = candidate_dir / "arch.py"
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
+    """Carry trained weights along the lineage when the architecture is
+    unchanged.
+
+    Weights are not in the genome — the genome is three text files — so
+    without this every candidate trains from random initialisation and the
+    run discards its entire compute budget: 120 generations x 90 minutes of
+    training, each throwing away the last. The public h90=10 submission got
+    there the other way, warm-starting a trained model and annealing it
+    repeatedly, and this seed already needs more training than one rung can
+    buy (per-step error 1.6e-5 at tier 9, where tier 10 wants ~1e-5).
+
+    Only `arch.py` identical counts as compatible. A changed architecture
+    could still share shape-matching tensors, but deciding that requires
+    instantiating the candidate's model, which means importing candidate
+    code — and adjudication has to come before any execution. So the safe
+    case is the one taken, and it is also the valuable one: mutations to
+    `train.py` alone (the data distribution) inherit fully.
+
+    Reported so it can be read back later, because inheritance makes fitness
+    path-dependent — a lineage's score then reflects accumulated compute and
+    not only its genome.
+    """
+    if not ctx.lineage_dir or not ctx.parent_id:
+        return {"warm_start": "cold", "inherited_steps": 0}
+    parent = Path(ctx.lineage_dir) / ctx.parent_id
+    if not (parent / "weights.pt").exists():
+        return {"warm_start": "cold", "inherited_steps": 0}
+    parent_arch = (parent / "arch.sha256")
+    if not parent_arch.exists() or parent_arch.read_text().strip() != _arch_digest(
+        candidate_dir
+    ):
+        # Architecture changed: the tensors may not even have the same shapes.
+        return {"warm_start": "cold-arch-changed", "inherited_steps": 0}
+    steps = 0
+    for name in _INHERITED:
+        source = parent / name
+        if source.exists():
+            shutil.copy2(source, candidate_dir / name)
+    state = candidate_dir / "train_state.json"
+    if state.exists():
+        try:
+            steps = int(json.loads(state.read_text()).get("steps", 0))
+        except (ValueError, TypeError):
+            steps = 0
+    return {"warm_start": "full", "inherited_steps": steps}
+
+
+def _publish_to_lineage(candidate_dir: Path, ctx: GradeContext) -> None:
+    """Hand this candidate's trained weights to its children."""
+    if not ctx.lineage_dir:
+        return
+    target = Path(ctx.lineage_dir) / ctx.candidate_id
+    target.mkdir(parents=True, exist_ok=True)
+    for name in _INHERITED:
+        source = candidate_dir / name
+        if source.exists():
+            shutil.copy2(source, target / name)
+    (target / "arch.sha256").write_text(_arch_digest(candidate_dir) + "\n")
+
+
 def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     started = time.monotonic()
     candidate_dir = Path(candidate_dir).resolve()
@@ -760,6 +834,11 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     eval_runner = workdir / "eval_runner.py"
     train_runner.write_text(_TRAIN_RUNNER)
     eval_runner.write_text(_EVAL_RUNNER)
+
+    # After adjudication (importing candidate code is execution, and the
+    # order is load-bearing), before training: inherit the parent's weights
+    # so training continues rather than restarting.
+    lineage = _inherit_from_parent(candidate_dir, ctx)
 
     accuracy: dict[int, float] = {}
     items: list[dict] = []
@@ -860,7 +939,11 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
         if not _promotes(index, accuracy, _h90(accuracy)):
             break
 
-    visible = {**metrics, **_metric_block(accuracy),
+    # Hand the trained weights to this candidate's children. Only done on the
+    # success path: a candidate that faulted has nothing worth inheriting.
+    _publish_to_lineage(candidate_dir, ctx)
+
+    visible = {**metrics, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}
     return Grade(
         fitness=_fitness(accuracy),

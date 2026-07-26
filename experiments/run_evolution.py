@@ -75,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         transport = make_openai_compat_transport(api_base, api_key)
 
+    # Only the run knows where lineage state can live, and only graders that
+    # opted in have the attribute at all.
+    if getattr(task.grader, "lineage_dir", "absent") is None:
+        task.grader.lineage_dir = args.run_dir / "lineage"
+
     ctx = RecipeContext(
         search=search,
         population=population,

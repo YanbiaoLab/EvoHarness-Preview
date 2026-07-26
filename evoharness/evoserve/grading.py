@@ -17,9 +17,17 @@ class InfraError(Exception):
 class GradeContext:
     """Read-only per-job context handed to grade_fn (protocol 'hints')."""
     candidate_id: str
-    workdir: Path 
+    workdir: Path
     operator: str | None = None
     generation: int | None = None
+    # Lineage. Some domains produce expensive per-candidate state that the
+    # genome cannot carry — trained weights above all — and re-deriving it
+    # from scratch every generation throws away the run's whole compute
+    # budget. The framework supplies a persistent directory and the parent's
+    # id; deciding what may be inherited, and when, is the domain's call,
+    # because only the domain knows when two genomes are compatible.
+    parent_id: str | None = None
+    lineage_dir: Path | None = None
 
 
 @dataclass
