@@ -47,6 +47,11 @@ class EvalReport:
     stage_reached: int = 3
     execution_time: float = 0.0
     eval_cost_usd: float = 0.0
+    # Precision of `fitness`, reported by the task (see evoserve.Grade). 0
+    # means "not reported": every LCB below then equals the point estimate,
+    # so a domain that stays silent keeps today's behaviour exactly.
+    n_units: int = 0
+    sem: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -64,6 +69,8 @@ class EvalReport:
             "stage_reached": self.stage_reached,
             "execution_time": self.execution_time,
             "eval_cost_usd": self.eval_cost_usd,
+            "n_units": self.n_units,
+            "sem": self.sem,
         }
 
     @classmethod
@@ -94,6 +101,8 @@ class EvalReport:
             stage_reached=int(d.get("stage_reached", 3)),
             execution_time=float(d.get("execution_time", 0.0)),
             eval_cost_usd=float(d.get("eval_cost_usd", 0.0)),
+            n_units=int(d.get("n_units", 0) or 0),
+            sem=float(d.get("sem", 0.0) or 0.0),
         )
 
     def render_for_prompt(self) -> str:
@@ -140,6 +149,26 @@ class Candidate:
     @property
     def passed(self) -> bool:
         return bool(self.report and self.report.passed)
+
+    def fitness_lcb(self, z: float = 1.0) -> float:
+        """Pessimistic fitness, for COMMITMENT only.
+
+        Picking the argmax of several noisy estimates scores the noise along
+        with the program: the winner is partly whoever got lucky. Measured
+        on this project's own IMO runs — final selection takes the max of 3
+        candidates on 12 items (binomial sem ~0.14) and the chosen program
+        lost 0.206 points between validation and test.
+
+        Parent selection must NOT use this. Exploration wants optimism;
+        discounting a high-variance candidate is how a search stops taking
+        the risks that produce breakthroughs. Pessimism belongs only where
+        we stop searching and commit.
+
+        Domains that report no `sem` get their point estimate back unchanged.
+        """
+        if self.report is None:
+            return 0.0
+        return self.report.fitness - z * self.report.sem
     
     @cached_property
     def workspace(self) -> Workspace:

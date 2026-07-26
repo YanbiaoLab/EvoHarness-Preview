@@ -214,3 +214,30 @@ def test_store_reads_survive_a_worker_thread():
 
     assert not errors
     assert all(r is not None for r in results)
+
+
+def test_lcb_is_the_point_estimate_when_the_domain_reports_no_precision():
+    """A domain that stays silent must keep today's behaviour exactly —
+    otherwise adding the field silently reranks every existing task."""
+    cand = make_candidate("c1", 0.5)
+    assert cand.report.sem == 0.0 and cand.report.n_units == 0
+    assert cand.fitness_lcb() == cand.fitness
+
+
+def test_lcb_discounts_the_less_precise_candidate():
+    loose = make_candidate("loose", 0.60)
+    loose.report.sem, loose.report.n_units = 0.15, 12
+    tight = make_candidate("tight", 0.55)
+    tight.report.sem, tight.report.n_units = 0.02, 400
+
+    # Point estimate prefers `loose`; commitment should prefer `tight`.
+    assert max((loose, tight), key=lambda c: c.fitness) is loose
+    assert max((loose, tight), key=lambda c: c.fitness_lcb()) is tight
+
+
+def test_precision_fields_survive_a_json_round_trip():
+    report = EvalReport(fitness=0.5, passed=True, n_units=12, sem=0.14)
+    back = EvalReport.from_json(report.to_json())
+    assert (back.n_units, back.sem) == (12, 0.14)
+    # Reports written before the fields existed must still load.
+    assert EvalReport.from_json({"fitness": 1.0, "passed": True}).sem == 0.0

@@ -424,10 +424,17 @@ def run_experiment(
             output_dir=run_dir / "validation" / candidate.id,
         )
         validation.append((candidate, result))
+    # Commit pessimistically. Taking the argmax of three estimates measured
+    # on 12 problems scores the noise along with the program: run e5s_r2's
+    # winner scored 0.595 on validation and 0.389 on test. The lower bound
+    # penalises a candidate whose problems disagree the most, which is
+    # exactly the one most likely to be leading by luck. Parent selection
+    # during the search keeps using the point estimate — pessimism there
+    # would suppress exploration.
     selected = max(
         validation,
         key=lambda item: (
-            item[1].points_percentage,
+            item[1].points_percentage - item[1].points_sem,
             -item[1].solver_usage.prompt_tokens
             - item[1].solver_usage.completion_tokens,
             -item[0].generation,
@@ -454,6 +461,19 @@ def run_experiment(
         "selected_candidate_id": selected.id,
         "selected_generation": selected.generation,
         "train_fitness": selected.fitness,
+        # Every finalist's validation score AND its precision. Without this
+        # the selection rule cannot be second-guessed after the fact: the
+        # old summary recorded only who won, not by how much or how surely.
+        "validation": [
+            {
+                "candidate_id": candidate.id,
+                "generation": candidate.generation,
+                "points_percentage": result.points_percentage,
+                "points_sem": result.points_sem,
+                "points_lcb": result.points_percentage - result.points_sem,
+            }
+            for candidate, result in validation
+        ],
         "test_status": test_status,
         "test_points_percentage": (
             test_result.points_percentage if test_result else None

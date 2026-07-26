@@ -38,6 +38,12 @@ class Grade:
     stage_reached: int = 3
     execution_time: float = 0.0
     eval_cost_usd: float = 0.0
+    # How precise this fitness is. Only the task can know: a temperature-0
+    # evaluation has zero repeat variance but real item-sampling variance,
+    # while a training run has both. Left at 0 the harness treats the score
+    # as exact, which is the current behaviour.
+    n_units: int = 0                          # scored items/cases, 0 = not reported
+    sem: float = 0.0                          # standard error of fitness
 
 
 GradeValue = Union["Grade", dict, float, int]
@@ -82,4 +88,6 @@ def coerce_grade(raw: GradeValue) -> dict:
         "stage_reached": int(grade.stage_reached),
         "execution_time": float(grade.execution_time),
         "eval_cost_usd": float(grade.eval_cost_usd),
+        "n_units": int(grade.n_units),
+        "sem": float(grade.sem),
     }

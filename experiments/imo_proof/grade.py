@@ -97,6 +97,8 @@ def to_grade(evaluation: CandidateEvaluation) -> Grade:
         },
         execution_time=sum(item.elapsed_s for item in evaluation.problems),
         eval_cost_usd=total_usage.cost_usd,
+        n_units=n,
+        sem=evaluation.points_sem,
     )
 
 

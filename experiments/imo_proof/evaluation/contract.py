@@ -160,6 +160,30 @@ class CandidateEvaluation:
         return sum(item.points for item in self.problems) / maximum if maximum else 0.0
 
     @property
+    def points_sem(self) -> float:
+        """Standard error of `points_percentage`.
+
+        The score is an average over problems, so its precision is bounded
+        by how much the problems disagree — and at 12 problems that bound is
+        loose (~0.14 when half the items are solved). Repeat evaluation
+        cannot shrink this: all three models run at temperature 0, so the
+        same program on the same problems returns the same answer. Only more
+        problems can.
+
+        Uses the per-problem point fraction, which is exactly the mean
+        behind `points_percentage` when every problem has the same
+        max_points (true for IMO's 7-point scale) and a close approximation
+        otherwise.
+        """
+        n = len(self.problems)
+        if n < 2:
+            return 0.0
+        scores = [item.points / item.max_points for item in self.problems]
+        mean = sum(scores) / n
+        variance = sum((s - mean) ** 2 for s in scores) / (n - 1)
+        return math.sqrt(variance / n)
+
+    @property
     def correct_percentage(self) -> float:
         if not self.problems:
             return 0.0
