@@ -18,7 +18,6 @@ import os
 import shutil
 import statistics
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -34,33 +33,45 @@ from experiments.modmul.task import PRIMARY_SEED, _SEEDS  # noqa: E402
 
 def main() -> int:
     names = sys.argv[1:] or [PRIMARY_SEED]
+    root = Path("results/modmul_baseline")
+    root.mkdir(parents=True, exist_ok=True)
     out = Path("results/modmul_baseline.json")
-    out.parent.mkdir(exist_ok=True)
     recorded = json.loads(out.read_text()) if out.exists() else {}
 
     for name in names:
         started = time.monotonic()
         print(f"\n=== seed {name} (full rungs, this takes ~1.5h of training)")
-        with tempfile.TemporaryDirectory(prefix=f"modmul_base_{name}_") as tmp:
-            # Grade a COPY. Training is resumable by contract — train() picks
-            # up from whatever weights already sit in model_dir and writes
-            # back there — so handing grade_workspace a repo path retrains
-            # the committed seed in place. The first version of this script
-            # did exactly that and pushed limb_horner from 5,577 steps to
-            # 37,088, which both invalidated the measurement (it was no
-            # longer a baseline) and moved the starting point of every
-            # future run.
-            candidate = Path(tmp) / "candidate"
-            shutil.copytree(_SEEDS / name, candidate)
-            grade = grade_workspace(
-                candidate,
-                GradeContext(
-                    candidate_id=f"baseline-{name}",
-                    workdir=Path(tmp) / "work",
-                    operator="seed",
-                    generation=0,
-                ),
-            )
+        # Grade a COPY, and KEEP it. Two separate mistakes made in one day:
+        #
+        #  * training is resumable by contract — train() continues from
+        #    whatever weights sit in model_dir and writes back there — so
+        #    handing grade_workspace a repo path retrains the committed seed
+        #    in place, which pushed limb_horner from 5,577 to 37,088 steps
+        #    and silently stopped the measurement being a baseline;
+        #  * the fix for that graded inside a TemporaryDirectory, which threw
+        #    away the trained weights on exit. 85 minutes of training reached
+        #    h90=9 and left nothing behind but a metrics dict — and those
+        #    weights are the artifact a submission is built from.
+        #
+        # So: a fresh copy under a persistent directory, refusing to reuse an
+        # existing one, since silently resuming is the first mistake again.
+        candidate = root / name / "candidate"
+        if candidate.exists():
+            print(f"  {candidate} already exists — refusing to resume into it.")
+            print("  Move or delete it to re-measure from the committed seed.")
+            return 1
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(_SEEDS / name, candidate)
+        grade = grade_workspace(
+            candidate,
+            GradeContext(
+                candidate_id=f"baseline-{name}",
+                workdir=root / name / "work",
+                operator="seed",
+                generation=0,
+            ),
+        )
+        print(f"  trained weights kept at {candidate}")
         metrics = {**grade.visible_metrics, **grade.hidden_metrics}
         accuracies = {
             tier: float(metrics.get(f"acc_tier_{tier}", 0.0))
