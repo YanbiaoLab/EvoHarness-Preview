@@ -673,6 +673,96 @@ def _perturbation_verdict(
     return None, metrics
 
 
+COST_PROBE_TIERS = (9, 10)
+COST_PROBE_CASES = 3
+
+
+def _cost_projection(
+    runner: Path,
+    model_dir: Path,
+    workdir: Path,
+    measured: dict[int, float],
+    measured_cases: int,
+) -> dict:
+    """Project whether the top tiers can be answered inside the time budget.
+
+    The budget is the binding constraint at tiers 9-10 and it is invisible
+    until R2, ninety minutes in. Measured on the limb_horner seed: tiers 1-8
+    were all at 100% and tier 9 at 92%, yet tier 10 scored 0 without running
+    a single case, because tier 9 alone consumed 83% of the whole budget.
+    Nothing in the feedback said so — `infer_s_tier_10` was simply absent.
+
+    Timing does not depend on accuracy, so a handful of cases answers it. Run
+    once at the first promotion, this turns a ninety-minute surprise into a
+    dense signal available in the first few minutes, on the axis that
+    actually decides how far a candidate can reach.
+    """
+    truth = {t: _load_cases(t, COST_PROBE_CASES) for t in COST_PROBE_TIERS}
+    truth = {t: cases for t, cases in truth.items() if cases}
+    if not truth:
+        return {}
+    tiers = tuple(sorted(truth))
+    total = sum(len(c) for c in truth.values())
+    plan = {
+        # Generous: this measures cost, so it must not be cut off by the very
+        # budget it is measuring.
+        "mode": "normal",
+        "budget_s": SECONDS_PER_PROBLEM * total * 100,
+        "order": [str(t) for t in tiers],
+        "cases": {str(t): _inputs_only(truth[t]) for t in tiers},
+    }
+    result, fault = _run_eval(runner, model_dir, plan, workdir, "costprobe")
+    if result is None or result.get("error"):
+        return {"cost_probe": "unavailable"}
+    out: dict = {"cost_probe": "checked"}
+    scored_cases = RUNGS[-1].cases
+    # The budget is ONE shared pool for the whole set, so the cheap low tiers
+    # subsidise the expensive high ones. Comparing the top tiers against a
+    # pro-rata slice of the budget said 13x over when the truth was 2.9x — a
+    # 4x exaggeration on the one signal that matters. Project the whole set:
+    # the tiers already measured this rung, rescaled to the final case count,
+    # plus the probed cost of the top tiers.
+    projected = {
+        tier: seconds / measured_cases * scored_cases
+        for tier, seconds in measured.items()
+        # A tier that timed as zero carries no rate to extrapolate from, and
+        # dividing by it is how the first version of this crashed.
+        if measured_cases > 0 and seconds > 0
+    }
+    for tier in tiers:
+        payload = result["tiers"].get(str(tier))
+        if not payload:
+            continue
+        per_case = float(payload.get("seconds", 0.0)) / len(truth[tier])
+        out[f"probe_s_per_case_tier_{tier}"] = round(per_case, 4)
+        out[f"projected_infer_s_tier_{tier}"] = round(per_case * scored_cases, 1)
+        if per_case > 0:
+            projected[tier] = per_case * scored_cases
+    # Tiers between the measured ones and the probed ones are unknown here;
+    # cost grows with operand width, so interpolate each gap geometrically
+    # rather than pretending the gap is free.
+    known = sorted(projected)
+    for low, high in zip(known, known[1:]):
+        gap = [t for t in range(low + 1, high) if t in SCORED_TIERS]
+        if not gap or projected[low] <= 0:
+            continue
+        ratio = (projected[high] / projected[low]) ** (1 / (high - low))
+        for step, tier in enumerate(gap, start=1):
+            projected[tier] = projected[low] * ratio ** step
+    total = sum(projected.values())
+    if total <= 0:
+        # Nothing measurable — say so rather than reporting a fabricated
+        # headroom, which is exactly what a mutation would learn to game.
+        return {"cost_probe": "unmeasurable"}
+    out["projected_infer_s_all_tiers"] = round(total, 1)
+    allowed = SECONDS_PER_PROBLEM * (scored_cases * len(SCORED_TIERS) + 20)
+    if total > 0:
+        # Below 1.0: the top tiers cannot be answered in time however accurate
+        # the model becomes. 1/headroom is the speedup required.
+        out["budget_headroom"] = round(allowed / total, 3)
+    return out
+
+
 def _holdout_metrics(
     runner: Path,
     model_dir: Path,
@@ -938,6 +1028,18 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
         if not _promotes(index, accuracy, _h90(accuracy)):
             break
+        if index == 0 and "cost_probe" not in metrics:
+            # At the first promotion: cheap enough to be worth it only for a
+            # candidate that survived R0, early enough to matter.
+            cost = _cost_projection(
+                eval_runner, candidate_dir, workdir, seconds, rung.cases
+            )
+            metrics.update(cost)
+            if cost.get("budget_headroom", 1.0) < 1.0:
+                diagnostic["budget_verdict"] = (
+                    "top tiers project over the time budget; accuracy there "
+                    "cannot be scored until inference gets faster"
+                )
 
     # Hand the trained weights to this candidate's children. Only done on the
     # success path: a candidate that faulted has nothing worth inheriting.

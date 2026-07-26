@@ -433,3 +433,44 @@ def test_publishing_makes_a_candidate_inheritable_by_its_children(tmp_path):
     assert grade_module._inherit_from_parent(
         child, GradeContext("c2", tmp_path, parent_id="c1", lineage_dir=lineage)
     ) == {"warm_start": "full", "inherited_steps": 7}
+
+
+def test_cost_projection_recovers_the_measured_speedup_requirement():
+    """The time budget is what actually caps this domain, and it only reveals
+    itself at R2. The real baseline run: tiers 1-8 all at 100%, tier 9 at 92%,
+    tier 10 at 0 without a single case run, because tier 9 alone ate 83% of
+    the budget. `infer_s_tier_10` was simply absent from the report.
+
+    A projection from R0 must recover that, and must not exaggerate it: an
+    earlier version compared the top tiers against a pro-rata slice of the
+    budget and reported 13x over when the truth was 2.9x. The budget is one
+    shared pool — cheap low tiers subsidise expensive high ones.
+    """
+    real = {1: 0.185, 2: 0.691, 3: 1.569, 4: 1.419, 5: 3.523,
+            6: 10.815, 7: 12.063, 8: 34.342, 9: 117.644}
+    scored = grade_module.RUNGS[-1].cases
+    truth_total = sum(real.values()) + real[9] * 2      # tier 10 ~ 2x tier 9
+
+    # What R0 sees (tiers 1-3 at 30 cases) plus a 3-case probe of tiers 9-10.
+    projected = {t: real[t] / 50 * scored for t in (1, 2, 3)}
+    projected[9] = real[9] / 50 * scored
+    projected[10] = real[9] / 50 * 2 * scored
+    known = sorted(projected)
+    for low, high in zip(known, known[1:]):
+        gap = [t for t in range(low + 1, high) if t in grade_module.SCORED_TIERS]
+        if not gap:
+            continue
+        ratio = (projected[high] / projected[low]) ** (1 / (high - low))
+        for step, tier in enumerate(gap, start=1):
+            projected[tier] = projected[low] * ratio ** step
+
+    allowed = grade_module.SECONDS_PER_PROBLEM * (
+        scored * len(grade_module.SCORED_TIERS) + 20
+    )
+    required = sum(projected.values()) / allowed
+    truth_required = truth_total / allowed
+
+    assert truth_required > 1.0, "the real run was over budget; the test data is wrong"
+    # Within 25% of the truth, and pessimistic rather than optimistic — a gate
+    # that under-reports the wall is worse than one that over-reports it.
+    assert truth_required <= required <= truth_required * 1.25
