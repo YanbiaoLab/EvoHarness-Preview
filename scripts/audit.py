@@ -63,12 +63,22 @@ def audit(run_dir):
     # every other check still passes, because the last checkpoint is
     # perfectly valid — it is just old. One live run sat like this for 2h04m.
     if rr.get("stopped_reason") == "running":
-        newest = max(
-            (os.path.getmtime(os.path.join(run_dir, f))
-             for f in os.listdir(run_dir)
-             if os.path.isfile(os.path.join(run_dir, f))),
-            default=None,
-        )
+        # Walk the tree: the final evaluation phase writes only into
+        # per-candidate subdirectories, so a root-only check reported a
+        # two-hour stall on a run that was working the whole time.
+        # Walk the tree AND the sibling log: the final evaluation phase
+        # writes one file per candidate, minutes apart, so file mtimes alone
+        # reported a stall on a run that was working the whole time. The log
+        # is the only continuous liveness signal a hang actually silences.
+        candidates = [
+            os.path.getmtime(os.path.join(parent, f))
+            for parent, _, files in os.walk(run_dir)
+            for f in files
+        ]
+        log_path = str(run_dir).rstrip("/") + ".log"
+        if os.path.isfile(log_path):
+            candidates.append(os.path.getmtime(log_path))
+        newest = max(candidates, default=None)
         if newest is not None:
             idle_min = (time.time() - newest) / 60
             report("STALL" if idle_min > 20 else OK, "progress",
