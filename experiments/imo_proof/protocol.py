@@ -128,17 +128,22 @@ class GraderSpec:
 
 @dataclass(frozen=True)
 class SolverBudget:
-    max_calls_per_problem: int = 8
-    max_prompt_tokens_per_problem: int = 32_768
-    max_completion_tokens_per_problem: int = 16_384
-    timeout_s_per_problem: float = 300.0
+    # A per-problem cap that binds does not slow a candidate down, it voids
+    # the measurement: the problem scores zero without being graded. So
+    # these defaults are backstops against a runaway loop, sized well above
+    # any strategy worth searching over, not a spending limit. Spending is
+    # bounded at run level by OptimizerBudget.max_candidates.
+    max_calls_per_problem: int = 32
+    max_prompt_tokens_per_problem: int = 600_000
+    max_completion_tokens_per_problem: int = 400_000
+    timeout_s_per_problem: float = 5400.0
     # Ceiling for ONE request, distinct from the per-problem budget above.
     # Handing the whole problem budget to a socket makes a half-dead
     # connection (ESTABLISHED, no bytes) hang for the full budget, once per
     # retry: a live run stalled 2h04m on a 3000s budget before anyone
     # noticed, because nothing distinguishes "this call is stuck" from
     # "this problem may legitimately take a while".
-    request_timeout_s: float = 180.0
+    request_timeout_s: float = 300.0
     max_cost_usd_per_problem: float | None = None
 
     def __post_init__(self) -> None:
@@ -156,10 +161,13 @@ class SolverBudget:
 
 @dataclass(frozen=True)
 class OptimizerBudget:
+    # max_candidates is the run budget and is the one limit here that is
+    # SUPPOSED to bind: reaching it ends the run cleanly, unlike a
+    # per-candidate cap, which truncates a proposal mid-edit.
     max_candidates: int = 5
-    max_turns_per_candidate: int = 12
-    max_tool_calls_per_candidate: int = 40
-    timeout_s_per_candidate: float = 300.0
+    max_turns_per_candidate: int = 48
+    max_tool_calls_per_candidate: int = 120
+    timeout_s_per_candidate: float = 5400.0
     max_total_cost_usd: float | None = None
 
     def __post_init__(self) -> None:
@@ -336,7 +344,12 @@ class BenchmarkSpec:
 
 
 def default_spec_path() -> Path:
-    return Path(__file__).with_name("benchmark.v1.json")
+    # v1 is kept, not edited: its fingerprint is what every recorded run was
+    # measured under, and a spec edited in place would silently reinterpret
+    # those results. New runs use v2, whose per-problem budgets are wide
+    # enough that hitting one means something is genuinely wrong rather than
+    # that the candidate chose a more thorough strategy.
+    return Path(__file__).with_name("benchmark.v2.json")
 
 
 def load_default_spec() -> BenchmarkSpec:

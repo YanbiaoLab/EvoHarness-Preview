@@ -18,12 +18,19 @@ class ProposalConfig:
 
     mode: str = "single_shot"
     model: str | None = None
-    max_turns: int = 12
-    max_tool_calls: int = 40
-    timeout_s: float = 300.0
+    # Raised from upstream parity (12/40/300s/32k). Measured on run e5s_r2:
+    # sessions used 11.4 turns and 12.4 tool calls on average, so none of
+    # these bound — but a proposal cut off mid-edit produces a broken
+    # workspace, and the compaction that max_input_tokens drives rewrites
+    # history and drops the provider prompt cache. Both are expensive
+    # failure modes to sit close to, and the headroom costs nothing when
+    # unused.
+    max_turns: int = 48
+    max_tool_calls: int = 120
+    timeout_s: float = 5400.0
     max_cost_usd: float | None = None
     max_repair_rounds: int = 3
-    max_input_tokens: int = 32_768
+    max_input_tokens: int = 131_072
     max_parallel_tools: int = 4
     # Mirrors the validated keep-recent-5 window used by production
     # tool-using agents; older results of expiring tools are cleared.

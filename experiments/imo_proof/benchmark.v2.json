@@ -1,5 +1,5 @@
 {
-  "benchmark_id": "imo-proof-v1",
+  "benchmark_id": "imo-proof-v2",
   "candidate": {
     "entrypoint": "solver:solve",
     "max_file_bytes": 262144,
@@ -38,10 +38,10 @@
   },
   "optimizer_budget": {
     "max_candidates": 15,
-    "max_tool_calls_per_candidate": 40,
+    "max_tool_calls_per_candidate": 120,
     "max_total_cost_usd": null,
-    "max_turns_per_candidate": 20,
-    "timeout_s_per_candidate": 3000.0
+    "max_turns_per_candidate": 48,
+    "timeout_s_per_candidate": 5400.0
   },
   "schema_version": 1,
   "scoring": {
@@ -61,12 +61,12 @@
     "temperature": 0.0
   },
   "solver_budget": {
-    "max_calls_per_problem": 8,
-    "max_completion_tokens_per_problem": 200000,
+    "max_calls_per_problem": 32,
+    "max_completion_tokens_per_problem": 400000,
     "max_cost_usd_per_problem": null,
-    "max_prompt_tokens_per_problem": 200000,
-    "request_timeout_s": 180.0,
-    "timeout_s_per_problem": 3000.0
+    "max_prompt_tokens_per_problem": 600000,
+    "request_timeout_s": 300.0,
+    "timeout_s_per_problem": 5400.0
   },
   "splits": {
     "test": [

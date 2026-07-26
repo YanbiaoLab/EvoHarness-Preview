@@ -959,3 +959,37 @@ def test_a_couple_of_faults_still_count_as_a_real_measurement():
     grade = to_grade(_mixed_evaluation(n_failed=2))
     assert grade.visible_metrics["unscored_items"] == 2
     assert grade.passed is True and grade.fault is None
+
+
+def test_v1_spec_is_preserved_so_recorded_runs_stay_interpretable():
+    """Every run under results/ recorded this fingerprint in its manifest.
+    Editing v1 in place would silently reinterpret those results, so new
+    budgets go in v2 and v1 is frozen."""
+    from experiments.imo_proof.protocol import BenchmarkSpec
+
+    v1 = BenchmarkSpec.load(PROJECT_ROOT / "experiments/imo_proof/benchmark.v1.json")
+    assert v1.benchmark_id == "imo-proof-v1"
+    assert v1.fingerprint == (
+        "93649c7b7132985ed38b00b2b7279c74e9a5674c9029416c675bbfe4dc0a7ab1"
+    )
+    assert v1.solver_budget.max_calls_per_problem == 8
+
+
+def test_default_spec_is_v2_and_its_per_problem_caps_are_backstops():
+    """A per-problem cap that binds voids the measurement rather than
+    slowing the candidate down, so every one of them must sit far above
+    observed usage: across all recorded runs the maxima were 8 calls (at
+    the old cap), 58k prompt tokens, 30k completion tokens, 873 seconds."""
+    spec = load_default_spec()
+
+    assert spec.benchmark_id == "imo-proof-v2"
+    assert spec.solver_budget.max_calls_per_problem >= 32
+    assert spec.solver_budget.max_prompt_tokens_per_problem >= 10 * 58_000
+    assert spec.solver_budget.max_completion_tokens_per_problem >= 10 * 30_000
+    assert spec.solver_budget.timeout_s_per_problem >= 6 * 873
+    # A single stuck socket must still be caught long before the problem
+    # budget: a live run once hung 2h04m because the two were conflated.
+    assert (
+        spec.solver_budget.request_timeout_s
+        < spec.solver_budget.timeout_s_per_problem / 10
+    )

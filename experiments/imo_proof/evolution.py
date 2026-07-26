@@ -78,7 +78,11 @@ def _evaluate_candidate(
     split: str,
     output_dir: Path,
     retries: int = 3,
-    deadline_s: float = 3600.0,
+    # Must stay above one attempt's worst case, or the wall-clock bound
+    # silently disables retrying altogether. With the v2 per-problem call
+    # budget an attempt can legitimately run four times longer than under
+    # v1, so this moves with it.
+    deadline_s: float = 7200.0,
 ):
     # Final validation/test evals aren't checkpointed; a single transient
     # provider timeout would otherwise discard a whole completed run. Retry
