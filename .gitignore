@@ -10,3 +10,7 @@ third_party
 __pycache__/
 *.egg-info/
 node_modules/
+
+# torch.distributed.rpc jit writes these into whatever directory it is
+# pointed at; a training run inside a seed dir got one committed (0366c56).
+experiments/modmul/seeds/*/tmp*/
