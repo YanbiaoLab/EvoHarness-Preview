@@ -136,7 +136,31 @@ def train(model_dir: str) -> None:
     device = pick_device()
     cell = HornerCell().to(device)
     if weights_path.exists():
-        cell.load_state_dict(torch.load(weights_path, map_location=device))
+        # Load per TENSOR, not all-or-nothing. RADIX_BITS only enters
+        # in_features = 3k + 4, so raising it reshapes exactly one matrix
+        # (embed's first Linear) — 896 of 91,841 parameters. A strict load
+        # rejects the whole checkpoint over that 1% and the candidate starts
+        # from noise, which makes the single highest-value mutation the most
+        # expensive one to try. Keep every tensor whose name and shape still
+        # match; leave the rest at their fresh initialisation.
+        incoming = torch.load(weights_path, map_location=device)
+        current = cell.state_dict()
+        usable = {
+            name: tensor
+            for name, tensor in incoming.items()
+            if name in current and current[name].shape == tensor.shape
+        }
+        current.update(usable)
+        cell.load_state_dict(current)
+        if len(usable) < len(current):
+            kept = sum(t.numel() for t in usable.values())
+            total = sum(t.numel() for t in current.values())
+            print(f"[train] partial warm start: kept {len(usable)}/{len(current)} "
+                  f"tensors, {kept}/{total} params ({kept / total:.1%})",
+                  flush=True)
+            # The optimizer state is keyed by parameter position, so it no
+            # longer lines up once the shapes moved; start it fresh.
+            opt_path = Path(str(opt_path) + ".stale")
     opt = torch.optim.AdamW(cell.parameters(), lr=LR, weight_decay=WD)
     if opt_path.exists():
         try:

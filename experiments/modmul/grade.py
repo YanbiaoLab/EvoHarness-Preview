@@ -828,12 +828,41 @@ def _refuse_to_grade_the_seeds(candidate_dir: Path) -> None:
 _INHERITED = ("weights.pt", "optimizer.pt", "train_state.json")
 
 
+def _digest(candidate_dir: Path, *names: str) -> str:
+    """Hash of the named genome files, in order."""
+    sha = hashlib.sha256()
+    for name in names:
+        path = candidate_dir / name
+        sha.update(path.read_bytes() if path.exists() else b"")
+    return sha.hexdigest()
+
+
 def _arch_digest(candidate_dir: Path) -> str:
-    """Hash of the architecture file — what decides weight compatibility."""
-    path = candidate_dir / "arch.py"
-    if not path.exists():
-        return ""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """What decides whether the parent's weights can be loaded at all."""
+    return _digest(candidate_dir, "arch.py")
+
+
+def _training_digest(candidate_dir: Path) -> str:
+    """What decides whether training would do anything new.
+
+    `train.py` imports only from `arch.py`, never from `model.py`, so a
+    mutation that touches only the inference contract produces byte-identical
+    training. Paying ninety minutes to re-derive weights we already hold is
+    pure waste — and the largest known win in this domain is an inference-time
+    setting with no retraining at all, which is exactly the axis that waste
+    falls on.
+    """
+    return _digest(candidate_dir, "arch.py", "train.py")
+
+
+def _pretrained_dir(lineage_dir: Path, training_digest: str) -> Path:
+    """Content-addressed store of already-trained weights.
+
+    Keyed by what produced them rather than by who produced them, so a seed
+    with no parent, a child that changed nothing about training, and a second
+    island that converged on the same recipe all hit the same entry.
+    """
+    return Path(lineage_dir) / "_pretrained" / training_digest
 
 
 def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
@@ -848,53 +877,92 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
     repeatedly, and this seed already needs more training than one rung can
     buy (per-step error 1.6e-5 at tier 9, where tier 10 wants ~1e-5).
 
-    Only `arch.py` identical counts as compatible. A changed architecture
-    could still share shape-matching tensors, but deciding that requires
-    instantiating the candidate's model, which means importing candidate
-    code — and adjudication has to come before any execution. So the safe
-    case is the one taken, and it is also the valuable one: mutations to
-    `train.py` alone (the data distribution) inherit fully.
+    Weights are copied in whenever a source exists; whether they are USABLE
+    is settled per tensor by the candidate's own loader, which keeps every
+    tensor whose name and shape still match. That matters because changing
+    RADIX_BITS reshapes exactly one matrix — 896 of 91,841 parameters — and
+    an all-or-nothing rule would reject the whole checkpoint over 1%, making
+    the highest-value mutation the most expensive one to try.
+
+    Two sources, in order: the parent, and failing that a content-addressed
+    store keyed by what produced the weights rather than by who. The second
+    is what lets a seed skip re-deriving weights already measured, and lets
+    two islands that converge on the same recipe share training.
 
     Reported so it can be read back later, because inheritance makes fitness
     path-dependent — a lineage's score then reflects accumulated compute and
     not only its genome.
     """
-    if not ctx.lineage_dir or not ctx.parent_id:
+    if not ctx.lineage_dir:
         return {"warm_start": "cold", "inherited_steps": 0}
-    parent = Path(ctx.lineage_dir) / ctx.parent_id
-    if not (parent / "weights.pt").exists():
+    arch = _arch_digest(candidate_dir)
+    source = None
+    origin = "cold"
+    if ctx.parent_id:
+        parent = Path(ctx.lineage_dir) / ctx.parent_id
+        if (parent / "weights.pt").exists():
+            source, origin = parent, "parent"
+    if source is None:
+        cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
+        if (cached / "weights.pt").exists():
+            source, origin = cached, "pretrained"
+    if source is None:
         return {"warm_start": "cold", "inherited_steps": 0}
-    parent_arch = (parent / "arch.sha256")
-    if not parent_arch.exists() or parent_arch.read_text().strip() != _arch_digest(
-        candidate_dir
-    ):
-        # Architecture changed: the tensors may not even have the same shapes.
-        return {"warm_start": "cold-arch-changed", "inherited_steps": 0}
-    steps = 0
+
     for name in _INHERITED:
-        source = parent / name
-        if source.exists():
-            shutil.copy2(source, candidate_dir / name)
+        path = source / name
+        if path.exists():
+            shutil.copy2(path, candidate_dir / name)
+    steps = 0
     state = candidate_dir / "train_state.json"
     if state.exists():
         try:
             steps = int(json.loads(state.read_text()).get("steps", 0))
         except (ValueError, TypeError):
             steps = 0
-    return {"warm_start": "full", "inherited_steps": steps}
+    recorded = (source / "arch.sha256")
+    same_arch = recorded.exists() and recorded.read_text().strip() == arch
+    return {
+        # `partial` is not a failure: the loader keeps what fits, and the
+        # candidate only has to relearn the tensors the mutation reshaped.
+        "warm_start": f"{origin}-full" if same_arch else f"{origin}-partial",
+        "inherited_steps": steps,
+    }
+
+
+def _may_skip_training(candidate_dir: Path, ctx: GradeContext) -> bool:
+    """True when training would only reproduce weights already held.
+
+    `train.py` imports from `arch.py` and never from `model.py`, so a
+    mutation confined to the inference contract trains to byte-identical
+    weights. Ninety minutes to re-derive them is the single largest waste in
+    the loop — and it falls on the axis where the largest known win lives,
+    an inference-time setting requiring no retraining at all.
+    """
+    if not ctx.lineage_dir:
+        return False
+    cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
+    return (cached / "weights.pt").exists()
 
 
 def _publish_to_lineage(candidate_dir: Path, ctx: GradeContext) -> None:
-    """Hand this candidate's trained weights to its children."""
+    """Hand these trained weights to children, and to anything that would
+    otherwise re-derive them."""
     if not ctx.lineage_dir:
         return
-    target = Path(ctx.lineage_dir) / ctx.candidate_id
-    target.mkdir(parents=True, exist_ok=True)
-    for name in _INHERITED:
-        source = candidate_dir / name
-        if source.exists():
-            shutil.copy2(source, target / name)
-    (target / "arch.sha256").write_text(_arch_digest(candidate_dir) + "\n")
+    targets = [Path(ctx.lineage_dir) / ctx.candidate_id]
+    cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
+    if not (cached / "weights.pt").exists():
+        # First to train this exact recipe fills the shared entry; later ones
+        # read it instead of paying for it again.
+        targets.append(cached)
+    for target in targets:
+        target.mkdir(parents=True, exist_ok=True)
+        for name in _INHERITED:
+            source = candidate_dir / name
+            if source.exists():
+                shutil.copy2(source, target / name)
+        (target / "arch.sha256").write_text(_arch_digest(candidate_dir) + "\n")
 
 
 def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
@@ -929,6 +997,8 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # order is load-bearing), before training: inherit the parent's weights
     # so training continues rather than restarting.
     lineage = _inherit_from_parent(candidate_dir, ctx)
+    skip_training = _may_skip_training(candidate_dir, ctx)
+    lineage["training_skipped"] = skip_training
 
     accuracy: dict[int, float] = {}
     items: list[dict] = []
@@ -940,18 +1010,19 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
     for index, rung in enumerate(_rungs()):
         reached = rung
-        fault = _run_training(train_runner, candidate_dir, rung.train_seconds)
-        if fault:
-            return Grade(
-                fitness=_fitness(accuracy), passed=False, stage_reached=1,
-                fault=fault,
-                visible_metrics={"rung": rung.name, **_metric_block(accuracy)},
-                structured_feedback=_empty_feedback(
-                    f"training failed at {rung.name}: {fault[:160]}"
-                ),
-                execution_time=time.monotonic() - started,
-            )
-        train_spent += rung.train_seconds
+        if not skip_training:
+            fault = _run_training(train_runner, candidate_dir, rung.train_seconds)
+            if fault:
+                return Grade(
+                    fitness=_fitness(accuracy), passed=False, stage_reached=1,
+                    fault=fault,
+                    visible_metrics={"rung": rung.name, **_metric_block(accuracy)},
+                    structured_feedback=_empty_feedback(
+                        f"training failed at {rung.name}: {fault[:160]}"
+                    ),
+                    execution_time=time.monotonic() - started,
+                )
+            train_spent += rung.train_seconds
 
         tiers = rung.tiers
         truth = {t: _load_cases(t, rung.cases) for t in tiers}

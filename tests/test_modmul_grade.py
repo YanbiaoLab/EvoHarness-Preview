@@ -357,23 +357,23 @@ def test_weights_are_inherited_when_the_architecture_is_unchanged(tmp_path):
     child = tmp_path / "child"
     child.mkdir()
     (child / "arch.py").write_text("D_MODEL = 64\n")
-    (parent / "arch.sha256").write_text(
-        grade_module._arch_digest(child) + "\n"
-    )
+    (parent / "arch.sha256").write_text(grade_module._arch_digest(child) + "\n")
 
     result = grade_module._inherit_from_parent(
-        child,
-        GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage),
+        child, GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage)
     )
 
-    assert result == {"warm_start": "full", "inherited_steps": 12345}
+    assert result["warm_start"] == "parent-full"
+    assert result["inherited_steps"] == 12345
     assert (child / "weights.pt").read_bytes() == b"trained-weights"
-    assert (child / "optimizer.pt").exists()
 
 
-def test_a_changed_architecture_cold_starts_rather_than_loading_junk(tmp_path):
-    """Tensor shapes follow arch.py, so inheriting across a changed
-    architecture would load weights that do not fit the model."""
+def test_a_changed_architecture_still_inherits_what_fits(tmp_path):
+    """Raising RADIX_BITS reshapes exactly one matrix — 896 of 91,841
+    parameters. Rejecting the whole checkpoint over 1% made the highest-value
+    mutation the most expensive one to try, and it had to compete against
+    siblings carrying ninety minutes of inherited training. The loader decides
+    per tensor; the harness just supplies the file."""
     from evoharness.evoserve import GradeContext
 
     lineage = tmp_path / "lineage"
@@ -384,15 +384,14 @@ def test_a_changed_architecture_cold_starts_rather_than_loading_junk(tmp_path):
 
     child = tmp_path / "child"
     child.mkdir()
-    (child / "arch.py").write_text("D_MODEL = 128   # architecture mutated\n")
+    (child / "arch.py").write_text("RADIX_BITS = 2   # architecture mutated\n")
 
     result = grade_module._inherit_from_parent(
-        child,
-        GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage),
+        child, GradeContext("c1", tmp_path, parent_id="p1", lineage_dir=lineage)
     )
 
-    assert result["warm_start"] == "cold-arch-changed"
-    assert not (child / "weights.pt").exists()
+    assert result["warm_start"] == "parent-partial"
+    assert (child / "weights.pt").exists(), "a 1% reshape must not cost 100%"
 
 
 def test_no_lineage_channel_means_todays_behaviour(tmp_path):
@@ -402,37 +401,89 @@ def test_no_lineage_channel_means_todays_behaviour(tmp_path):
     child = tmp_path / "child"
     child.mkdir()
     (child / "arch.py").write_text("D_MODEL = 64\n")
-    result = grade_module._inherit_from_parent(
-        child, GradeContext("c1", tmp_path)
-    )
+    result = grade_module._inherit_from_parent(child, GradeContext("c1", tmp_path))
     assert result == {"warm_start": "cold", "inherited_steps": 0}
 
 
-def test_publishing_makes_a_candidate_inheritable_by_its_children(tmp_path):
+def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_path):
+    """Seeds have no parent, so without a content-addressed store every run
+    re-derives weights already measured — ninety minutes to reproduce a file
+    on disk. Keyed by what produced the weights, not by who."""
     from evoharness.evoserve import GradeContext
 
     lineage = tmp_path / "lineage"
-    cand = tmp_path / "cand"
-    cand.mkdir()
-    (cand / "arch.py").write_text("D_MODEL = 64\n")
-    (cand / "weights.pt").write_bytes(b"w")
-    (cand / "train_state.json").write_text('{"steps": 7}')
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "arch.py").write_text("RADIX_BITS = 1\n")
+    (seed / "train.py").write_text("LR = 1e-3\n")
+    (seed / "weights.pt").write_bytes(b"w")
+    (seed / "train_state.json").write_text('{"steps": 5577}')
 
-    ctx = GradeContext("c1", tmp_path, lineage_dir=lineage)
-    grade_module._publish_to_lineage(cand, ctx)
+    ctx = GradeContext("s1", tmp_path, lineage_dir=lineage)
+    grade_module._publish_to_lineage(seed, ctx)
 
-    published = lineage / "c1"
-    assert (published / "weights.pt").read_bytes() == b"w"
-    assert (published / "arch.sha256").read_text().strip() == (
-        grade_module._arch_digest(cand)
+    # A second parentless candidate with the same arch+train hits the store.
+    twin = tmp_path / "twin"
+    twin.mkdir()
+    (twin / "arch.py").write_text("RADIX_BITS = 1\n")
+    (twin / "train.py").write_text("LR = 1e-3\n")
+    twin_ctx = GradeContext("s2", tmp_path, lineage_dir=lineage)
+
+    result = grade_module._inherit_from_parent(twin, twin_ctx)
+    assert result["warm_start"] == "pretrained-full"
+    assert result["inherited_steps"] == 5577
+    # ...and training would only re-derive what it just loaded.
+    assert grade_module._may_skip_training(twin, twin_ctx) is True
+
+
+def test_changing_the_recipe_does_not_skip_training(tmp_path):
+    """The fast path is only sound while training would be byte-identical.
+    train.py decides the data distribution, so touching it must retrain."""
+    from evoharness.evoserve import GradeContext
+
+    lineage = tmp_path / "lineage"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "arch.py").write_text("RADIX_BITS = 1\n")
+    (seed / "train.py").write_text("LR = 1e-3\n")
+    (seed / "weights.pt").write_bytes(b"w")
+    grade_module._publish_to_lineage(
+        seed, GradeContext("s1", tmp_path, lineage_dir=lineage)
     )
-    # A child with the same arch.py must now inherit it.
+
+    changed = tmp_path / "changed"
+    changed.mkdir()
+    (changed / "arch.py").write_text("RADIX_BITS = 1\n")
+    (changed / "train.py").write_text("LR = 3e-4   # recipe mutated\n")
+    ctx = GradeContext("c1", tmp_path, lineage_dir=lineage)
+    assert grade_module._may_skip_training(changed, ctx) is False
+
+
+def test_an_inference_only_mutation_skips_training(tmp_path):
+    """train.py imports from arch.py and never from model.py, so a mutation
+    confined to the inference contract trains to byte-identical weights.
+    This is the axis the largest known win in this domain sits on."""
+    from evoharness.evoserve import GradeContext
+
+    lineage = tmp_path / "lineage"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "arch.py").write_text("RADIX_BITS = 1\n")
+    (seed / "train.py").write_text("LR = 1e-3\n")
+    (seed / "model.py").write_text("WIDTH_MARGIN = 0\n")
+    (seed / "weights.pt").write_bytes(b"w")
+    grade_module._publish_to_lineage(
+        seed, GradeContext("s1", tmp_path, lineage_dir=lineage)
+    )
+
     child = tmp_path / "child"
     child.mkdir()
-    (child / "arch.py").write_text("D_MODEL = 64\n")
-    assert grade_module._inherit_from_parent(
-        child, GradeContext("c2", tmp_path, parent_id="c1", lineage_dir=lineage)
-    ) == {"warm_start": "full", "inherited_steps": 7}
+    (child / "arch.py").write_text("RADIX_BITS = 1\n")
+    (child / "train.py").write_text("LR = 1e-3\n")
+    (child / "model.py").write_text("WIDTH_MARGIN = 32   # inference policy\n")
+    assert grade_module._may_skip_training(
+        child, GradeContext("c1", tmp_path, lineage_dir=lineage)
+    ) is True
 
 
 def test_cost_projection_recovers_the_measured_speedup_requirement():
