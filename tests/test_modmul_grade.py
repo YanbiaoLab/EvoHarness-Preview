@@ -526,3 +526,28 @@ def test_cost_projection_recovers_the_measured_speedup_requirement():
     # Within 25% of the truth, and pessimistic rather than optimistic — a gate
     # that under-reports the wall is worse than one that over-reports it.
     assert truth_required <= required <= truth_required * 1.25
+
+
+def test_the_cost_probe_survives_the_later_rungs(tmp_path, monkeypatch):
+    """The probe runs once, at the first promotion, and its results have to
+    reach the report. They did not: `metrics` is reassigned wholesale at the
+    top of every rung, so everything written into it at the end of one rung
+    was wiped by the next, and budget_headroom silently came back empty from
+    a run that had measured it."""
+    calls = []
+    real = grade_module._cost_projection
+
+    def spy(runner, model_dir, workdir, measured, measured_cases):
+        calls.append(measured_cases)
+        return {"cost_probe": "checked", "budget_headroom": 0.31,
+                "projected_infer_s_all_tiers": 464.0}
+
+    monkeypatch.setattr(grade_module, "_cost_projection", spy)
+    monkeypatch.setenv("MODMUL_FORCE_ALL_RUNGS", "1")
+    report = grade(tmp_path, TRAINER)
+
+    assert calls, "the probe never ran"
+    assert len(calls) == 1, "the probe must run once, not per rung"
+    assert report.visible_metrics.get("budget_headroom") == 0.31
+    assert report.visible_metrics.get("cost_probe") == "checked"
+    assert real is not None

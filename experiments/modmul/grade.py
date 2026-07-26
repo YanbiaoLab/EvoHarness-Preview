@@ -1029,6 +1029,10 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     items: list[dict] = []
     seconds: dict[int, float] = {}
     metrics: dict = {}
+    # NOT `metrics`: that one is reassigned wholesale at the top of every
+    # rung, so anything written into it at the end of a rung is wiped by the
+    # next. The cost probe ran once and its results silently vanished.
+    projection: dict = {}
     diagnostic: dict = {}
     reached = _rungs()[0]
     train_spent = 0.0
@@ -1132,14 +1136,13 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
         if not _promotes(index, accuracy, _h90(accuracy)):
             break
-        if index == 0 and "cost_probe" not in metrics:
+        if index == 0 and not projection:
             # At the first promotion: cheap enough to be worth it only for a
             # candidate that survived R0, early enough to matter.
-            cost = _cost_projection(
+            projection = _cost_projection(
                 eval_runner, candidate_dir, workdir, seconds, rung.cases
             )
-            metrics.update(cost)
-            if cost.get("budget_headroom", 1.0) < 1.0:
+            if projection.get("budget_headroom", 1.0) < 1.0:
                 diagnostic["budget_verdict"] = (
                     "top tiers project over the time budget; accuracy there "
                     "cannot be scored until inference gets faster"
@@ -1149,7 +1152,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # success path: a candidate that faulted has nothing worth inheriting.
     _publish_to_lineage(candidate_dir, ctx, train_spent)
 
-    visible = {**metrics, **lineage, **_metric_block(accuracy),
+    visible = {**metrics, **projection, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}
     return Grade(
         fitness=_fitness(accuracy),
