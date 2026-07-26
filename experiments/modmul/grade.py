@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -545,9 +546,64 @@ def _overall(accuracy: dict[int, float]) -> float:
     return sum(accuracy.get(t, 0.0) for t in SCORED_TIERS) / len(SCORED_TIERS)
 
 
+def leaderboard_key(accuracy: dict[int, float]) -> tuple[int, float]:
+    """官方排序键 (H90, overall_accuracy)。**报告和终选用这个**。
+
+    与 fitness 分开:排名要的是"跨没跨过阈值"这个离散事实,搜索要的是
+    "离阈值还有多远"这个连续量。把两者压进同一个 float,得到的是排名
+    正确、但搜索无坡可爬的地形。"""
+    return (_h90(accuracy), _overall(accuracy))
+
+
+# 阈值软化尺度。0.15 意味着精度 0.75 已能拿到约 16% 的跨越奖励,0.9 拿一半
+# —— 足够远地伸出去,让"还差得远"的层也有方向,而不是只在阈值边缘有梯度。
+_THRESHOLD_TAU = 0.15
+# 跨越奖励相对于连续精度的权重。总权重 0.3 x 10 层 = 3,连续项权重 1,
+# 所以跨阈值仍然更值钱,但只是 ~2 倍,不是原来的 50 倍。
+_THRESHOLD_WEIGHT = 0.3
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def _soft_h90(accuracy: dict[int, float]) -> float:
+    """连续版的"有多少层跨过了 90%"。"""
+    return sum(
+        _sigmoid((accuracy.get(tier, 0.0) - 0.90) / _THRESHOLD_TAU)
+        for tier in SCORED_TIERS
+    )
+
+
+# sigmoid 在 0 处不为 0,所以"什么都不会"的候选会拿到一个正的软奖励。减去
+# 这个地板并按跨度归一,让 fitness 在全 0 时确实是 0、全对时确实是 1 ——
+# 否则一个毫无长进的候选看起来比一个崩溃的候选(硬记 0)更值钱。
+_SOFT_FLOOR = len(SCORED_TIERS) * _sigmoid(-0.90 / _THRESHOLD_TAU)
+_SOFT_CEIL = len(SCORED_TIERS) * _sigmoid(0.10 / _THRESHOLD_TAU)
+
+
 def _fitness(accuracy: dict[int, float]) -> float:
-    """与官方排序键 (H90, overall) 同构，归一到 [0,1]。"""
-    return (_h90(accuracy) + _overall(accuracy)) / (len(SCORED_TIERS) + 1)
+    """**搜索信号**,不是排名键 —— 严格随每一层精度递增。
+
+    原来的 `(h90 + overall) / 11` 与官方排序同构,但作为演化搜索的地形是
+    几乎最差的形状。实测(QUICK,limb_horner 种子):
+
+        某层精度翻倍 0.2 -> 0.4   fitness +0.0018
+        跨过某层 0.90 阈值         fitness +0.091      (50 倍)
+
+    即几乎全平 + 偶尔悬崖。变异能提供的是小步改进,而小步改进在这个地形
+    上几乎不产生选择压力,于是搜索在平地上随机游走,直到偶然撞上悬崖。
+
+    这里换成:连续的 overall 打底,加一个**软化**的跨阈值奖励。跨阈值仍然
+    比堆低层精度值钱(约 2 倍),但每一层精度的每一点提升都有回报。
+
+    MODMUL_FITNESS=leaderboard 恢复旧定义,用于 A/B。
+    """
+    if os.environ.get("MODMUL_FITNESS") == "leaderboard":
+        return (_h90(accuracy) + _overall(accuracy)) / (len(SCORED_TIERS) + 1)
+    bonus = _THRESHOLD_WEIGHT * (_soft_h90(accuracy) - _SOFT_FLOOR)
+    span = 1.0 + _THRESHOLD_WEIGHT * (_SOFT_CEIL - _SOFT_FLOOR)
+    return max(0.0, (_overall(accuracy) + bonus) / span)
 
 
 def _empty_feedback(summary: str) -> dict:

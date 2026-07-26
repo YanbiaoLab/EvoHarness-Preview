@@ -131,20 +131,58 @@ def grade(tmp_path: Path, source: str):
 # -- fitness is the leaderboard key ----------------------------------------
 
 
-def test_fitness_is_the_official_ranking_key():
-    """(h90, overall) ordering must survive the collapse into one float."""
+def test_leaderboard_key_reproduces_the_official_ordering():
+    """Ranking and reporting use (h90, overall) — the official key."""
     strong_tier4 = {1: 1.0, 2: 1.0, 3: 1.0, 4: 0.95}
     perfect_below = {1: 1.0, 2: 1.0, 3: 1.0, 4: 0.89, 5: 0.5}
-    assert grade_module._h90(strong_tier4) == 4
-    assert grade_module._h90(perfect_below) == 3
     # One more tier at >=90% outranks any amount of accuracy below it.
-    assert grade_module._fitness(strong_tier4) > grade_module._fitness(perfect_below)
+    assert grade_module.leaderboard_key(strong_tier4) > grade_module.leaderboard_key(
+        perfect_below
+    )
     # Ties on h90 are broken by overall accuracy, as the official rules say.
     same_h90_more_accurate = {1: 1.0, 2: 1.0, 3: 1.0, 4: 0.89, 5: 0.7}
-    assert grade_module._h90(same_h90_more_accurate) == 3
-    assert (grade_module._fitness(same_h90_more_accurate)
-            > grade_module._fitness(perfect_below))
+    assert grade_module.leaderboard_key(
+        same_h90_more_accurate
+    ) > grade_module.leaderboard_key(perfect_below)
+
+
+def test_fitness_rises_with_every_tier_so_the_search_has_a_slope():
+    """Fitness is the SEARCH signal, not the ranking key, and the two want
+    opposite things: ranking wants the discrete fact of crossing 90%,
+    search wants to know how far from it you are.
+
+    Collapsing both into (h90 + overall)/11 made a tier accuracy doubling
+    worth +0.0018 and a threshold crossing worth +0.0918 — a 50x cliff on
+    otherwise flat ground, which is close to the worst possible terrain for
+    a search whose only move is a small edit."""
+    for tier in (2, 5, 10):
+        base = {1: 1.0}
+        rising = [
+            grade_module._fitness({**base, tier: value})
+            for value in (0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0)
+        ]
+        assert rising == sorted(rising) and rising[0] < rising[-1], (
+            f"tier {tier} gives the search no slope"
+        )
+
+    # Crossing 90% must still pay more than ordinary progress — just not 50x.
+    doubling = grade_module._fitness({1: 1.0, 2: 0.4}) - grade_module._fitness(
+        {1: 1.0, 2: 0.2}
+    )
+    crossing = grade_module._fitness({1: 1.0, 2: 0.95}) - grade_module._fitness(
+        {1: 1.0, 2: 0.85}
+    )
+    assert 1.5 < crossing / doubling < 5.0
     assert 0.0 <= grade_module._fitness({}) <= 1.0
+
+
+def test_leaderboard_fitness_stays_available_for_the_ab(monkeypatch):
+    """The old definition is the control arm; it must still be one flag away."""
+    monkeypatch.setenv("MODMUL_FITNESS", "leaderboard")
+    accuracy = {1: 1.0, 2: 1.0, 3: 0.95}
+    assert grade_module._fitness(accuracy) == pytest.approx(
+        (3 + grade_module._overall(accuracy)) / 11
+    )
 
 
 def test_unevaluated_tiers_count_as_zero():
