@@ -506,12 +506,19 @@ def test_cost_projection_recovers_the_measured_speedup_requirement():
     real = {1: 0.185, 2: 0.691, 3: 1.569, 4: 1.419, 5: 3.523,
             6: 10.815, 7: 12.063, 8: 34.342, 9: 117.644}
     scored = grade_module.RUNGS[-1].cases
-    truth_total = sum(real.values()) + real[9] * 2      # tier 10 ~ 2x tier 9
+    # `real` was measured at 50 cases per tier; both the truth and the
+    # projection have to be expressed at the rung's case count or the test
+    # compares two different scales (it did, once R2 went 50 -> 100).
+    measured_cases = 50
+    truth_total = (
+        (sum(real.values()) + real[9] * 2)              # tier 10 ~ 2x tier 9
+        / measured_cases * scored
+    )
 
     # What R0 sees (tiers 1-3 at 30 cases) plus a 3-case probe of tiers 9-10.
-    projected = {t: real[t] / 50 * scored for t in (1, 2, 3)}
-    projected[9] = real[9] / 50 * scored
-    projected[10] = real[9] / 50 * 2 * scored
+    projected = {t: real[t] / measured_cases * scored for t in (1, 2, 3)}
+    projected[9] = real[9] / measured_cases * scored
+    projected[10] = real[9] / measured_cases * 2 * scored
     known = sorted(projected)
     for low, high in zip(known, known[1:]):
         gap = [t for t in range(low + 1, high) if t in grade_module.SCORED_TIERS]
@@ -522,7 +529,7 @@ def test_cost_projection_recovers_the_measured_speedup_requirement():
             projected[tier] = projected[low] * ratio ** step
 
     allowed = grade_module.SECONDS_PER_PROBLEM * (
-        scored * len(grade_module.SCORED_TIERS) + 20
+        scored * (len(grade_module.SCORED_TIERS) + 1)   # +1: tier-0 diagnostic
     )
     required = sum(projected.values()) / allowed
     truth_required = truth_total / allowed
@@ -556,3 +563,59 @@ def test_the_cost_probe_survives_the_later_rungs(tmp_path, monkeypatch):
     assert report.visible_metrics.get("budget_headroom") == 0.31
     assert report.visible_metrics.get("cost_probe") == "checked"
     assert real is not None
+
+
+def test_speed_is_a_gradient_not_a_cliff():
+    """Wall clock had selection pressure only as a cliff, and cliffs are what
+    _fitness exists to soften.
+
+    A candidate that fits every tier inside the budget scores tier 10 and
+    gains a whole h90 level, so the pressure was there -- but nothing paid
+    for approaching it. Run modmul_r8's candidate 8ab3347e was 38% slower
+    than its parent at byte-identical accuracy and scored byte-identically
+    for it, so selection saw two equals on the one axis that gates tier 10.
+    """
+    fitness = grade_module._fitness
+    acc = {**{t: 1.0 for t in range(1, 9)}, 9: 0.98, 10: 0.0}
+    base = dict(zip(range(1, 10),
+                    [0.26, 0.82, 1.6, 1.39, 3.58, 10.8, 11.9, 45.2, 175.8]))
+    budget = 300.0
+    at = lambda k: {t: s * 2 / k for t, s in base.items()}   # noqa: E731
+
+    slower = fitness(acc, at(1 / 1.38), budget)
+    same = fitness(acc, at(1.0), budget)
+    faster = fitness(acc, at(1.25), budget)
+    fastest = fitness(acc, at(1.5), budget)
+    assert slower < same < faster < fastest, (slower, same, faster, fastest)
+    # and the steps are large enough for a weighted selector to see
+    assert same - slower > 0.005
+
+
+def test_being_fast_is_worth_nothing_without_accuracy():
+    """The obvious way to game a speed term is to answer nothing very fast.
+
+    _fitness's contract is that an all-zero candidate scores exactly 0; an
+    ungated speed bonus paid such a candidate 0.048 and a real test caught
+    it.
+    """
+    fitness = grade_module._fitness
+    nothing = {t: 0.0 for t in range(1, 11)}
+    instant = {1: 0.01, 2: 0.01, 3: 0.01}
+    assert fitness(nothing, instant, 300.0) == 0.0
+    assert fitness(nothing, None, None) == 0.0
+
+
+def test_the_top_rung_is_the_official_problem_set():
+    """h90 should mean the official h90, not a scaled proxy for it.
+
+    The budget was scaled by problem count but the BATCH count was not, and
+    the official timer is checked between batches -- so which tiers get
+    scored depended on a granularity our calibration did not reproduce.
+    """
+    top = grade_module.RUNGS[-1]
+    assert top.cases == 100
+    assert top.diagnostic, "tier 0 is one of the official eleven tiers"
+    problems = top.cases * (len(grade_module.SCORED_TIERS) + 1)
+    assert problems == grade_module.OFFICIAL_TOTAL_PROBLEMS
+    budget = grade_module.SECONDS_PER_PROBLEM * problems
+    assert budget == grade_module.OFFICIAL_INFERENCE_BUDGET_S

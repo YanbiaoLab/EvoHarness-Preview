@@ -86,7 +86,13 @@ class Rung:
 RUNGS: tuple[Rung, ...] = (
     Rung("R0", 480.0, (1, 2, 3), 30),
     Rung("R1", 1320.0, (1, 2, 3, 4, 5, 6), 40),
-    Rung("R2", 3600.0, SCORED_TIERS, 50,
+    # 100 cases, not 50: at 50 the budget was scaled proportionally (141.8s)
+    # but the BATCH COUNT was not, and the official timer is checked between
+    # batches. The public benchmark holds exactly 100 per tier across 11
+    # tiers, so this rung is now the official 1100 problems and its budget
+    # falls on 300.0s exactly -- our h90 becomes the official h90 instead of
+    # a scaled proxy for it.
+    Rung("R2", 3600.0, SCORED_TIERS, 100,
          diagnostic=True, perturbation=True, holdout=True),
 )
 
@@ -584,7 +590,52 @@ _SOFT_FLOOR = len(SCORED_TIERS) * _sigmoid(-0.90 / _THRESHOLD_TAU)
 _SOFT_CEIL = len(SCORED_TIERS) * _sigmoid(0.10 / _THRESHOLD_TAU)
 
 
-def _fitness(accuracy: dict[int, float]) -> float:
+_TIME_WEIGHT = 0.15
+
+
+def _time_factor(
+    seconds: dict[int, float] | None, budget: float | None
+) -> float:
+    """How close the clock is to letting the NEXT tier run. 1.0 = no obstacle.
+
+    The wall clock is not invisible to selection -- a candidate that fits
+    tiers 1-10 inside the budget scores tier 10 and jumps a whole h90 level.
+    The problem is that this is a CLIFF, and cliffs are the exact terrain
+    _fitness was written to fix on the accuracy axis: nearly flat, with one
+    step nobody can climb by small mutations. Nothing was ever done for the
+    time axis, so "38% slower at identical accuracy" cost run modmul_r8's
+    candidate 8ab3347e precisely nothing, and "12% faster" would have earned
+    nothing either.
+
+    Measured, not projected. budget_headroom from the cost probe would have
+    been the natural input and is not usable: it read 0.047 for the seed --
+    a 21x speedup demanded -- where the seed's own R2 timings put the true
+    figure near 3.5x, and it read 53.0 for a tier-3-capped seed that is
+    "fast" only because it never reaches anything expensive. Only 8 of 67
+    candidates in modmul_r8 had the probe run at all.
+
+    sum(seconds) is the clock at the moment the first unrun tier would have
+    started, so budget/that is exactly the fraction of the way there, and its
+    reciprocal is the speedup still required. Above 1.0 means the missing
+    tiers are missing for some reason other than time -- a lower ASHA rung
+    simply not scoring them -- so the term goes neutral and leaves promotion
+    undistorted.
+    """
+    if not seconds or not budget or budget <= 0:
+        return 1.0
+    if all(tier in seconds for tier in SCORED_TIERS):
+        return 1.0                       # every scored tier ran: nothing left
+    spent = sum(seconds.values())
+    if spent <= 0:
+        return 1.0
+    return min(1.0, budget / spent)
+
+
+def _fitness(
+    accuracy: dict[int, float],
+    seconds: dict[int, float] | None = None,
+    budget: float | None = None,
+) -> float:
     """**搜索信号**,不是排名键 —— 严格随每一层精度递增。
 
     原来的 `(h90 + overall) / 11` 与官方排序同构,但作为演化搜索的地形是
@@ -604,8 +655,18 @@ def _fitness(accuracy: dict[int, float]) -> float:
     if os.environ.get("MODMUL_FITNESS") == "leaderboard":
         return (_h90(accuracy) + _overall(accuracy)) / (len(SCORED_TIERS) + 1)
     bonus = _THRESHOLD_WEIGHT * (_soft_h90(accuracy) - _SOFT_FLOOR)
-    span = 1.0 + _THRESHOLD_WEIGHT * (_SOFT_CEIL - _SOFT_FLOOR)
-    return max(0.0, (_overall(accuracy) + bonus) / span)
+    # Weighted at half the threshold bonus on purpose: crossing a tier's 90%
+    # line is what the leaderboard actually pays for, so speed must never
+    # outrank it. This term only has to make the approach to the cliff
+    # climbable.
+    # Scaled by overall accuracy, or a candidate that answers NOTHING collects
+    # the full speed bonus for being trivially fast — which is how the first
+    # version of this scored 0.048 on a model emitting malformed digits, and
+    # broke the invariant that an all-zero candidate is worth exactly 0.
+    # Speed is only worth anything if there is accuracy to convert with it.
+    speed = _TIME_WEIGHT * _time_factor(seconds, budget) * _overall(accuracy)
+    span = 1.0 + _THRESHOLD_WEIGHT * (_SOFT_CEIL - _SOFT_FLOOR) + _TIME_WEIGHT
+    return max(0.0, (_overall(accuracy) + bonus + speed) / span)
 
 
 def _empty_feedback(summary: str) -> dict:
@@ -755,7 +816,9 @@ def _cost_projection(
         # headroom, which is exactly what a mutation would learn to game.
         return {"cost_probe": "unmeasurable"}
     out["projected_infer_s_all_tiers"] = round(total, 1)
-    allowed = SECONDS_PER_PROBLEM * (scored_cases * len(SCORED_TIERS) + 20)
+    allowed = SECONDS_PER_PROBLEM * (
+        scored_cases * (len(SCORED_TIERS) + 1)      # +1: the tier-0 diagnostic
+    )
     if total > 0:
         # Below 1.0: the top tiers cannot be answered in time however accurate
         # the model becomes. 1/headroom is the speedup required.
@@ -1047,6 +1110,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # next. The cost probe ran once and its results silently vanished.
     projection: dict = {}
     diagnostic: dict = {}
+    budget_s: float | None = None      # the last rung's clock, for _fitness
     reached = _rungs()[0]
     train_spent = 0.0
 
@@ -1081,15 +1145,18 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
         total = sum(len(c) for c in truth.values())
         if rung.diagnostic:
             # 官方顺序：tier 0 先跑，且计入同一个墙钟预算。
-            diagnostic_cases = _load_cases(DIAGNOSTIC_TIER, 20)
+            # rung.cases, not a hardcoded 20: tier 0 is one of the official
+            # eleven tiers and carries the same 100 problems as the others.
+            diagnostic_cases = _load_cases(DIAGNOSTIC_TIER, rung.cases)
             if diagnostic_cases:
                 order = ["0", *order]
                 cases["0"] = _inputs_only(diagnostic_cases)
                 total += len(diagnostic_cases)
 
+        budget_s = SECONDS_PER_PROBLEM * total
         plan = {
             "mode": "normal",
-            "budget_s": SECONDS_PER_PROBLEM * total,
+            "budget_s": budget_s,
             "order": order,
             "cases": cases,
         }
@@ -1168,7 +1235,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     visible = {**metrics, **projection, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}
     return Grade(
-        fitness=_fitness(accuracy),
+        fitness=_fitness(accuracy, seconds, budget_s),
         visible_metrics=visible,
         hidden_metrics=diagnostic,
         structured_feedback={
