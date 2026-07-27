@@ -327,13 +327,32 @@ SUMMARY: <one or two sentences describing the completed change>
 """
 _MULTIFILE_FORMAT = """## Response format (multi-file workspace)
 This candidate is a multi-file workspace. Reply with one block per file you
-change or create, in exactly this form (FULL new file content, not a diff):
+change, giving the FULL new content of that file rather than a diff. Use a
+line naming the file, then a fenced Python block:
 
-### FILE: <relative/path.py>
-```python
-<complete new content of that file>
-Only include files you actually change. Never use .. or absolute paths.
-The entry file must keep existing.
+### FILE: arch.py
+(a fenced ```python block containing the entire new arch.py)
+
+### FILE: train.py
+(a fenced ```python block containing the entire new train.py)
+
+Name real files from the list above. Include only files you actually change.
+Never use `..` or absolute paths. The entry file must keep existing.
+"""
+
+# A revise on a MULTI-FILE genome. Patch blocks carry no file path, so on a
+# multi-file workspace they can only ever reach the entry file — and the
+# constant worth changing usually lives elsewhere. Worse, the multi-file
+# format instruction is appended to the same prompt, so the model received
+# two contradictory formats and every revise was rejected for complying with
+# the wrong one. Here the operator's INTENT survives and the format comes
+# from _MULTIFILE_FORMAT alone.
+_REVISE_MULTIFILE_SPEC = """
+# What a revise is
+Make ONE small, targeted change — the smallest edit that could plausibly
+move the score. Do not restructure, do not rewrite a file wholesale, and do
+not bundle unrelated improvements. Keep everything you are not deliberately
+changing byte-identical, including comments and docstrings.
 """
 
 _REVISE_SPEC = """
@@ -554,8 +573,11 @@ class PromptBuilder:
         return header + "\n\n" + "\n\n".join(sections)
 
     def build(self, ctx: MutationContext) -> tuple[str, str]:
+        multifile = (
+            len(ctx.parent.workspace.texts()) > 1 and not self.workspace_agent
+        )
         if ctx.operator == "revise":
-            spec = _REVISE_SPEC
+            spec = _REVISE_MULTIFILE_SPEC if multifile else _REVISE_SPEC
         elif ctx.operator == "rewrite":
             spec = _REWRITE_VARIANTS[int(self.rng.integers(len(_REWRITE_VARIANTS)))]
         elif ctx.operator == "recombine":
@@ -584,10 +606,7 @@ class PromptBuilder:
                 "The current program's files are already in your workspace. "
                 "Read them with workspace_read before editing."
             )
-        if (
-            len(ctx.parent.workspace.texts()) > 1
-            and not self.workspace_agent
-        ):
+        if multifile:
             user_parts.append(_MULTIFILE_FORMAT)
             
         if ctx.operator == "recombine":

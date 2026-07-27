@@ -452,7 +452,14 @@ def test_workspace_agent_prompt_drops_dead_sections(tmp_path):
     p_sys, p_user = plain.build(ctx)
 
     assert "# Response format" not in a_sys      # contradicts tool editing
-    assert "# Response format" in p_sys          # single-shot still needs it
+    # Single-shot still has to be told how to answer — but on a multi-file
+    # genome that instruction lives in the USER message, as the multi-file
+    # format. It used to be in both places at once, saying different things:
+    # the system half asked revise for ORIGINAL/UPDATED patch blocks while
+    # the user half asked for whole files, and run modmul_r5 lost every
+    # revise for complying with one of the two.
+    assert "### FILE:" in p_user
+    assert "<<<<<<< ORIGINAL" not in p_sys + p_user
     assert "This mutation: REVISE" in a_sys      # operator intent instead
     assert "x = 1" not in a_user                 # no bodies for the agent
     assert "x = 1" in p_user                     # single-shot still gets them

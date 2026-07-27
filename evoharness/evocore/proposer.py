@@ -222,40 +222,48 @@ class SingleShotProposer(Proposer):
             parent_code = parent.workspace.main_text()
             # Multi-file lane (M2.5): FILE blocks in the answer become a
             # complete child genome, shipped via Proposal.workspace — the
-            # same lane M3 agent sessions use. revise stays main-file-only:
-            # ORIGINAL/UPDATED patches carry no file paths.
-            if operator != "revise":
-                edits = parse_file_blocks(resp.text)
-                if edits:
-                    try:
-                        child_ws = parent.workspace.with_files(edits)
-                    except WorkspaceError as e:
-                        # ../escape or growing a single-file genome: a
-                        # REJECTED proposal, not a crash — resample.
-                        logger.warning(
-                            "multi-file proposal rejected (attempt %d): %s",
-                            attempt, e,
-                        )
-                        continue
-                    if child_ws.texts() == parent.workspace.texts():
-                        # A "mutation" that changed nothing. It is not a
-                        # neutral candidate: it ties its parent's fitness for
-                        # free — and where evaluation is cached, it ties it
-                        # exactly — so it lands at the top of the population
-                        # having contributed nothing, and can be selected as a
-                        # parent. Observed in run modmul_r1.
-                        logger.warning(
-                            "proposal rejected (%s, attempt %d): "
-                            "identical to parent",
-                            operator, attempt,
-                        )
-                        continue
-                    return ProposeResult(
-                        Proposal(child_ws.main_text(), title, summary, model,
-                                 workspace=child_ws),
-                        llm_cost=cost,
-                        attempts=attempt,
+            # same lane M3 agent sessions use.
+            #
+            # Every operator may answer with file blocks. revise used to be
+            # excluded because ORIGINAL/UPDATED patches carry no file path —
+            # true of patches, not of "### FILE:" headers, which carry
+            # exactly that. The exclusion made revise unusable on a
+            # multi-file genome: the prompt asks for file blocks, the model
+            # complies, and the answer was thrown away for being the wrong
+            # format. Run modmul_r5 lost every revise this way, 45% of its
+            # proposal budget, and patches could not have reached the file
+            # worth editing anyway.
+            edits = parse_file_blocks(resp.text)
+            if edits:
+                try:
+                    child_ws = parent.workspace.with_files(edits)
+                except WorkspaceError as e:
+                    # ../escape or growing a single-file genome: a
+                    # REJECTED proposal, not a crash — resample.
+                    logger.warning(
+                        "multi-file proposal rejected (attempt %d): %s",
+                        attempt, e,
                     )
+                    continue
+                if child_ws.texts() == parent.workspace.texts():
+                    # A "mutation" that changed nothing. It is not a
+                    # neutral candidate: it ties its parent's fitness for
+                    # free — and where evaluation is cached, it ties it
+                    # exactly — so it lands at the top of the population
+                    # having contributed nothing, and can be selected as a
+                    # parent. Observed in run modmul_r1.
+                    logger.warning(
+                        "proposal rejected (%s, attempt %d): "
+                        "identical to parent",
+                        operator, attempt,
+                    )
+                    continue
+                return ProposeResult(
+                    Proposal(child_ws.main_text(), title, summary, model,
+                             workspace=child_ws),
+                    llm_cost=cost,
+                    attempts=attempt,
+                )
             if operator == "revise":
                 outcome = self.patch_engine.apply(parent_code, resp.text)
             else:  # rewrite | recombine | repair share full-program output

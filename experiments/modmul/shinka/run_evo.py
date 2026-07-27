@@ -13,8 +13,30 @@ import yaml
 from shinka.core import EvolutionConfig, ShinkaEvolveRunner
 from shinka.database import DatabaseConfig
 from shinka.launch import LocalJobConfig
+from shinka.launch import local as shinka_local
 
 HERE = Path(__file__).resolve().parent
+
+
+def _patch_process_return_code() -> None:
+    """Give ProcessWithLogging the attribute its own monitor reads.
+
+    Upstream `shinka/launch/local.py` ends monitor() with
+    `return_code = process.return_code`, but ProcessWithLogging delegates
+    unknown attributes to subprocess.Popen, which spells it `returncode`. So
+    every local evaluation raises AttributeError after the job finishes, the
+    runner catches it as "evaluation failed", and stores the placeholder
+    `{"score": 0.0}` — the scores are computed correctly and then thrown away.
+    Observed on ShinkaEvolve 7939f6b: three candidates, three real
+    metrics.json files, three 0.000 rows in the database.
+
+    Patched here rather than in the vendored clone because third_party/ is
+    gitignored, so an edit there survives exactly until the next checkout.
+    """
+    if not hasattr(shinka_local.ProcessWithLogging, "return_code"):
+        shinka_local.ProcessWithLogging.return_code = property(
+            lambda self: self.process.returncode
+        )
 
 # What the search is told. Everything here was measured, not guessed — handing
 # it over costs one prompt and saves the search from rediscovering a week of
@@ -112,6 +134,7 @@ def resolve_models(endpoint: dict | None) -> list[str] | None:
 
 
 def main(config_path: str) -> None:
+    _patch_process_return_code()
     with open(config_path, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
