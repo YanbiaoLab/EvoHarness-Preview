@@ -1,0 +1,76 @@
+# modmul Round-8 主跑(L40S 46GB)。
+#
+# 相对 l40s_r1.yaml 改了三处,每处都有 2026-07-27 当天的实测出处:
+#
+#   llm_models          MiniMax-M3 -> gpt-5.6-terra(换 provider)
+#   proposal_concurrency         4 -> 16(新 provider 的曲线是平的)
+#   seed                        21 -> 22(r7 的 RNG 序列已经用过)
+#
+# 其余保持 r1 的数字。别在没有曲线的地方往上加 —— 这条规则在 r7 上又验证了
+# 一次:MiniMax-M3 的 4 路是拐点,后来 provider 整体不回包,r7 死在
+# "The read operation timed out" 上,一代都没跑完。
+
+search:
+  num_generations: 200                # 上限不是目标;checkpoint 每代落盘,
+                                      # 判据 30-40 代可读
+                                      # (todo/modmul_evolution_validation.md)
+  eval_batch_size: 16                 # GPU 并发扩展曲线(2026-07-26,QUICK 档,
+                                      # 同 seed,测同样墙钟里实际走的训练步数):
+                                      #   1 路 7602 步 100%  有效吞吐 1.0x
+                                      #   8 路 6590 步  87%          6.9x
+                                      #  16 路 5920 步  78%         12.5x
+                                      #                GPU 12-14% / 612 MiB
+                                      #  48 路 机器负载 49,ssh 被挤断
+                                      # 瓶颈是每进程 CPU/Python 开销不是 GPU
+                                      # (cell 只有 91,841 参数)
+
+  proposal_concurrency: 16            # 新 provider 实测(2026-07-27,
+                                      # ~12k token 提示词,真实种子基因组):
+                                      #   1 路 41s   0/1 失败   41s/提案
+                                      #   4 路 42s   0/4        11s/提案
+                                      #   8 路 42s   0/8         5s/提案
+                                      #  16 路 42s   0/16        3s/提案
+                                      # 曲线到 16 完全平,没测出拐点。取 16 是
+                                      # 因为它等于 eval_batch_size —— 一代的
+                                      # 提案在 42 秒内一次性发完,提案不再是
+                                      # 瓶颈。16 以上没数据,所以没往上加。
+                                      #
+                                      # 对照 MiniMax-M3:1 路 203s、4 路是拐点、
+                                      # 8 路 7/8 超时。换 provider 买到的是
+                                      # 单次 5 倍、批次 68 倍。
+
+  llm_models: ["gpt-5.6-terra"]       # 2026-07-27 第二次换 provider。
+                                      # MiniMax-M3 在 r7 期间整体停止回包
+                                      # (每个提案 3 次重试全部 read timeout)。
+                                      # 注:该端点走 Cloudflare,必须发
+                                      # User-Agent,否则 403(见 bba0bc2)
+
+  llm_max_tokens: 40960               # 多文件基因组,整文件重写需要。
+                                      # 实测回复 1767-2141 tokens,离上限很远;
+                                      # 留着是给"一次改多个文件"的重写用的
+  seed: 22
+  operator_probs: [0.45, 0.45, 0.1]   # revise / rewrite / recombine
+  repair_probability: 0.4
+  max_consecutive_infra_failures: 5   # 同时是提案器熔断阈值(87d80f7)
+
+population:
+  num_islands: 3                      # 0=limb_horner 1=horner_cell 2=serial_ar
+  migration_interval: 10
+  migration_rate: 0.1
+  archive_size: 60
+
+# 每代墙钟由评测决定,不由提案决定:训练预算是墙钟秒数,一代 ≈ 最慢候选
+# ≈ 走满 R2 的 90 分钟。提案现在只占 42 秒,可以忽略。
+#
+# 两条快通道让相当一部分候选远低于 90 分钟:
+#   * 只改 model.py 的变异 -> 完全跳过训练,实测 406 秒
+#   * 改 arch.py 的变异 -> 不冷启动,实测保留 98.6% 参数,只重学 embed.0.weight
+#
+# 所以每代实际在 8-95 分钟之间。跑起来后按前 5 代实测重新外推,
+# 别拿这段注释当预算。
+#
+# r7 的教训不在参数上,在两个已修的缺陷上(58fff7c):岛轮转此前按代而不是
+# 按提案,导致一代 16 个提案全落同一个岛;children_count 此前在子代入库时
+# 才加,而整批是先规划后入库的,于是 1/(1+children_count) 这个唯一的
+# 反集中因子在批内恒等于 1。r7 因此 15 个后代全部出自同一个亲本。
+# r8 的日志会逐条打印 (岛, 亲本, children_count, 算子),可以直接核对而不是事后猜。

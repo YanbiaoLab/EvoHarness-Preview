@@ -126,3 +126,52 @@ def test_extra_seeds_land_on_their_own_islands(tmp_path):
     codes = [c.code for c in island1.passed_candidates]
     assert any('"q1"' in c for c in codes)        # variant seeded island 1
     assert loop.store.best().fitness >= 0.4       # variant (2/5) is the best seed
+
+
+def test_an_island_with_its_own_seed_does_not_also_get_the_primary(tmp_path):
+    """Heterogeneous seeding has to survive contact with selection.
+
+    The primary used to be copied onto every island before the extra seeds
+    landed, so an island held its native AND a copy of the primary. Selection
+    is fitness-weighted, so wherever the primary outscored the native the
+    island was a primary island in all but name. Run modmul_r7 seeded three
+    architectures and evolved one: primary 0.846 against natives 0.218 and
+    0.070, and no test noticed because none asserted on it.
+    """
+    task = get_task("demo_counter")
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, task.grader, islands=3)
+    )
+    variant_a = task.initial_code.replace('"q0"', '"q0", "q1"')
+    variant_b = task.initial_code.replace('"q0"', '"q0", "q1", "q2"')
+    loop.run(task.initial_code, extra_seeds=[variant_a, variant_b])
+
+    seeds_per_island = {
+        idx: [
+            c for c in loop.store.island_view(idx).candidates
+            if c.operator == "seed"
+        ]
+        for idx in range(3)
+    }
+    assert [len(v) for v in seeds_per_island.values()] == [1, 1, 1]
+    assert '"q1"' in seeds_per_island[1][0].code
+    assert '"q2"' in seeds_per_island[2][0].code
+
+
+def test_islands_without_a_seed_of_their_own_still_get_a_parent(tmp_path):
+    """The blanket copy existed for a reason; keep that reason working.
+
+    An island with no passed candidate is skipped by _pick_island for the
+    whole run, so fewer extra seeds than islands must still leave every
+    island able to produce a proposal.
+    """
+    task = get_task("demo_counter")
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, task.grader, islands=4)
+    )
+    loop.run(task.initial_code, extra_seeds=[])
+
+    for idx in range(4):
+        assert loop.store.island_view(idx).passed_candidates, (
+            f"island {idx} has no parent"
+        )

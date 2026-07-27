@@ -245,14 +245,22 @@ class SearchLoop:
         seed.report = self._grade(seed, report)
         for observer in self.observers:
             observer.on_candidate_graded(seed, self.store)
-        self.store.seed_all_islands(seed)
+        self.store.insert(seed)
         self._log_metrics(0, seed, report)
         # Heterogeneous island seeding: each extra seed lands on its own
-        # island (alongside the primary copy — selection arbitrates). A failed
-        # extra seed does not kill the run: every island still has the primary.
-        # An extra seed may be a whole Workspace (multi-file genome) or a bare
-        # main-file string; a string is lifted into the primary's workspace so
-        # `workspace_kind` never disagrees with what `code` actually holds.
+        # island. An extra seed may be a whole Workspace (multi-file genome)
+        # or a bare main-file string; a string is lifted into the primary's
+        # workspace so `workspace_kind` never disagrees with what `code`
+        # actually holds.
+        #
+        # The primary used to be copied onto EVERY island first, with the
+        # comment "selection arbitrates". It does not arbitrate: selection is
+        # fitness-weighted, so the copy wins wherever it outscores the
+        # native. Run modmul_r7 seeded three architectures onto three islands
+        # and got three copies of one architecture — primary 0.846 against
+        # natives 0.218 and 0.070 — so island count bought no diversity at
+        # all. The copy now goes only where an island would otherwise have no
+        # parent, which is the case the copying was there to cover.
         for i, entry in enumerate(extra_seeds or []):
             variant_ws = self._as_seed_workspace(entry, initial_workspace)
             variant = Candidate(
@@ -276,6 +284,17 @@ class SearchLoop:
                 observer.on_candidate_graded(variant, self.store)
             self.store.insert(variant)
             self._log_metrics(0, variant, report)
+        # Backfill: an island with no usable parent cannot produce a proposal
+        # at all, so _pick_island would skip it for the whole run. This covers
+        # both "fewer extra seeds than islands" and "an extra seed failed to
+        # grade" — the robustness the blanket copy was providing.
+        barren = [
+            idx
+            for idx in range(self.pop_cfg.num_islands)
+            if not self.store.island_view(idx).passed_candidates
+        ]
+        if barren:
+            self.store.seed_all_islands(seed, islands=barren)
         self.store.refresh_archive()
 
     def _grade(self, cand: Candidate, report: RunReport):

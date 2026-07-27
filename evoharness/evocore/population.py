@@ -406,11 +406,20 @@ class PopulationStore:
                     return idx
         return int(np.random.randint(self.cfg.num_islands))
 
-    def seed_all_islands(self, seed: Candidate) -> list[Candidate]:
+    def seed_all_islands(
+        self, seed: Candidate, islands: list[int] | None = None
+    ) -> list[Candidate]:
         """Copy the evaluated seed candidate into every island (upstream
-        CopyInitialProgramIslandStrategy). Returns all inserted copies."""
+        CopyInitialProgramIslandStrategy). Returns all inserted copies.
+
+        `islands` narrows the copy to a subset. Copying everywhere erases
+        heterogeneous seeding whenever the primary outscores the natives,
+        so SearchLoop uses it only to backfill islands that would otherwise
+        have no parent."""
         inserted = []
-        for idx in range(self.cfg.num_islands):
+        for idx in (
+            range(self.cfg.num_islands) if islands is None else islands
+        ):
             copy = Candidate(
                 id=seed.id if idx == seed.island_idx else Candidate.new_id(),
                 code=seed.code,
