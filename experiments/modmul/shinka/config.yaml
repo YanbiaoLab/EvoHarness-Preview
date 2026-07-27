@@ -29,15 +29,25 @@ python_executable: null        # /root/EvoHarness/.venv/bin/python on the GPU ho
 llm_endpoint:
   api_base_env: EVOHARNESS_API_BASE
   api_key_env: EVOHARNESS_API_KEY
+  # glm-5, not glm-5.2. Measured on the same 5.8k-token prompt: glm-5 answers
+  # in 18.8s with content, glm-5.2 takes 219s at best and in-run consistently
+  # burned the endpoint's full 600s ceiling and came back with content=None —
+  # it spends the whole token budget in reasoning_content and emits nothing.
+  # A model that returns no patch has no quality to trade away.
   models:
-    - glm-5.2
+    - glm-5
 
 db_config:
   num_islands: 2
   archive_size: 40
   elite_selection_ratio: 0.3
-  num_archive_inspirations: 1
-  num_top_k_inspirations: 1
+  # No inspirations. Each one puts another full copy of the 526-line genome
+  # into the prompt, so the default of two tripled it to ~17k tokens and the
+  # request stopped fitting inside the endpoint's 600s ceiling. The search is
+  # tuning a known architecture along two identified levers rather than
+  # recombining designs, so cross-program context earns little here.
+  num_archive_inspirations: 0
+  num_top_k_inspirations: 0
   migration_interval: 10
   migration_rate: 0.1
   island_elitism: true
