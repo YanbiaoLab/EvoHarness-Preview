@@ -308,10 +308,13 @@ def test_proposal_workspace_lane_bypasses_lens(tmp_path):
     assert child.workspace_kind == "git"
     assert child.code == delivered.serialize()  # byte-for-byte, lens untouched
     assert child.change_title == "t"  # metadata flows from the proposal too
-    assert child.metadata == {
+    # A subset, not the whole dict: this parent is a seed copy, so the loop
+    # also stamps lineage_parent_id, and asserting equality here made an
+    # unrelated test fail for a correct change.
+    assert child.metadata.items() >= {
         "proposal_id": "proposal-1",
         "trace_path": "/run/agent_sessions/proposal-1",
-    }
+    }.items()
 
 
 def test_failed_proposal_trace_is_preserved_in_run_history(tmp_path):

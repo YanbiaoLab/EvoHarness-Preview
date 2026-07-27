@@ -61,7 +61,24 @@ class EvolvedModel(ModularMultiplicationModel):
         self.cell.eval()
 
     def max_batch_size(self) -> int:
-        return 64
+        # The official timer is checked BETWEEN BATCHES, never per problem
+        # (rules/evaluation.md, "Wall-clock measurement"; the 273 ms figure
+        # there is labelled a soft target and is just 300/1100). So the unit
+        # of cost is batches, and 100 problems per tier through a 64-wide
+        # batch is two of them -- the second carrying 36 problems through the
+        # same 4096-step Horner chain as the first.
+        #
+        # 128 covers a full official tier in one batch and leaves room if the
+        # organizers tune the set size. Memory is not the constraint: at
+        # width 2048 and D_MODEL 64 the scan state is ~52 MB per 100
+        # problems against 46 GB.
+        #
+        # NOT MEASURED: whether per-batch wall clock is flat in batch size
+        # (sequential-depth bound, in which case this is close to a 2x) or
+        # linear (FLOP bound, in which case it buys nothing). Taken on the
+        # optimistic reading by decision, 2026-07-27 -- the seed baseline is
+        # being re-measured against it rather than assumed.
+        return 128
 
     # -- per-argument preprocessing (each hook sees only its own argument) --
 

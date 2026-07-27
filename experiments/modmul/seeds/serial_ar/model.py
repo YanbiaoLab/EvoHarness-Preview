@@ -51,6 +51,13 @@ class EvolvedModel(ModularMultiplicationModel):
         d += [0] * (W_IN - len(d))
         return torch.tensor([d], dtype=torch.long, device=self.device)
 
+    def max_batch_size(self) -> int:
+        # The official timer is checked between batches, not per problem, so
+        # batches are the unit of cost. The interface default is 1, which
+        # runs an official tier's 100 problems as 100 sequential forward
+        # passes; this seed never set it. 128 covers a full tier in one.
+        return 128
+
     def preprocess_a(self, a: str):
         return self._dig(a)
 

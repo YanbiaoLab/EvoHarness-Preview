@@ -252,27 +252,22 @@ class SearchLoop:
         # or a bare main-file string; a string is lifted into the primary's
         # workspace so `workspace_kind` never disagrees with what `code`
         # actually holds.
-        #
-        # The primary used to be copied onto EVERY island first, with the
-        # comment "selection arbitrates". It does not arbitrate: selection is
-        # fitness-weighted, so the copy wins wherever it outscores the
-        # native. Run modmul_r7 seeded three architectures onto three islands
-        # and got three copies of one architecture — primary 0.846 against
-        # natives 0.218 and 0.070 — so island count bought no diversity at
-        # all. The copy now goes only where an island would otherwise have no
-        # parent, which is the case the copying was there to cover.
+
         for i, entry in enumerate(extra_seeds or []):
-            variant_ws = self._as_seed_workspace(entry, initial_workspace)
+            if isinstance(entry, Workspace):
+                code = entry.serialize()
+                workspace_kind = entry.kind
+            else:
+                variant_ws = self._as_seed_workspace(entry, initial_workspace)
+                if variant_ws is None:
+                    code, workspace_kind = entry, "file"
+                else:
+                    code = variant_ws.serialize()
+                    workspace_kind = variant_ws.kind
             variant = Candidate(
                 id=Candidate.new_id(),
-                code=(
-                    entry
-                    if variant_ws is None
-                    else variant_ws.serialize()
-                ),
-                workspace_kind=(
-                    "file" if variant_ws is None else variant_ws.kind
-                ),
+                code=code,
+                workspace_kind=workspace_kind,
                 generation=0,
                 parent_id=None,
                 island_idx=(i + 1) % self.pop_cfg.num_islands,
@@ -528,6 +523,24 @@ class SearchLoop:
         child_ws = proposal.workspace or parent.workspace.with_main_text(
             proposal.code
         )
+        # A seed copy is a database row, not an evaluated candidate: it reuses
+        # the original's report and is never handed to the grader, so nothing
+        # is ever published under its id. A domain that carries per-candidate
+        # state keyed by id -- trained weights above all -- therefore finds
+        # nothing for it, and every child of a copy starts from scratch.
+        #
+        # That is what happened to run modmul_r7: 25 of its 26 offspring
+        # reported "parent-published-no-weights", because islands 1 and 2 both
+        # drew from copies. The fitness column of that entire run measures
+        # cold starts, not mutations.
+        #
+        # parent_id keeps pointing at the copy so island bookkeeping and the
+        # lineage tree stay honest; only the identity used to look up
+        # inherited state is redirected.
+        metadata = dict(proposal.metadata)
+        origin = parent.metadata.get("seed_copy_of")
+        if origin:
+            metadata["lineage_parent_id"] = origin
         return Candidate(
             id=Candidate.new_id(),
             code=child_ws.serialize(),
@@ -543,7 +556,7 @@ class SearchLoop:
                 c.id for c in inspirations[0] + inspirations[1]
             ],
             embedding=embedding,
-            metadata=dict(proposal.metadata),
+            metadata=metadata,
         ), False
 
     def _propose(

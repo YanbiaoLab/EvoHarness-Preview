@@ -71,7 +71,12 @@ class WorkspaceGradeFnGrader:
             workdir=workdir,
             operator=cand.operator,
             generation=cand.generation,
-            parent_id=cand.parent_id,
+            # Redirected when the parent was a seed copy, which has an id but
+            # never had anything published under it (see SearchLoop's child
+            # construction). parent_id itself stays as recorded.
+            parent_id=(
+                cand.metadata.get("lineage_parent_id") or cand.parent_id
+            ),
             lineage_dir=self.lineage_dir,
         )
         started = time.monotonic()

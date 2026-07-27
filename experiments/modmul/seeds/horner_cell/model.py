@@ -44,6 +44,13 @@ class EvolvedModel(ModularMultiplicationModel):
         self.cell.load_state_dict(state)
         self.cell.eval()
 
+    def max_batch_size(self) -> int:
+        # The official timer is checked between batches, not per problem, so
+        # batches are the unit of cost. The interface default is 1, which
+        # runs an official tier's 100 problems as 100 sequential forward
+        # passes; this seed never set it. 128 covers a full tier in one.
+        return 128
+
     def preprocess_a(self, a: str) -> int:
         return int(a)
 

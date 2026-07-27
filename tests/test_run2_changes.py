@@ -175,3 +175,67 @@ def test_islands_without_a_seed_of_their_own_still_get_a_parent(tmp_path):
         assert loop.store.island_view(idx).passed_candidates, (
             f"island {idx} has no parent"
         )
+
+
+def test_children_of_a_seed_copy_inherit_from_the_original(tmp_path):
+    """A seed copy has an id but nothing was ever published under it.
+
+    The copy is a database row: it reuses the original's report and is never
+    handed to the grader, so a domain that keys per-candidate state by id --
+    trained weights above all -- finds nothing for it. Run modmul_r7 reported
+    "parent-published-no-weights" for 25 of its 26 offspring for exactly this
+    reason, which means that run's whole fitness column measures cold starts
+    rather than mutations.
+    """
+    task = get_task("demo_counter")
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, task.grader, islands=2)
+    )
+    loop.run(task.initial_code, extra_seeds=[])
+
+    original = next(
+        c for c in loop.store.island_view(0).candidates if c.operator == "seed"
+    )
+    copy = next(
+        c for c in loop.store.island_view(1).candidates if c.operator == "seed"
+    )
+    assert copy.id != original.id
+    assert copy.metadata.get("seed_copy_of") == original.id
+
+    children = [
+        c for c in loop.store.all_candidates() if c.parent_id == copy.id
+    ]
+    assert children, "island 1 produced no offspring to check"
+    for child in children:
+        # parent_id still records the copy -- island bookkeeping stays honest.
+        assert child.parent_id == copy.id
+        assert child.metadata.get("lineage_parent_id") == original.id
+
+
+def test_grade_context_redirects_lineage_parent_to_the_original(tmp_path):
+    """The redirect has to survive all the way to the grader's context."""
+    from evoharness.evocore.population import Candidate, EvalReport
+    from evoharness.evoserve.grading import GradeContext
+    from evoharness.task import WorkspaceGradeFnGrader
+
+    seen: dict = {}
+
+    def fake_grade(candidate_dir, ctx: GradeContext):
+        seen["parent_id"] = ctx.parent_id
+        return EvalReport(fitness=1.0, passed=True).to_json()
+
+    grader = WorkspaceGradeFnGrader(fake_grade, lineage_dir=tmp_path / "lin")
+    child = Candidate(
+        id="child", code="# x\n", generation=1,
+        parent_id="the-copy", island_idx=1, operator="rewrite",
+        metadata={"lineage_parent_id": "the-original"},
+    )
+    grader.grade(child, tmp_path / "work")
+    assert seen["parent_id"] == "the-original"
+
+    plain = Candidate(
+        id="child2", code="# y\n", generation=1,
+        parent_id="an-ordinary-parent", island_idx=0, operator="rewrite",
+    )
+    grader.grade(plain, tmp_path / "work2")
+    assert seen["parent_id"] == "an-ordinary-parent"

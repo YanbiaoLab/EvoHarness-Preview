@@ -1,3 +1,7 @@
+<!-- modmul research_msg v4 (v3 -> v4, 2026-07-27):加 §8(照官方 harness 读出的
+     计费方式:按批不按题、超时后续层全 0、批宽是未测轴、每步成本第二项无人攻)。
+     仍然只注入现象与坐标轴,不注入设定值 —— 该设多大的批、该怎么改扫描,留给搜索答。
+     原 v3 头注如下。 -->
 <!-- modmul research_msg v3 (冻结领域简报,tier-1 knowledge)。
      v2 -> v3 (2026-07-26):加 §7(当日实测:前沿是时间预算不是精度上限、
      步数同时买时间与可靠性、状态宽余量是未测轴、已证否清单、model soup、
@@ -226,3 +230,65 @@ the checkpoint-selection signal had both dropped below the noise of the
 measurement** — past that point additional training is a random walk. If your
 per-step error approaches your ability to measure it, the remaining gains are
 in coverage, not optimization.
+
+## 8. How the budget is actually charged (2026-07-27, read off the official harness)
+
+§7 established that the frontier is a time budget. This section says what that
+budget is charged AGAINST, because the answer moves the target.
+
+### 8.1 The billing unit is the batch, not the problem
+
+The official timer is cooperative and is checked **between batches**, never
+per problem (`rules/evaluation.md`, "Wall-clock measurement"; enforced in
+`evaluation/pipeline.py::run_inference`). There is no per-problem limit at
+all — the ~273 ms figure in the rules is labelled a **soft** target and is
+just 300 s divided by 1100 problems. The 5-minute total is likewise printed
+under a column headed "Reference value" with the note "May be tuned before
+the official runs", and is a CLI option rather than a constant.
+
+What IS hard: on timeout the tier in flight scores 0% and **every subsequent
+tier scores 0%**, while completed tiers keep their scores. Tiers run in
+index order. So the budget is a single shared pool spent from tier 1 upward,
+and running out is not a partial loss.
+
+Consequences worth reasoning about:
+
+- Cost per problem is the wrong quantity to optimise. Cost per BATCH, times
+  the number of batches, is the quantity that is charged.
+- A tier's problem count divided by the model's batch width decides how many
+  batches that tier costs. A batch that is not full still pays whatever a
+  batch costs.
+- `max_batch_size()` is therefore a load-bearing inference-time parameter and
+  it lives in the compliance-critical file, not the architecture file.
+
+### 8.2 The open question underneath it
+
+Whether a batch's wall clock is roughly FLAT in batch size or roughly LINEAR
+in it decides which of two very different strategies pays:
+
+- **Flat** (the cost is the sequential depth of the schedule — for a Horner
+  family, `operand_bits/RADIX_BITS` steps times the per-step scan depth,
+  none of which depends on how many problems ride along) → widening the batch
+  is close to free throughput, and the number of batches per tier is the
+  lever.
+- **Linear** (the cost is arithmetic throughput) → batch width buys nothing,
+  and the only way down is to do less work per step: a scan with better work
+  complexity, fewer refinement rounds, or a coarser radix.
+
+**This is unmeasured here.** It is cheap to measure — time one tier at two
+batch widths — and it is worth measuring before spending mutations on either
+branch, because the two branches recommend opposite things.
+
+### 8.3 The second factor of per-step cost has had no attention
+
+Total serial work per problem factorises into two terms:
+
+    (number of outer steps) x (cost of one step)
+
+Every mutation observed so far has attacked the first term. The second term —
+how much sequential work one step performs, and with what work complexity —
+has not been touched by any candidate. A step whose internal propagation has
+depth `d` and work `w` pays both; a scan that is depth-optimal is not
+automatically work-optimal, and on this hardware the two are not
+interchangeable. Whether the second term has slack is open, and it multiplies
+with the first rather than competing with it.
