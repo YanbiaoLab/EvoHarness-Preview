@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -709,6 +710,17 @@ class _OpenAICompatTransport:
             raise
         except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             raise LLMTransientError(str(exc)) from exc
+        except http.client.HTTPException as exc:
+            # A response cut off mid-body. IncompleteRead does not inherit
+            # from URLError or ConnectionError, so it used to escape every
+            # retry and kill the run outright: modmul_r1 died at generation 1
+            # on "IncompleteRead(12000 bytes read, 49814 more expected)".
+            # A truncated read is the most transient fault there is.
+            raise LLMTransientError(f"truncated response: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            # Same cause seen from the other side — enough bytes arrived to
+            # return, not enough to parse.
+            raise LLMTransientError(f"unparseable response body: {exc}") from exc
         return _parse_openai_chat_response(
             body,
             requested_model=model,

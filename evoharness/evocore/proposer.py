@@ -232,7 +232,10 @@ class SingleShotProposer(Proposer):
                     except WorkspaceError as e:
                         # ../escape or growing a single-file genome: a
                         # REJECTED proposal, not a crash — resample.
-                        logger.info("multi-file proposal rejected: %s", e)
+                        logger.warning(
+                            "multi-file proposal rejected (attempt %d): %s",
+                            attempt, e,
+                        )
                         continue
                     return ProposeResult(
                         Proposal(child_ws.main_text(), title, summary, model,
@@ -250,7 +253,13 @@ class SingleShotProposer(Proposer):
                     llm_cost=cost,
                     attempts=attempt,
                 )
-            logger.info("proposal rejected (%s): %s", operator, outcome.error)
+            # WARNING, not INFO: run modmul_r1 lost 14 of 16 proposals and
+            # the log recorded nothing about why, so the failure could
+            # only be guessed at afterwards.
+            logger.warning(
+                "proposal rejected (%s, attempt %d): %s",
+                operator, attempt, outcome.error,
+            )
         return ProposeResult(
             None,
             llm_cost=cost,
