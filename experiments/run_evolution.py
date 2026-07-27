@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -47,6 +48,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set", dest="overrides", nargs="*", default=[],
                         metavar="section.key=value")
     args = parser.parse_args(argv)
+
+    # Nobody configured logging, so the root logger sat at WARNING and every
+    # logger.info in the framework went nowhere. The per-proposal plan line
+    # added after modmul_r7 -- island, parent, children_count, operator, the
+    # record that would have shown r7 drawing one parent fifteen times --
+    # produced an empty log file in r8's smoke. Root stays at WARNING so
+    # urllib3 and friends do not flood; only our own tree is verbose.
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("evoharness").setLevel(
+        os.environ.get("EVOHARNESS_LOG_LEVEL", "INFO").upper()
+    )
 
     recipe = recipes.get_recipe(args.recipe)
     search, population, plus, proposal = recipes.load_experiment_config(
