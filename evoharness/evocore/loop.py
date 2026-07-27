@@ -286,9 +286,19 @@ class SearchLoop:
         barren = [
             idx
             for idx in range(self.pop_cfg.num_islands)
-            if not self.store.island_view(idx).passed_candidates
+            # Never the seed's own island: its row is already inserted above,
+            # and seed_all_islands reuses seed.id there, so asking for it back
+            # is a primary-key collision. Reachable exactly when the primary
+            # seed FAILED -- then island 0 has a row but no passed candidate,
+            # so it looks barren. Run modmul_r9 died on this at generation 0
+            # the first time the seed timed out.
+            if idx != seed.island_idx
+            and not self.store.island_view(idx).passed_candidates
         ]
-        if barren:
+        # Only a seed that PASSED is worth copying: a copy reuses the
+        # original's report, so backfilling with a failed seed fills the
+        # island with a row that can never be selected and calls it covered.
+        if barren and seed.passed:
             self.store.seed_all_islands(seed, islands=barren)
         self.store.refresh_archive()
 

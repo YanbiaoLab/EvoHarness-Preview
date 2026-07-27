@@ -239,3 +239,42 @@ def test_grade_context_redirects_lineage_parent_to_the_original(tmp_path):
     )
     grader.grade(plain, tmp_path / "work2")
     assert seen["parent_id"] == "an-ordinary-parent"
+
+
+def test_a_failing_primary_seed_does_not_collide_with_its_own_backfill(tmp_path):
+    """The backfill must skip the island the seed is already on.
+
+    seed_all_islands reuses seed.id for the seed's own island, and the seed's
+    row is inserted before the backfill runs, so including that island asks
+    sqlite to insert the same primary key twice. It looks barren precisely
+    when the primary seed FAILED -- a row with no passed candidate -- which
+    is the case run modmul_r9 hit at generation 0 the first time the seed
+    exceeded the inference wall clock.
+    """
+    task = get_task("demo_counter")
+
+    class FailTheSeed:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def grade(self, cand, workdir):
+            report = self.inner.grade(cand, workdir)
+            if cand.operator == "seed" and cand.island_idx == 0:
+                report.passed = False
+                report.fault = "eval-timeout"
+            return report
+
+    loop = recipes.get_recipe("e0").build(
+        make_ctx(tmp_path, task, FailTheSeed(task.grader), islands=3)
+    )
+    loop.run(task.initial_code, extra_seeds=[])      # must not raise
+
+    ids = [c.id for c in loop.store.all_candidates()]
+    assert len(ids) == len(set(ids)), "duplicate candidate ids"
+    # And no island is filled with copies of a seed that cannot be selected:
+    # a copy reuses the original's report, so backfilling with a failed seed
+    # would report the island as covered while leaving it unusable.
+    for idx in (1, 2):
+        assert not loop.store.island_view(idx).candidates, (
+            f"island {idx} was backfilled with a failed seed"
+        )
