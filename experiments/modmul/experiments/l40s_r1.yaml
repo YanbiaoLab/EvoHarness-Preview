@@ -25,8 +25,10 @@ search:
                                       # 判据在 30-40 代就能读(见
                                       # todo/modmul_evolution_validation.md)
   eval_batch_size: 16                 # ← 依据见上表
-  proposal_concurrency: 4             # 提案是串行网络等待:16 次 x 105 秒 = 28 分钟,
-                                      # 在快通道命中时占一代的 82%。只重叠网络等待,
+  proposal_concurrency: 4             # 实测 provider 并发曲线(2026-07-27):
+                                      #   1 路 203s/提案   2 路 150s (1/2 超时)
+                                      #   4 路  71s (0/4)  8 路  38s (7/8 超时)
+                                      # 4 是拐点;8 路崩。只重叠网络等待,
                                       # 规划仍单线程按 rng 顺序
   llm_models: ["MiniMax-M3"]          # 2026-07-27 换 provider(原 qwen key 过期)
   llm_max_tokens: 40960               # 多文件基因组,整文件重写需要

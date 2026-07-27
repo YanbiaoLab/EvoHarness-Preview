@@ -47,6 +47,19 @@ OPERAND_BITS = {
 # above it, small enough that gutting accuracy for speed still loses.
 LAMBDA = 0.15
 
+# Past this overshoot the exact factor carries no information, and the cap is
+# what keeps every score finite. Without it a candidate that completed no tier
+# at all projects to infinity, scores -inf, and ShinkaEvolve stores that as
+# 0.000 — which would rank a disqualified program ABOVE a working but slow one.
+MAX_OVER_BUDGET = 64.0
+
+# A candidate that crashed and one that ran but failed a gate are both dead
+# ends rather than points on a gradient, so they get constants below every
+# score a passing candidate can reach (the penalty cap bounds that at
+# -LAMBDA*log2(MAX_OVER_BUDGET) = -0.9).
+SCORE_FAILED_GATE = -1.0
+SCORE_CRASHED = -2.0
+
 
 def project_seconds(seconds: dict[int, float], cases_per_tier: int) -> tuple[float, float, bool]:
     """Estimate what all ten scored tiers would cost, and what is allowed.
@@ -63,7 +76,10 @@ def project_seconds(seconds: dict[int, float], cases_per_tier: int) -> tuple[flo
     """
     allowed = SECONDS_PER_PROBLEM * cases_per_tier * len(SCORED_TIERS)
     if not seconds:
-        return float("inf"), allowed, True
+        # Nothing ran, so there is nothing to extrapolate from. Report the cap
+        # rather than infinity: the number has to stay finite to be stored,
+        # compared and serialised as JSON.
+        return allowed * MAX_OVER_BUDGET, allowed, True
     total = sum(seconds.values())
     last = max(seconds)
     projected = False
@@ -101,8 +117,14 @@ def build_metrics(grade, cases_per_tier: int) -> dict:
     # not an objective, so beating it early buys nothing and a candidate has
     # no reason to trade accuracy for pointless speed. h90 is still computed
     # and reported — it just does not steer.
-    penalty = LAMBDA * math.log2(max(1.0, over))
+    penalty = LAMBDA * math.log2(min(MAX_OVER_BUDGET, max(1.0, over)))
     combined = overall - penalty
+    if not grade.passed:
+        # A fault is a disqualification, not a slow point on the same curve:
+        # the perturbation gate rejecting a candidate means its answers do not
+        # come from its trained parameters, and no amount of accuracy or speed
+        # redeems that. Rank it below every candidate that ran clean.
+        combined = SCORE_FAILED_GATE
 
     public = {
         "h90": int(merged.get("h90", 0)),
@@ -177,7 +199,7 @@ def main(program_path: str, results_dir: str) -> int:
         # A failed candidate still needs a finite score, or it cannot be
         # ranked against the ones that ran.
         metrics = {
-            "combined_score": -1.0,
+            "combined_score": SCORE_CRASHED,
             "public": {"fault": error[:300]},
             "private": {"traceback": traceback.format_exc()[-2000:]},
         }

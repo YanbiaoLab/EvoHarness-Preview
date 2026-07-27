@@ -26,7 +26,7 @@ llm_endpoint:
   api_base_env: EVOHARNESS_API_BASE
   api_key_env: EVOHARNESS_API_KEY
   models:
-    - qwen3-coder-plus
+    - glm-5.2
 
 db_config:
   num_islands: 2

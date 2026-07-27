@@ -81,12 +81,18 @@ def main(argv: list[str] | None = None) -> int:
         transport = make_openai_compat_transport(
             api_base,
             api_key,
-            # Measured on MiniMax-M3 with this task's ~12k-token prompt: a
-            # complete proposal takes ~105s. Sized to 3x that, not to the
-            # worst imaginable case — an over-long timeout does not make a
-            # slow call succeed, it only lets a stalled socket hold the run,
-            # which is how a previous run sat dead for 2h04m looking healthy.
-            timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 300)),
+            # Sized to measured latency, remeasured after the prompt grew.
+            # MiniMax-M3 on this task's ~12k-token prompt, concurrency 4:
+            # median 242s, max 283s, no failures. At 300s the median sat 19%
+            # under the cliff and calls were being truncated mid-flight — in
+            # the concurrency probe every "failure" landed on exactly 300s,
+            # so they were this timeout, not the provider.
+            #
+            # Still not sized to the worst imaginable case: an over-long
+            # timeout cannot make a slow call succeed, it only lets a stalled
+            # socket hold the run, which is how an earlier run sat dead for
+            # 2h04m looking healthy.
+            timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 600)),
         )
 
     # Only the run knows where lineage state can live, and only graders that

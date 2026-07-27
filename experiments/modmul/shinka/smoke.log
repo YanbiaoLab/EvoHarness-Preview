@@ -1,0 +1,167 @@
+  @@@@@@@@@@@@@@@@@@@@@      ░██████╗██╗░░██╗██╗███╗░░██╗██╗░░██╗░█████╗░
+  @                   @      ██╔════╝██║░░██║██║████╗░██║██║░██╔╝██╔══██╗
+  @          @        @      ╚█████╗░███████║██║██╔██╗██║█████═╝░███████║
+  @    @@   @@  @@    @      ░╚═══██╗██╔══██║██║██║╚████║██╔═██╗░██╔══██║
+  @   @     @    @@   @      ██████╔╝██║░░██║██║██║░╚███║██║░╚██╗██║░░██║
+  @    @@  @    @     @      ╚═════╝░╚═╝░░╚═╝╚═╝╚═╝░░╚══╝╚═╝░░╚═╝╚═╝░░╚═╝
+  @        @          @      @@@@@@@@@@@@@@@
+  @                   @   @@                 @@@@@
+  @@@@@@@@@@@@@@@@@@@@ @@                       @  @@                 █▀▀
+                      @                          @@  @                ██▄
+                    @      @@                      @  @@
+                   @       @         @              @   @             █░█
+                   @                 @               @  @             ▀▄▀
+                     @@@@@          @     @           @  @
+                      @            @          @       @ @@            █▀█
+                   @@    @@     @@       @@   @        @              █▄█
+                  @@        @@         @     @         @
+                 @@       @@   @@       @@@@@          @        @@    █░░
+              @ @@                @                    @              █▄▄
+             @ @@@@@             @@ @@                 @      @@
+            @                  @       @@              @    @@        █░█
+       @@@@@@@@@@@@@@@@@@@@@@             @@@          @@@@@@@  @@    ▀▄▀
+       @     @         @                      @@         @@@  @@
+        @@               @                      @      @   @  @@      █▀▀
+          @@@@@@@@@@@@@@@@@@                   @    @   @   @@        ██▄
+                                               @  @  @   @
+                                               @  @  @@@@
+                                               @  @@
+
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - 🖥️  System resources     
+detected:                                                                       
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • CPU cores: 12      
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • Memory: 24.0 GB    
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - 🔧 Concurrency settings:
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • Evaluation jobs: 2 
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • Proposal jobs: 2   
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • DB workers: 2      
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -    • Total threads: 6   
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Configured local numeric
+thread cap per eval process: 6                                                  
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -                         
+================================================================================
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - ASYNC EVOLUTION RUN     
+STARTED                                                                         
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -                         
+================================================================================
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Max evaluation jobs: 2  
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Max proposal jobs: 2    
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Target generations: 3   
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Language: python        
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Results directory:      
+results/modmul_shinka_smoke                                                     
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Log file:               
+results/modmul_shinka_smoke/evolution_run.log                                   
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO -                         
+================================================================================
+2026-07-27 11:42:46 - shinka.database.async_dbase - INFO - 🔧 AsyncDB           
+initialized with 2 workers, 2 concurrent DB ops (WAL mode)                      
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Copying initial program 
+from initial.py                                                                 
+2026-07-27 11:42:46 - shinka.core.async_runner - INFO - Starting initial program
+evaluation: results/modmul_shinka_smoke/gen_0/main.py                           
+2026-07-27 11:42:46 - shinka.launch.local - INFO - Submitted local process with 
+PID: 62120                                                                      
+2026-07-27 11:42:46 - shinka.launch.local - INFO - Launched local command:      
+/Users/zhangkang/miniconda3/bin/python                                          
+/Users/zhangkang/Documents/Projects/EvoHarness/experiments/modmul/shinka/evaluat
+e.py --program_path results/modmul_shinka_smoke/gen_0/main.py --results_dir     
+results/modmul_shinka_smoke/gen_0/results                                       
+2026-07-27 11:47:16 - shinka.core.async_runner - WARNING - Initial program      
+evaluation failed: 'Popen' object has no attribute 'return_code'                
+2026-07-27 11:47:16 - shinka.database.dbase - WARNING - Program                 
+6c491eb2-9ed8-4497-a836-a5ff9b061149 embedding is not a list, defaulting to     
+empty list.                                                                     
+2026-07-27 11:47:16 - shinka.database.dbase - INFO - Program                    
+6c491eb2-9ed8-4497-a836-a5ff9b061149 added to DB - score: 0.0.                  
+2026-07-27 11:47:16 - shinka.database.dbase - INFO - New best program:          
+6c491eb2-9ed8-4497-a836-a5ff9b061149 (gen: 0, score: 0.0000, initialized island:
+0).                                                                             
+                                 Program Evaluation Summary - Gen 0 | Total Cost
+╭─────────────┬─────────┬───────────────┬─────────┬─────────────────────────────
+│  GenID: 0   │ Island  │    Status     │   Score │ Patch Name                  
+├─────────────┼─────────┼───────────────┼─────────┼─────────────────────────────
+│ Best: 0.000 │   I-0   │   ✓ Correct   │   0.000 │ initial_program             
+╰─────────────┴─────────┴───────────────┴─────────┴─────────────────────────────
+2026-07-27 11:47:16 - shinka.database.dbase - INFO - Creating copies of initial 
+program 6c491eb2-9ed8-4497-a836-a5ff9b061149 for all islands                    
+2026-07-27 11:47:16 - shinka.database.islands - INFO - Created copy 871ca59c... 
+of program 6c491eb2... for island 1                                             
+2026-07-27 11:47:16 - shinka.database.islands - INFO - Created 1 copies of      
+program 6c491eb2... for islands 1-1                                             
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Setup initial program:  
+6c491eb2-9ed8-4497-a836-a5ff9b061149                                            
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Generation 0 completed  
+during setup                                                                    
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Verifying database is   
+ready for sampling...                                                           
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Database ready - 2      
+program(s) available for sampling                                               
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Database verification   
+completed - ready for proposal generation                                       
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - 🔄 Job monitor task     
+started                                                                         
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Proposal target=2       
+(sampling_ewma=0.00s, evaluation_ewma=0.00s, timing_samples=0,                  
+active_proposals=0, running_jobs=0)                                             
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Starting 2 new          
+proposals. Pipeline: 0/2 (running_jobs=0, active_proposals=0/2), Remaining      
+completed work: 2 (completed=1/3, next_generation=1)                            
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Started proposal task   
+for generation 1 (cost: $0.0000)                                                
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Started proposal task   
+for generation 2 (cost: $0.0000)                                                
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Generating proposal for 
+generation 1                                                                    
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Generating proposal for 
+generation 2                                                                    
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Island 1 =>              
+Probabilities: [1.0]                                                            
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Island 1 =>              
+Probabilities: [1.0]                                                            
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Island 1 => Scores: [0.0]
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Island 1 => Scores: [0.0]
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Sampled parent           
+871ca59c-c587-49d9-b665-8e2ef65af1b3 (Gen: 0, Score: 0.0000, Children: 0,       
+Island: 1)                                                                      
+2026-07-27 11:47:16 - shinka.database.parents - INFO - Sampled parent           
+871ca59c-c587-49d9-b665-8e2ef65af1b3 (Gen: 0, Score: 0.0000, Children: 0,       
+Island: 1)                                                                      
+              Parent & Context Sampling Summary - Gen 2 | Total Cost: $0.00 (Nov
+┏━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ Role        ┃ Gen  ┃ Island  ┃  ✓/✗  ┃    Score ┃ Patch Name                  
+┡━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+│ PARENT      │  0   │   I-1   │   ✓   │    0.000 │ initial_program             
+└─────────────┴──────┴─────────┴───────┴──────────┴─────────────────────────────
+              Parent & Context Sampling Summary - Gen 1 | Total Cost: $0.00 (Nov
+┏━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ Role        ┃ Gen  ┃ Island  ┃  ✓/✗  ┃    Score ┃ Patch Name                  
+┡━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+│ PARENT      │  0   │   I-1   │   ✓   │    0.000 │ initial_program             
+└─────────────┴──────┴─────────┴───────┴──────────┴─────────────────────────────
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Generated patch type:   
+diff                                                                            
+2026-07-27 11:47:16 - shinka.llm.llm - INFO - ==> SAMPLING:                     
+  local/glm-5.2@https://codingplan.alayanew.com/v1?api_key_env=EVOHARNESS_API_KE
+Y   1.0000                                                                      
+2026-07-27 11:47:16 - shinka.llm.llm - INFO - ==> QUERYING:                     
+['local/glm-5.2@https://codingplan.alayanew.com/v1?api_key_env=EVOHARNESS_API_KE
+Y', '0.5', '32768']                                                             
+2026-07-27 11:47:16 - shinka.core.async_runner - INFO - Generated patch type:   
+diff                                                                            
+2026-07-27 11:47:16 - shinka.llm.llm - INFO - ==> SAMPLING:                     
+  local/glm-5.2@https://codingplan.alayanew.com/v1?api_key_env=EVOHARNESS_API_KE
+Y   1.0000                                                                      
+2026-07-27 11:47:16 - shinka.llm.llm - INFO - ==> QUERYING:                     
+['local/glm-5.2@https://codingplan.alayanew.com/v1?api_key_env=EVOHARNESS_API_KE
+Y', '1.0', '32768']                                                             
+2026-07-27 11:57:16 - httpx - INFO - HTTP Request: POST                         
+https://codingplan.alayanew.com/v1/chat/completions "HTTP/1.1 504 Gateway       
+Time-out"                                                                       
+2026-07-27 11:57:16 - openai._base_client - INFO - Retrying request to          
+/chat/completions in 0.436628 seconds                                           
+2026-07-27 11:57:16 - httpx - INFO - HTTP Request: POST                         
+https://codingplan.alayanew.com/v1/chat/completions "HTTP/1.1 504 Gateway       
+Time-out"                                                                       
+2026-07-27 11:57:16 - openai._base_client - INFO - Retrying request to          
+/chat/completions in 0.383868 seconds                                           
