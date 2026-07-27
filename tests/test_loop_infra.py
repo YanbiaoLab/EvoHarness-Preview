@@ -265,3 +265,45 @@ def test_a_proposal_cannot_outlive_its_deadline(tmp_path):
     # It gave up on the deadline rather than walking all ten resamples.
     assert calls["n"] < 10
     assert elapsed < 0.5
+
+
+def test_a_batch_spreads_across_islands_and_parents(tmp_path):
+    """Both island rotation and the anti-monoculture penalty assumed one
+    proposal per generation, and both broke silently when a generation
+    started holding sixteen.
+
+    Island choice was keyed on the generation, so every proposal in a batch
+    got the same island. And children_count — the 1/(1+n) factor that stops
+    the selector grinding on one parent — was charged on insert, which
+    happens after the whole batch is already planned, so all sixteen saw
+    zero. Run modmul_r7 put 17 of 20 candidates on one island and drew all
+    15 offspring from a single parent, which ended the generation with
+    children_count=15 that had never influenced a single choice.
+    """
+    from evoharness.evocore import PopulationConfig, PopulationStore
+
+    cfg = SearchConfig(
+        num_generations=1, operators=["rewrite"], operator_probs=[1.0],
+        seed=7, eval_batch_size=9,
+    )
+    pop_cfg = PopulationConfig(num_islands=3)
+    store = PopulationStore(pop_cfg)
+    loop = SearchLoop(
+        cfg=cfg, pop_cfg=pop_cfg, store=store, grader=FlakyGrader(),
+        llm=LLMClient(transport=make_rewrite_transport(), sleep=lambda s: None),
+        prompt_builder=PromptBuilder("maximize increments"),
+        parent_selector=make_parent_selector(pop_cfg),
+        inspiration_selector=InspirationSelector(pop_cfg),
+        model_router=StaticRouter(["mock-model"]),
+        workdir=tmp_path,
+    )
+    loop.run(INITIAL, extra_seeds=[INITIAL, INITIAL])
+
+    offspring = [c for c in store.all_candidates() if c.operator != "seed"]
+    assert len(offspring) >= 6, "no batch to inspect"
+    assert len({c.island_idx for c in offspring}) > 1, (
+        "a whole batch landed on one island"
+    )
+    assert len({c.parent_id for c in offspring}) > 1, (
+        "a whole batch came from one parent"
+    )

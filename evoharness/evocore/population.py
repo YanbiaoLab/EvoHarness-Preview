@@ -353,9 +353,32 @@ class PopulationStore:
 
     # -- insertion & island assignment ----------------------------------------
 
+    def note_attempt(self, parent_id: str) -> None:
+        """Charge a parent for an attempt at PLAN time.
+
+        children_count is what stops the selector grinding on one parent —
+        its weight carries a 1/(1+children_count) factor. Counting on insert
+        made that feedback close once per generation, which was fine while a
+        generation held one proposal. With eval_batch_size 16 every proposal
+        in a batch is planned before any is graded, so all sixteen saw a
+        count of zero: run modmul_r7 drew all fifteen offspring from one
+        parent, and that parent finished the generation with
+        children_count=15 that had never influenced anything.
+
+        Charging at plan time also reads better than it did: what should
+        discourage a parent is attempts spent on it, not children that
+        happened to survive.
+        """
+        self._conn.execute(
+            "UPDATE candidates SET children_count = children_count + 1 "
+            "WHERE id = ?",
+            (parent_id,),
+        )
+        self._conn.commit()
+
     def insert(self, cand: Candidate) -> None:
-        """Insert a candidate; assigns an island if island_idx < 0 and maintains
-        the parent's children_count (upstream behavior)."""
+        """Insert a candidate; assigns an island if island_idx < 0. The
+        parent's children_count is charged at plan time, by note_attempt."""
         if cand.island_idx < 0:
             cand.island_idx = self._assign_island(cand)
         self._conn.execute(
@@ -363,12 +386,6 @@ class PopulationStore:
             f"({','.join('?' * 19)})",
             self._to_row(cand),
         )
-        if cand.parent_id:
-            self._conn.execute(
-                "UPDATE candidates SET children_count = children_count + 1 "
-                "WHERE id = ?",
-                (cand.parent_id,),
-            )
         self._conn.commit()
 
     def _assign_island(self, cand: Candidate) -> int:

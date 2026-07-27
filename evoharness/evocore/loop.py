@@ -323,10 +323,19 @@ class SearchLoop:
 
     # -- proposal --------------------------------------------------------------
 
-    def _pick_island(self, generation: int):
-        """Round-robin over islands, skipping islands without any passed parent."""
+    def _pick_island(self, generation: int, slot: int = 0):
+        """Round-robin over islands, skipping islands without any passed parent.
+
+        Rotates per PROPOSAL, not per generation. Keyed on the generation
+        alone this handed every proposal in a batch the same island: run
+        modmul_r7 put 17 of its 20 candidates on one island and drew all 15
+        offspring from a single parent. That was correct while a generation
+        held one proposal; raising eval_batch_size to 16 turned it into "one
+        island takes the whole generation" without anything failing.
+        """
+        rotation = generation * max(1, self.cfg.eval_batch_size) + slot
         order = [
-            (generation + i) % self.pop_cfg.num_islands
+            (rotation + i) % self.pop_cfg.num_islands
             for i in range(self.pop_cfg.num_islands)
         ]
         for idx in order:
@@ -335,7 +344,9 @@ class SearchLoop:
                 return view
         return None
 
-    def _plan_proposal(self, generation: int) -> "_ProposalPlan | None":
+    def _plan_proposal(
+        self, generation: int, slot: int = 0
+    ) -> "_ProposalPlan | None":
         """Pick island, parent, operator and build the prompts.
 
         Sequential by contract. Every draw here comes from self.rng, so
@@ -343,7 +354,7 @@ class SearchLoop:
         reproducing itself — which is why proposal concurrency overlaps only
         the network call, never this.
         """
-        island = self._pick_island(generation)
+        island = self._pick_island(generation, slot)
         if island is None:
             return None
 
@@ -364,6 +375,11 @@ class SearchLoop:
             parent = self.parent_selector.sample(island, self.rng)
             if parent is None:
                 return None
+            # Charge the parent NOW, not when a child survives. The
+            # 1/(1+children_count) factor is the only thing stopping the
+            # selector grinding on one parent, and it cannot work if the
+            # whole batch is planned before any of it is counted.
+            self.store.note_attempt(parent.id)
             inspirations = self.inspiration_selector.sample(
                 parent, self.store, self.rng
             )
@@ -498,9 +514,11 @@ class SearchLoop:
             metadata=dict(proposal.metadata),
         ), False
 
-    def _propose(self, generation: int, report: RunReport) -> Candidate | None:
+    def _propose(
+        self, generation: int, report: RunReport, slot: int = 0
+    ) -> Candidate | None:
         for _attempt in range(self.cfg.max_novelty_attempts):
-            plan = self._plan_proposal(generation)
+            plan = self._plan_proposal(generation, slot)
             if plan is None:
                 return None
             result = plan.lane.proposer.propose(
@@ -533,12 +551,15 @@ class SearchLoop:
         """
         workers = max(1, min(self.cfg.proposal_concurrency, count))
         if workers == 1:
-            found = [self._propose(generation, report) for _ in range(count)]
+            found = [
+                self._propose(generation, report, slot)
+                for slot in range(count)
+            ]
             return [c for c in found if c is not None]
 
         plans: list[_ProposalPlan] = []
-        for _ in range(count):
-            plan = self._plan_proposal(generation)
+        for slot in range(count):
+            plan = self._plan_proposal(generation, slot)
             if plan is None:
                 break
             plans.append(plan)

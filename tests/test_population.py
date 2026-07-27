@@ -17,7 +17,15 @@ def test_insert_get_roundtrip_and_lineage():
     got = store.get("c")
     assert got.parent_id == "p"
     assert got.report.fitness == 2.0
-    assert store.get("p").children_count == 1  # maintained on insert
+    # children_count is charged at PLAN time by note_attempt, not on insert:
+    # a whole batch is planned before any of it is graded, so counting on
+    # insert made the selector's 1/(1+children_count) penalty close only
+    # once per generation. Run modmul_r7 drew all fifteen offspring from one
+    # parent, which finished with children_count=15 that had never influenced
+    # a single one of those choices.
+    assert store.get("p").children_count == 0
+    store.note_attempt("p")
+    assert store.get("p").children_count == 1
     assert store.count() == 2
 
 
