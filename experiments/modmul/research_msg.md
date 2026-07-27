@@ -1,3 +1,6 @@
+<!-- modmul research_msg v5 (v4 -> v5, 2026-07-28):加 §8.4(tier 0 不计分
+     但第一个跑且占同一时钟;实测吃掉 81% 预算;它是唯一横跨全宽度范围的层)。
+     同样只给现象与坐标轴。原 v4 头注如下。 -->
 <!-- modmul research_msg v4 (v3 -> v4, 2026-07-27):加 §8(照官方 harness 读出的
      计费方式:按批不按题、超时后续层全 0、批宽是未测轴、每步成本第二项无人攻)。
      仍然只注入现象与坐标轴,不注入设定值 —— 该设多大的批、该怎么改扫描,留给搜索答。
@@ -292,3 +295,34 @@ depth `d` and work `w` pays both; a scan that is depth-optimal is not
 automatically work-optimal, and on this hardware the two are not
 interchangeable. Whether the second term has slack is open, and it multiplies
 with the first rather than competing with it.
+
+### 8.4 An unscored tier spends the same clock (measured 2026-07-28)
+
+Tier 0 is "diagnostic only and is not counted toward either metric"
+(`rules/evaluation.md`). It also runs FIRST, and it is on the same shared
+clock as everything else: `Tiers run in order: Tier 0 first, then Tiers 1, 2,
+..., 10`.
+
+Its geometry is unlike any scored tier. The official generator declares it as
+`TierConfig(tier_id=0, min_bits=1, max_bits=4096, is_multiplication_only=True)`
+-- one tier spanning the entire range, where every scored tier occupies a
+narrow band (tier 9's primes are 1020-1024 bits, tier 10's are 2047-2048).
+In the public benchmark its hundred problems carry primes from 8 bits to 8192
+and operands up to 4096.
+
+Measured on this project's seed at the official calibration: tier 0 took
+**243.9 seconds of a 300-second budget** -- 81% of the whole allowance, spent
+before tier 1 begins -- and contributed nothing to either metric. Tiers 1
+through 8 then brought the clock to 333.7s, so tiers 9 and 10 never started
+and scored 0, although the same weights answer tier 9 at 99% and tier 10 at
+96% when given the time.
+
+Two consequences:
+
+- The largest single cost in a run can sit in a tier that pays nothing. Any
+  reasoning about "where the budget goes" that only looks at scored tiers is
+  looking at 27% of it.
+- Cost per tier is not a function of tier difficulty alone. A tier's internal
+  spread of widths is a separate property, and the scored tiers are all narrow
+  while the unscored one is maximally wide. Whether a model's cost is
+  sensitive to that spread, and whether it has to be, is unmeasured here.

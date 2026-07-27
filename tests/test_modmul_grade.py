@@ -650,3 +650,29 @@ def test_speed_still_matters_after_every_tier_has_run():
     without = {**{t: 1.0 for t in range(1, 9)}, 9: 0.99, 10: 0.0}
     quick = {t: s for t, s in measured.items() if t != 10}
     assert fitness(without, quick, budget) < fitness(acc, measured, budget)
+
+
+def test_the_feedback_names_the_tier_that_spent_the_budget():
+    """The largest cost in the run was the one item the search could not see.
+
+    Tier 0 scores nothing -- "diagnostic only and not counted toward either
+    metric" -- but it runs first and it is on the same clock, and the summary
+    only ever received the scored tiers. Measured on the seed at the official
+    calibration it took 243.9s of the 300s budget, which is why tiers 9 and 10
+    never ran despite answering at 99% and 96% when given the time.
+
+    The old summary also described fitness as "(H90 + overall)/11", which
+    stopped being true when _fitness was softened: the search was reading the
+    wrong objective off its own feedback.
+    """
+    acc = {**{t: 1.0 for t in range(1, 9)}, 9: 0.0, 10: 0.0}
+    scored = dict(zip(range(1, 9),
+                      [0.187, 0.657, 1.5, 1.405, 3.61, 10.749, 13.02, 58.666]))
+    text = grade_module._summary(
+        acc, grade_module.RUNGS[-1], scored, 300.0, 243.9
+    )
+    assert "243.9" in text, "tier 0's cost is missing"
+    assert "tier was 0" in text, "tier 0 is not named as the most expensive"
+    assert "333.7" in text and "300" in text
+    assert "[9, 10] never ran" in text
+    assert "(H90 + overall)/11" not in text, "stale fitness definition"

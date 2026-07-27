@@ -1213,11 +1213,23 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
             "inference_budget_s": round(plan["budget_s"], 1),
         }
         if rung.diagnostic and "0" in result["tiers"]:
-            zero_cases = _load_cases(DIAGNOSTIC_TIER, 20)
+            zero_cases = _load_cases(DIAGNOSTIC_TIER, rung.cases)
             zero_acc, _, _ = _score_tiers(
                 {"tiers": {"0": result["tiers"]["0"]}},
                 {0: zero_cases},
                 (0,),
+            )
+            # Tier 0's SECONDS, not just its accuracy. It scores nothing --
+            # "diagnostic only and not counted toward either metric" -- but it
+            # runs FIRST and it is on the same clock, and _score_tiers is only
+            # ever handed the scored tiers, so its cost was reported nowhere.
+            # Measured on the seed at the official calibration: 243.9s of a
+            # 300s budget, 81% of the whole allowance, spent before tier 1
+            # begins. That is why tier 9 and tier 10 do not run. The single
+            # largest cost in the run was the one item the search could not
+            # see.
+            metrics["infer_s_tier_0"] = round(
+                float(result["tiers"]["0"].get("seconds", 0.0)), 3
             )
             diagnostic = {"diag_tier0_acc": round(zero_acc.get(0, 0.0), 4)}
 
@@ -1266,7 +1278,10 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
         structured_feedback={
             "schema_version": 1,
             "items": items,
-            "summary": _summary(accuracy, reached, seconds),
+            "summary": _summary(
+                accuracy, reached, seconds, budget_s,
+                metrics.get("infer_s_tier_0"),
+            ),
         },
         execution_time=time.monotonic() - started,
     )
@@ -1280,19 +1295,51 @@ def _metric_block(accuracy: dict[int, float]) -> dict:
     }
 
 
-def _summary(accuracy: dict[int, float], rung: Rung, seconds: dict) -> str:
+def _summary(
+    accuracy: dict[int, float],
+    rung: Rung,
+    seconds: dict,
+    budget_s: float | None = None,
+    tier0_s: float | None = None,
+) -> str:
+    """The feedback the next mutation actually reads.
+
+    Two things it used to get wrong. It described fitness as
+    "(H90 + overall)/11", which stopped being true when _fitness was softened
+    and is now doubly untrue with a wall-clock term -- the search was told the
+    wrong objective. And it reported the slowest SCORED tier, while the
+    largest cost in the run belongs to tier 0, which is scored by nobody and
+    was in no dictionary the summary could see: 243.9s of a 300s budget on the
+    seed, spent before tier 1 begins.
+    """
     per_tier = ", ".join(
         f"t{t}={accuracy[t]:.0%}" for t in sorted(accuracy)
     )
-    slowest = ""
-    if seconds:
-        tier = max(seconds, key=lambda t: seconds[t])
-        slowest = f"; slowest tier {tier} took {seconds[tier]:.1f}s"
+    clock = dict(seconds)
+    if tier0_s:
+        clock[0] = tier0_s
+    cost = ""
+    if clock:
+        spent = sum(clock.values())
+        slowest = max(clock, key=lambda t: clock[t])
+        cost = (
+            f" Inference clock: {spent:.1f}s"
+            + (f" of a {budget_s:.0f}s budget" if budget_s else "")
+            + f"; the most expensive tier was {slowest} at {clock[slowest]:.1f}s"
+        )
+        unrun = [t for t in SCORED_TIERS if t not in seconds]
+        if unrun and budget_s:
+            cost += (
+                f". Tiers {unrun} never ran: the budget is ONE shared pool "
+                "spent in tier order, and it was gone before they started"
+            )
+        cost += "."
     return (
         f"[{rung.name}] leaderboard key = (H90={_h90(accuracy)}, "
-        f"overall={_overall(accuracy):.3f}); {per_tier}{slowest}. "
-        "Fitness = (H90 + overall)/11 — one more tier at >=90% is worth more "
-        "than any accuracy gain below it."
+        f"overall={_overall(accuracy):.3f}); {per_tier}.{cost}"
+        " Crossing one more tier's 90% line is worth more than any accuracy"
+        " gain below it, and a tier that never runs scores 0 however"
+        " accurate the model is."
     )
 
 
