@@ -900,3 +900,54 @@ def test_litellm_transport_rejects_unknown_cost(monkeypatch):
             tool_choice=LLMToolChoice(),
             parallel_tool_calls=True,
         )
+
+
+def test_openai_compat_transport_sends_a_non_default_user_agent(monkeypatch):
+    """urllib's default agent string is blocked by Cloudflare's bot rules.
+
+    Measured 2026-07-27 against a Cloudflare-fronted provider: byte-identical
+    requests, 403 with "Python-urllib/3.13" and 200 with an explicit agent.
+    The 403 body is an HTML challenge page, so it does not even arrive as a
+    readable API error — it looked like a request-size limit for an hour.
+    """
+    captured = {}
+
+    class StubHTTPResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "ok"}}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }).encode()
+
+    def fake_urlopen(request, timeout):
+        # Request.get_header title-cases the key it stored.
+        captured["ua"] = request.get_header("User-agent")
+        return StubHTTPResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    transport = make_openai_compat_transport(
+        "https://example.test/v1", "secret", timeout_s=12.0
+    )
+    transport(
+        messages=(LLMMessage("user", "hi"),),
+        model="m",
+        temperature=0.2,
+        max_tokens=8,
+        tools=(),
+        tool_choice=LLMToolChoice(LLMToolChoiceMode.AUTO),
+        parallel_tool_calls=False,
+    )
+
+    agent = captured["ua"]
+    assert agent, "no User-Agent header was sent"
+    assert "urllib" not in agent.lower()
+    assert "requests" not in agent.lower()
