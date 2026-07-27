@@ -57,17 +57,18 @@ db_config:
   stagnation_threshold: 10
 
 evo_config:
+  # diff only. A `full` or `cross` patch regenerates all 526 lines, which
+  # this endpoint cannot deliver inside its 600s gateway ceiling — measured
+  # twice, both times a clean timeout. It is also the patch type that has to
+  # reproduce the frozen compliance contract verbatim to avoid corrupting it,
+  # so losing it costs less here than it would on a smaller genome.
   patch_types:
     - diff
-    - full
-    - cross
   # Weighted toward diff. The two identified levers (the radix constant and a
   # state-width margin) are small targeted edits; a full rewrite of a 500-line
   # file is mostly an opportunity to lose the parts that already work.
   patch_type_probs:
-    - 0.85
-    - 0.1
-    - 0.05
+    - 1.0
   # A candidate costs up to 90 minutes of GPU. At two in parallel, 60
   # generations is already several days.
   num_generations: 60

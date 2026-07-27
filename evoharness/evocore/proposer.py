@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+from time import monotonic
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -199,18 +200,36 @@ class SingleShotProposer(Proposer):
         model_router: ModelRouter,
         language: str = "python",
         max_resamples: int = 3,
+        deadline_s: float = 900.0,
     ):
         self.llm = llm
         self.model_router = model_router
         self.language = language
         self.max_resamples = max_resamples
+        # Retries nest: the client retries a transient fault three times and
+        # this loop resamples three times, so one proposal could occupy nine
+        # timeouts — 90 minutes at a 600s timeout. Worse, a batch waits for
+        # every proposal, so one hung call stalls the whole generation. Run
+        # modmul_r6 spent thirty minutes on a single proposal this way.
+        #
+        # This is the same shape as the eval-side hang fixed earlier today: a
+        # retry COUNT is not a bound when each attempt gets a fresh budget.
+        # Bound the wall clock too.
+        self.deadline_s = deadline_s
         self.patch_engine = PatchEngine()
 
     def propose(
         self, operator: str, parent: Candidate, system: str, user: str
     ) -> ProposeResult:
         cost = 0.0
+        started = monotonic()
         for attempt in range(1, self.max_resamples + 1):
+            if attempt > 1 and monotonic() - started > self.deadline_s:
+                logger.warning(
+                    "proposal gave up after %.0fs (%d attempts): deadline",
+                    monotonic() - started, attempt - 1,
+                )
+                break
             model = self.model_router.pick()
             try:
                 resp = self.llm.query(system, user, model)

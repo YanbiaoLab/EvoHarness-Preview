@@ -3,6 +3,7 @@
 circuit breaker instead of draining the run, and an ungradeable seed is fatal.
 """
 
+import time
 from pathlib import Path
 
 import pytest
@@ -223,3 +224,44 @@ def test_parallel_proposals_plan_in_the_same_order_as_sequential(tmp_path):
 
     assert plans[0], "the run produced no offspring to compare"
     assert plans[0] == plans[1]
+
+
+def test_a_proposal_cannot_outlive_its_deadline(tmp_path):
+    """Retries nest, so a retry COUNT is not a bound.
+
+    The client retries a transient fault three times and the proposer
+    resamples three times, so one proposal could occupy nine timeouts — 90
+    minutes at the timeout run modmul_r6 used. A batch waits for every
+    proposal before absorbing any, so that one call stalled a whole
+    generation. This is the eval-side 2h04m hang wearing different clothes:
+    each attempt got a fresh budget and nothing bounded the total.
+    """
+    from evoharness.evocore.proposer import SingleShotProposer
+    from evoharness.evocore.routing import StaticRouter
+
+    calls = {"n": 0}
+
+    def slow_and_useless(messages, model, **kw):
+        calls["n"] += 1
+        time.sleep(0.05)
+        return LLMResponse(text="no code here at all", model=model)
+
+    proposer = SingleShotProposer(
+        llm=LLMClient(transport=slow_and_useless, sleep=lambda s: None),
+        model_router=StaticRouter(["m"]),
+        max_resamples=10,
+        deadline_s=0.12,
+    )
+    from evoharness.evocore import Candidate
+    parent = Candidate(
+        id="p", code=INITIAL, generation=0, parent_id=None,
+        island_idx=0, operator="seed",
+    )
+    started = time.monotonic()
+    result = proposer.propose("rewrite", parent, "sys", "user")
+    elapsed = time.monotonic() - started
+
+    assert result.proposal is None
+    # It gave up on the deadline rather than walking all ten resamples.
+    assert calls["n"] < 10
+    assert elapsed < 0.5

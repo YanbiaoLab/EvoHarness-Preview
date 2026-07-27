@@ -88,11 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             # the concurrency probe every "failure" landed on exactly 300s,
             # so they were this timeout, not the provider.
             #
-            # Still not sized to the worst imaginable case: an over-long
-            # timeout cannot make a slow call succeed, it only lets a stalled
-            # socket hold the run, which is how an earlier run sat dead for
-            # 2h04m looking healthy.
-            timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 600)),
+            # 600s was 2.5x the median, and that was the wrong anchor: the
+            # right one is the measured MAX of 283s. At 600 a hung call cost
+            # ten minutes, and retries nest, so run modmul_r6 spent thirty
+            # minutes on a single proposal while the rest of its generation
+            # waited. 400s clears the observed max by 41% and caps a hang at
+            # two thirds of what it did.
+            timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 400)),
         )
 
     # Only the run knows where lineage state can live, and only graders that
