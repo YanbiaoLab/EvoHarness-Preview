@@ -80,7 +80,10 @@ evo_config:
       - low
       - medium
       - high
-    max_tokens: 32768
+    # Measured on this endpoint: the full 526-line genome costs 5.8k input
+    # tokens and the model stops on its own at ~3.3k output, so a larger cap
+    # buys nothing and only widens the window for a gateway timeout.
+    max_tokens: 16384
   llm_dynamic_selection: ucb1
   llm_dynamic_selection_kwargs:
     exploration_coef: 1.0
