@@ -327,11 +327,16 @@ class SearchLoop:
         """Round-robin over islands, skipping islands without any passed parent.
 
         Rotates per PROPOSAL, not per generation. Keyed on the generation
-        alone this handed every proposal in a batch the same island: run
-        modmul_r7 put 17 of its 20 candidates on one island and drew all 15
-        offspring from a single parent. That was correct while a generation
-        held one proposal; raising eval_batch_size to 16 turned it into "one
-        island takes the whole generation" without anything failing.
+        alone, every proposal in a batch drew the same island: run modmul_r7
+        put 17 of its 20 candidates on one island and took all 15 offspring
+        from a single parent. Multiplying by the batch size keeps the
+        per-generation offset the old behavior had while giving each slot
+        its own island, and keeps rotation numbers from colliding across
+        generations.
+
+        Derived from (generation, slot) rather than kept in a counter so
+        no new state has to survive a checkpoint for a resumed run to
+        reproduce itself.
         """
         rotation = generation * max(1, self.cfg.eval_batch_size) + slot
         order = [
@@ -401,16 +406,24 @@ class SearchLoop:
             )
             system, user = lane.prompt_builder.build(ctx)
 
+        # Run modmul_r7 drew the same parent 15 times out of 15 and nothing
+        # in the log said so — the concentration had to be reconstructed
+        # from the database afterwards. Record the choice as it is made, so
+        # the next run can be checked instead of guessed at.
+        logger.info(
+            "plan gen=%d slot=%d island=%d parent=%s children=%d op=%s",
+            generation, slot, island.island_idx, parent.id[:8],
+            parent.children_count, operator,
+        )
         return _ProposalPlan(
-                lane=lane,
-                island=island,
-                parent=parent,
-                operator=operator,
-                inspirations=inspirations,
-                system=system,
-                user=user,
-            )
-        return None
+            lane=lane,
+            island=island,
+            parent=parent,
+            operator=operator,
+            inspirations=inspirations,
+            system=system,
+            user=user,
+        )
 
     def _absorb_proposal(
         self,

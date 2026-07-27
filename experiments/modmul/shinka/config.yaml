@@ -5,11 +5,9 @@
 # Two at a time is the conservative starting point for a 46 GB L40S; raise it
 # only after watching nvidia-smi through a generation.
 max_evaluation_jobs: 2
-# One LLM request at a time. Two concurrent requests against this endpoint
-# return 504 at exactly 600s, while a single one carrying the full 526-line
-# genome answers in ~130s. Evaluation is the bottleneck anyway (90 minutes
-# per candidate), so serial proposals cost no wall clock.
-max_proposal_jobs: 1
+# Evaluation is the bottleneck at up to 90 minutes per candidate, so proposals
+# only have to keep the two evaluation slots fed.
+max_proposal_jobs: 2
 max_db_workers: 2
 
 # Passed to LocalJobConfig by run_evo.py.
@@ -29,25 +27,25 @@ python_executable: null        # /root/EvoHarness/.venv/bin/python on the GPU ho
 llm_endpoint:
   api_base_env: EVOHARNESS_API_BASE
   api_key_env: EVOHARNESS_API_KEY
-  # glm-5, not glm-5.2. Measured on the same 5.8k-token prompt: glm-5 answers
-  # in 18.8s with content, glm-5.2 takes 219s at best and in-run consistently
-  # burned the endpoint's full 600s ceiling and came back with content=None —
-  # it spends the whole token budget in reasoning_content and emits nothing.
-  # A model that returns no patch has no quality to trade away.
+  # All three answered a 9.6k-token prompt in 13-27s with content, over nine
+  # consecutive requests and zero failures; terra was steadiest (sd 2.0s).
+  # The previous endpoint took 219s at best on a SMALLER prompt and in-run
+  # returned content=None every time, spending its whole token budget in
+  # reasoning_content. ucb1 below chooses among these three as it learns.
   models:
-    - glm-5
+    - gpt-5.6-terra
+    - gpt-5.6-luna
+    - gpt-5.6
 
 db_config:
   num_islands: 2
   archive_size: 40
   elite_selection_ratio: 0.3
-  # No inspirations. Each one puts another full copy of the 526-line genome
-  # into the prompt, so the default of two tripled it to ~17k tokens and the
-  # request stopped fitting inside the endpoint's 600s ceiling. The search is
-  # tuning a known architecture along two identified levers rather than
-  # recombining designs, so cross-program context earns little here.
-  num_archive_inspirations: 0
-  num_top_k_inspirations: 0
+  # Restored. These were zeroed only because each inspiration adds another
+  # full copy of the genome and the old endpoint could not carry the prompt.
+  # The new one handles 9.6k tokens in seconds, so that reason is gone.
+  num_archive_inspirations: 1
+  num_top_k_inspirations: 1
   migration_interval: 10
   migration_rate: 0.1
   island_elitism: true
@@ -67,11 +65,12 @@ db_config:
   stagnation_threshold: 10
 
 evo_config:
-  # diff only. A `full` or `cross` patch regenerates all 526 lines, which
-  # this endpoint cannot deliver inside its 600s gateway ceiling — measured
-  # twice, both times a clean timeout. It is also the patch type that has to
-  # reproduce the frozen compliance contract verbatim to avoid corrupting it,
-  # so losing it costs less here than it would on a smaller genome.
+  # diff only. This began as a workaround for the old endpoint's 600s ceiling,
+  # but the reason that survives the endpoint change is the one that matters:
+  # a `full` or `cross` patch must reproduce the frozen compliance contract
+  # verbatim across 526 lines, and every regeneration is a chance to corrupt
+  # the surface the organisers judge. A diff cannot touch what it never
+  # mentions.
   patch_types:
     - diff
   # Weighted toward diff. The two identified levers (the radix constant and a

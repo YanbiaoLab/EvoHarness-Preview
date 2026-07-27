@@ -654,6 +654,13 @@ def _litellm_transport(
     )
 
 
+# Identify honestly rather than impersonate a browser: measured against a
+# Cloudflare-fronted provider, "EvoHarness/0.1" and "curl/8.7.1" both pass
+# while "Python-urllib/3.13" and "python-requests/2.31.0" are blocked. The
+# rule is about known-default agent strings, not about looking human.
+_USER_AGENT = "EvoHarness/0.1"
+
+
 @dataclass(frozen=True)
 class _OpenAICompatTransport:
     """Callable OpenAI-compatible transport with a fallback timeout."""
@@ -696,6 +703,14 @@ class _OpenAICompatTransport:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                # urllib sends "Python-urllib/3.x" and Cloudflare's default
+                # bot rules 403 it — an HTML challenge page, not JSON, so it
+                # surfaced as an unexplained hard failure on every single
+                # proposal. Measured 2026-07-27 against a Cloudflare-fronted
+                # provider: identical 40 KB request, 403 with the urllib
+                # default and 200 with the string below. The size looked
+                # like the cause and was not.
+                "User-Agent": _USER_AGENT,
             },
         )
         try:
@@ -707,6 +722,19 @@ class _OpenAICompatTransport:
         except urllib.error.HTTPError as exc:
             if exc.code in {408, 429} or exc.code >= 500:
                 raise LLMTransientError(str(exc)) from exc
+            # A permanent rejection says only "HTTP Error 403: Forbidden",
+            # and the interesting part — a Cloudflare challenge page, a
+            # quota message, a model-name typo — is in the body nobody
+            # read. Log its head; the diagnosis is usually in the first
+            # line.
+            try:
+                detail = exc.read()[:300].decode("utf-8", "replace")
+            except Exception:      # a body that cannot be read is not news
+                detail = "<unreadable>"
+            logger.warning(
+                "LLM endpoint refused the request: HTTP %d %s",
+                exc.code, detail.replace("\n", " "),
+            )
             raise
         except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             raise LLMTransientError(str(exc)) from exc
