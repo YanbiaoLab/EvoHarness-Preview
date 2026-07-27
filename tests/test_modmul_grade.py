@@ -402,7 +402,12 @@ def test_no_lineage_channel_means_todays_behaviour(tmp_path):
     child.mkdir()
     (child / "arch.py").write_text("D_MODEL = 64\n")
     result = grade_module._inherit_from_parent(child, GradeContext("c1", tmp_path))
-    assert result == {"warm_start": "cold", "inherited_steps": 0}
+    assert result["warm_start"] == "cold"
+    assert result["inherited_steps"] == 0
+    # Why it went cold is recorded too: run modmul_r1's best-reasoned
+    # offspring collapsed from 0.846 to 0.213 purely from starting cold, and
+    # nothing said which branch had sent it there.
+    assert result["warm_start_why"] == "no-lineage-dir"
 
 
 def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_path):

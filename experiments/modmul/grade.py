@@ -894,20 +894,32 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
     not only its genome.
     """
     if not ctx.lineage_dir:
-        return {"warm_start": "cold", "inherited_steps": 0}
+        return {"warm_start": "cold", "warm_start_why": "no-lineage-dir",
+                "inherited_steps": 0}
     arch = _arch_digest(candidate_dir)
     source = None
     origin = "cold"
-    if ctx.parent_id:
+    # Why a candidate started cold matters as much as that it did: the
+    # best-reasoned offspring of run modmul_r1 collapsed from 0.846 to 0.213
+    # purely because it started cold, and nothing recorded which of these
+    # branches sent it there.
+    if not ctx.parent_id:
+        why = "no-parent"
+    else:
         parent = Path(ctx.lineage_dir) / ctx.parent_id
         if (parent / "weights.pt").exists():
-            source, origin = parent, "parent"
+            source, origin, why = parent, "parent", "parent-weights"
+        else:
+            why = "parent-published-no-weights"
     if source is None:
         cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
         if (cached / "weights.pt").exists():
-            source, origin = cached, "pretrained"
+            source, origin, why = cached, "pretrained", "pretrained-cache"
+        else:
+            why += "+no-cache-for-this-recipe"
     if source is None:
-        return {"warm_start": "cold", "inherited_steps": 0}
+        return {"warm_start": "cold", "warm_start_why": why,
+                "inherited_steps": 0}
 
     for name in _INHERITED:
         path = source / name
@@ -926,6 +938,7 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
         # `partial` is not a failure: the loader keeps what fits, and the
         # candidate only has to relearn the tensors the mutation reshaped.
         "warm_start": f"{origin}-full" if same_arch else f"{origin}-partial",
+        "warm_start_why": why,
         "inherited_steps": steps,
     }
 

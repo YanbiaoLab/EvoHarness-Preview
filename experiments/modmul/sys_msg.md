@@ -1,5 +1,10 @@
-<!-- modmul task_sys_msg v3 (2026-07-26)。由 SearchConfig.task_sys_msg 注入每次
-     变异的 system prompt;改动需升版本并同步 serve.sh 的 --task-version。
+<!-- modmul task_sys_msg v4 (2026-07-27)。
+     v3 -> v4:加"前三个后代已经犯过的错"——全部选对了轴却没能转成分数,
+     具体是捆绑容量、删掉实测证据、复述格式而未作答。注入的是**已发生的
+     失败模式**,仍然不注入 radix 该设多少;基线数字改为两次读数中较低的一次。
+
+     由 SearchConfig.task_sys_msg 注入每次变异的 system prompt;
+     改动需升版本并同步 serve.sh 的 --task-version。
 
      v2 -> v3:
        * fitness 段改写 —— v2 写的 (h90+overall)/11 已被换成连续搜索信号,
@@ -44,18 +49,19 @@ Reference points, measured on this seed at full rungs, not guessed:
 | | h90 | overall |
 |---|---|---|
 | the three official baseline models | 1 | <= 0.127 |
-| **the seed you are mutating** | **9** | **0.892** |
+| **the seed you are mutating** | **8** | **0.872** |
 | best public submission known | 10 | 0.989 |
 
-The seed already answers tiers 1-8 at 100% and tier 9 at 92%. **Accuracy on
+The seed answers tiers 1-8 at 100% and tier 9 at 80-92% (it varies
+between training runs). **Accuracy on
 the tiers it reaches is not the problem.** Read the next section before
 deciding what to change.
 
 ## Where this seed actually loses (measured, full rungs)
 
 ```
-tier   1   2   3   4   5   6   7   8    9    10
-acc  100 100 100 100 100 100 100 100   92     0
+tier   1   2   3   4   5   6   7   8      9    10
+acc  100 100 100 100 100 100 100 100  80-92     0
 ```
 
 Tier 10 scored 0 **without a single case being run**. It was never reached:
@@ -82,6 +88,30 @@ learnability is real, is specific to this cell, and is yours to find.
 minutes in rather than at the end: below 1.0 the top tiers cannot be scored
 however accurate the model becomes, and `1 / budget_headroom` is the speedup
 needed. `projected_infer_s_tier_N` gives the per-tier projection behind it.
+
+## What earlier mutations already got wrong
+
+Three offspring have been graded so far. **All three picked the right axis —
+serial work per problem — and none of them turned it into a higher score.**
+Learn from how, rather than rediscovering it:
+
+1. **Two of them bundled a capacity increase** with the change they were
+   actually testing (`D_MODEL` 64→128, `HIDDEN` 128→256). The research brief
+   reports three independent measurements that capacity is NOT the bottleneck
+   here. Both scored worse than their parent. **Change one thing.** If you
+   raise the radix, raise only the radix — a bundled change you did not need
+   makes the result uninterpretable and usually costs accuracy.
+
+2. **One deleted the measured evidence in `arch.py`'s docstring** — a
+   zero-shot width-transfer table recorded from a real experiment — while
+   editing the constant beside it. Those numbers are why the architecture is
+   the shape it is, and no later mutation can recover them. **Keep measured
+   results and the reasoning that cites them.** Update a comment when it
+   becomes wrong; never drop one to save space.
+
+3. **One emitted no change at all**, having quoted the response format back to
+   itself instead of answering. A mutation identical to its parent is now
+   rejected outright.
 
 ## The genome: three files
 

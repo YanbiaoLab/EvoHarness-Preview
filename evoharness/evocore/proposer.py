@@ -237,6 +237,19 @@ class SingleShotProposer(Proposer):
                             attempt, e,
                         )
                         continue
+                    if child_ws.texts() == parent.workspace.texts():
+                        # A "mutation" that changed nothing. It is not a
+                        # neutral candidate: it ties its parent's fitness for
+                        # free — and where evaluation is cached, it ties it
+                        # exactly — so it lands at the top of the population
+                        # having contributed nothing, and can be selected as a
+                        # parent. Observed in run modmul_r1.
+                        logger.warning(
+                            "proposal rejected (%s, attempt %d): "
+                            "identical to parent",
+                            operator, attempt,
+                        )
+                        continue
                     return ProposeResult(
                         Proposal(child_ws.main_text(), title, summary, model,
                                  workspace=child_ws),

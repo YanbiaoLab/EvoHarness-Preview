@@ -15,14 +15,18 @@
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from .config import SearchConfig
 from .interfaces import MutationContext, PromptContributor
 from .population import Candidate
+
+logger = logging.getLogger(__name__)
 
 # -- editable region markers --------------------------------------------------
 
@@ -102,15 +106,38 @@ _FILE_BLOCK_RE = re.compile(
 )
 
 
+# A path the model echoed from the instructions rather than chose. Reasoning
+# models quote the response format back to themselves while thinking, and the
+# block regex cannot tell that apart from a real answer: run modmul_r1
+# admitted a genome file literally named "<relative/path.py>" whose body was
+# the model's own reasoning transcript. It scored top marks, because the three
+# real files were untouched and the cached weights made it tie its parent.
+_PLACEHOLDER_PATH = re.compile(r"[<>{}\[\]|*?\"']|^\s*$|\.\.")
+
+
+def _is_usable_path(path: str) -> bool:
+    if _PLACEHOLDER_PATH.search(path) or path.startswith("/"):
+        return False
+    # A genome file is source, not prose. Requiring a suffix rejects headings
+    # the model wrote as if they were paths.
+    return "." in Path(path).name and not path.endswith(".")
+
+
 def parse_file_blocks(text: str) -> dict[str, str]:
     """Parse `### FILE: path` + fenced-block sections into {path: content}
     (M2.5 multi-file answers). Empty dict = not a multi-file answer; the
     caller falls back to the single-block lane. Bodies are normalized to end
-    with a newline so derived git patches stay free of no-newline noise."""
-    return {
-        path: body if body.endswith("\n") else body + "\n"
-        for path, body in _FILE_BLOCK_RE.findall(text)
-    }
+    with a newline so derived git patches stay free of no-newline noise.
+
+    Paths that look like the instructions rather than an answer are dropped,
+    not passed on to the workspace."""
+    out: dict[str, str] = {}
+    for path, body in _FILE_BLOCK_RE.findall(text):
+        if not _is_usable_path(path):
+            logger.warning("ignoring implausible file path in answer: %r", path)
+            continue
+        out[path] = body if body.endswith("\n") else body + "\n"
+    return out
 
 
 @dataclass

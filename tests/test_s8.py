@@ -99,7 +99,11 @@ def test_structural_doa_replay_compares_three_arms(tmp_path):
     report = run_replay(tmp_path)
     arms = {item["arm"]: item for item in report["arms"]}
 
-    assert arms["single_shot"]["structural_doa"] == 5
+    # Four are structurally dead on arrival. The fifth returned its parent
+    # unchanged, which is now rejected at proposal time rather than graded —
+    # a no-op is not a broken candidate, it is not a candidate. The finding
+    # the arm exists to show is unchanged: single-shot yields nothing usable.
+    assert arms["single_shot"]["structural_doa"] == 4
     assert arms["single_shot"]["valid_candidates"] == 0
     for arm in ("conversational", "agentic"):
         assert arms[arm]["structural_doa"] == 0
