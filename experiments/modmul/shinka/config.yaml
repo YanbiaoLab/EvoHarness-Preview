@@ -1,0 +1,106 @@
+# ShinkaEvolve on modmul. Derived from examples/circle_packing/shinka_small.yaml;
+# every value that differs from it is annotated with why.
+
+# One candidate = a full training run plus ten tiers of inference on one GPU.
+# Two at a time is the conservative starting point for a 46 GB L40S; raise it
+# only after watching nvidia-smi through a generation.
+max_evaluation_jobs: 2
+max_proposal_jobs: 4
+max_db_workers: 2
+
+# Passed to LocalJobConfig by run_evo.py.
+# A candidate trains for up to 90 minutes and then runs inference over ten
+# tiers. A shorter cap would not slow candidates down, it would truncate them
+# mid-training and score the wreckage.
+job_time: "03:00:00"
+# `import torch` on the L40S image dies without the HPCX library paths, and the
+# venv only sees the NVIDIA torch build when created --system-site-packages.
+# Both are null for a local laptop run.
+activate_script: null          # /root/l40s_env.sh on the GPU host
+python_executable: null        # /root/EvoHarness/.venv/bin/python on the GPU host
+
+# The proposal LLM. ShinkaEvolve accepts OpenAI-compatible endpoints as
+# `local/<model>@<base_url>?api_key_env=<ENV>`; run_evo.py assembles that from
+# these fields so no URL or key is committed.
+llm_endpoint:
+  api_base_env: EVOHARNESS_API_BASE
+  api_key_env: EVOHARNESS_API_KEY
+  models:
+    - qwen3-coder-plus
+
+db_config:
+  num_islands: 2
+  archive_size: 40
+  elite_selection_ratio: 0.3
+  num_archive_inspirations: 1
+  num_top_k_inspirations: 1
+  migration_interval: 10
+  migration_rate: 0.1
+  island_elitism: true
+  enforce_island_separation: true
+  parent_selection_strategy: weighted
+  parent_selection_lambda: 10
+  archive_selection_strategy: "crowding"
+  island_selection_strategy: equal
+  archive_criteria:
+    combined_score: 1.0
+    # No length pressure. The upstream example rewards shorter programs, but
+    # here the whole genome is one merged file whose frozen compliance contract
+    # is a third of its lines — penalising length would push the search to
+    # strip explanation from exactly the region it must not touch.
+    loc: 0.0
+  enable_dynamic_islands: false
+  stagnation_threshold: 10
+
+evo_config:
+  patch_types:
+    - diff
+    - full
+    - cross
+  # Weighted toward diff. The two identified levers (the radix constant and a
+  # state-width margin) are small targeted edits; a full rewrite of a 500-line
+  # file is mostly an opportunity to lose the parts that already work.
+  patch_type_probs:
+    - 0.7
+    - 0.2
+    - 0.1
+  # A candidate costs up to 90 minutes of GPU. At two in parallel, 60
+  # generations is already several days.
+  num_generations: 60
+  max_patch_resamples: 3
+  max_patch_attempts: 1
+  job_type: local
+  language: python
+  llm_kwargs:
+    temperatures:
+      - 0
+      - 0.5
+      - 1.0
+    reasoning_efforts:
+      - low
+      - medium
+      - high
+    max_tokens: 32768
+  llm_dynamic_selection: ucb1
+  llm_dynamic_selection_kwargs:
+    exploration_coef: 1.0
+    cost_aware_coef: 0.5
+
+  # Off: the endpoint is OpenAI-compatible for chat but is not assumed to serve
+  # an embeddings route, and a missing embedding model fails every generation
+  # rather than degrading. Near-duplicate filtering is lost; with 60 slow
+  # generations there is little duplication pressure to begin with.
+  embedding_model: null
+  code_embed_sim_threshold: 0.99
+  max_novelty_attempts: 1
+
+  # Off for the first run. Meta-recommendation is a second LLM stage whose
+  # value is unknown here, and this run already has one untested variable in
+  # the score design.
+  meta_rec_interval: null
+
+  init_program_path: initial.py
+  results_dir: results/modmul_shinka
+  max_api_costs: null
+
+  evolve_prompts: false

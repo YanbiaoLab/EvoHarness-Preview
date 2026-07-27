@@ -54,6 +54,21 @@ from .workspace import Workspace
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _ProposalPlan:
+    """Everything chosen for one proposal before the LLM is called. Split out
+    so the call can overlap with its siblings while the choices that consume
+    self.rng stay strictly ordered."""
+
+    lane: ProposalLane
+    island: object
+    parent: Candidate
+    operator: str
+    inspirations: tuple[list, list]
+    system: str
+    user: str
+
+
 @dataclass
 class RunReport:
     generations_completed: int = 0
@@ -320,137 +335,240 @@ class SearchLoop:
                 return view
         return None
 
-    def _propose(self, generation: int, report: RunReport) -> Candidate | None:
-        for _attempt in range(self.cfg.max_novelty_attempts):
-            island = self._pick_island(generation)
-            if island is None:
+    def _plan_proposal(self, generation: int) -> "_ProposalPlan | None":
+        """Pick island, parent, operator and build the prompts.
+
+        Sequential by contract. Every draw here comes from self.rng, so
+        running two of these at once would make a seeded run stop
+        reproducing itself — which is why proposal concurrency overlaps only
+        the network call, never this.
+        """
+        island = self._pick_island(generation)
+        if island is None:
+            return None
+
+        lane = self._proposal_lane(generation)
+
+        failed = (
+            self.store.latest_failed() if self.cfg.repair_enabled else None
+        )
+        if failed is not None and self.rng.random() >= self.cfg.repair_probability:
+            failed = None    # throttled: fall through to a normal proposal
+        if failed is not None:
+            operator = "repair"
+            parent = failed
+            inspirations: tuple[list, list] = ([], [])
+            self.store.mark_repair_attempted(failed.id)
+            system, user = lane.prompt_builder.build_repair(parent)
+        else:
+            parent = self.parent_selector.sample(island, self.rng)
+            if parent is None:
                 return None
-
-            lane = self._proposal_lane(generation)
-
-            failed = (
-                self.store.latest_failed() if self.cfg.repair_enabled else None
+            inspirations = self.inspiration_selector.sample(
+                parent, self.store, self.rng
             )
-            if failed is not None and self.rng.random() >= self.cfg.repair_probability:
-                failed = None    # throttled: fall through to a normal proposal
-            if failed is not None:
-                operator = "repair"
-                parent = failed
-                inspirations: tuple[list, list] = ([], [])
-                self.store.mark_repair_attempted(failed.id)
-                system, user = lane.prompt_builder.build_repair(parent)
+            has_insp = bool(inspirations[0] or inspirations[1])
+            if self.operator_selector is not None:
+                operator = self.operator_selector.sample_operator(
+                    has_insp, self.rng
+                )
             else:
-                parent = self.parent_selector.sample(island, self.rng)
-                if parent is None:
-                    return None
-                inspirations = self.inspiration_selector.sample(
-                    parent, self.store, self.rng
+                operator = sample_operator(
+                    self.cfg, has_inspirations=has_insp, rng=self.rng
                 )
-                has_insp = bool(inspirations[0] or inspirations[1])
-                if self.operator_selector is not None:
-                    operator = self.operator_selector.sample_operator(
-                        has_insp, self.rng
-                    )
-                else:
-                    operator = sample_operator(
-                        self.cfg, has_inspirations=has_insp, rng=self.rng
-                    )
-                ctx = MutationContext(
-                    parent=parent,
-                    archive_inspirations=inspirations[0],
-                    top_k_inspirations=inspirations[1],
-                    operator=operator,
-                    generation=generation,
-                )
-                system, user = lane.prompt_builder.build(ctx)
-
-            result = lane.proposer.propose(
-                operator, parent, system, user
+            ctx = MutationContext(
+                parent=parent,
+                archive_inspirations=inspirations[0],
+                top_k_inspirations=inspirations[1],
+                operator=operator,
+                generation=generation,
             )
-            self.budget.charge(result.llm_cost)
-            report.total_llm_cost += result.llm_cost
-            if result.proposal is None:
-                report.proposals_failed += 1
-                report.history.append(
-                    {
-                        "generation": generation,
-                        "status": "proposal_failed",
-                        "parent_id": parent.id,
-                        "operator": operator,
-                        **(
-                            {"proposal_mode": lane.name}
-                            if self.proposal_selector is not None
-                            else {}
-                        ),
-                        "failure_reason": result.failure_reason,
-                        "trace_path": result.trace_path,
-                        "attempts": result.attempts,
-                        "llm_cost": result.llm_cost,
-                    }
+            system, user = lane.prompt_builder.build(ctx)
+
+        return _ProposalPlan(
+                lane=lane,
+                island=island,
+                parent=parent,
+                operator=operator,
+                inspirations=inspirations,
+                system=system,
+                user=user,
+            )
+        return None
+
+    def _absorb_proposal(
+        self,
+        generation: int,
+        report: RunReport,
+        plan: "_ProposalPlan",
+        result,
+    ) -> tuple[Candidate | None, bool]:
+        """Turn one proposer result into a candidate.
+
+        Returns (candidate, retry). `retry` is the novelty gate's resample
+        signal — the caller should plan again. Everything here mutates
+        budget, report, the store or observers, so it stays on the main
+        thread even when the calls that produced `result` overlapped.
+        """
+        lane, island = plan.lane, plan.island
+        parent, operator = plan.parent, plan.operator
+        inspirations = plan.inspirations
+        self.budget.charge(result.llm_cost)
+        report.total_llm_cost += result.llm_cost
+        if result.proposal is None:
+            report.proposals_failed += 1
+            report.history.append(
+                {
+                    "generation": generation,
+                    "status": "proposal_failed",
+                    "parent_id": parent.id,
+                    "operator": operator,
+                    **(
+                        {"proposal_mode": lane.name}
+                        if self.proposal_selector is not None
+                        else {}
+                    ),
+                    "failure_reason": result.failure_reason,
+                    "trace_path": result.trace_path,
+                    "attempts": result.attempts,
+                    "llm_cost": result.llm_cost,
+                }
+            )
+            self._notify_rejected(
+                RejectionEvent(
+                    kind="proposal_failed",
+                    generation=generation,
+                    operator=operator,
+                    parent=parent,
+                    failure_reason=result.failure_reason or "",
                 )
+            )
+            return None, False
+        proposal = result.proposal
+        if self.proposal_selector is not None:
+            proposal.metadata.setdefault("proposal_mode", lane.name)
+
+        embedding = None
+        if self.novelty_gate is not None:
+            # Judge the whole workspace: a mutation that only touches a
+            # non-main file leaves main_text identical (see novelty_text).
+            verdict = self.novelty_gate.check(
+                novelty_text(
+                    proposal.workspace or parent.workspace, proposal.code
+                ),
+                island,
+            )
+            if not verdict.accepted:
+                report.novelty_rejections += 1
                 self._notify_rejected(
                     RejectionEvent(
-                        kind="proposal_failed",
+                        kind="novelty",
                         generation=generation,
                         operator=operator,
                         parent=parent,
-                        failure_reason=result.failure_reason or "",
+                        proposal_code=proposal.code,
+                        proposal_workspace=proposal.workspace,
+                        change_title=proposal.title,
+                        max_similarity=verdict.max_similarity,
+                        most_similar_id=verdict.most_similar_id,
                     )
                 )
+                # re-sample a parent, upstream retry semantics
+                return None, True
+            embedding = verdict.embedding
+
+        child_ws = proposal.workspace or parent.workspace.with_main_text(
+            proposal.code
+        )
+        return Candidate(
+            id=Candidate.new_id(),
+            code=child_ws.serialize(),
+            workspace_kind=child_ws.kind,
+            generation=generation,
+            parent_id=parent.id,
+            island_idx=parent.island_idx,
+            operator=operator,
+            change_title=proposal.title,
+            change_summary=proposal.summary,
+            model_name=proposal.model,
+            inspiration_ids=[
+                c.id for c in inspirations[0] + inspirations[1]
+            ],
+            embedding=embedding,
+            metadata=dict(proposal.metadata),
+        ), False
+
+    def _propose(self, generation: int, report: RunReport) -> Candidate | None:
+        for _attempt in range(self.cfg.max_novelty_attempts):
+            plan = self._plan_proposal(generation)
+            if plan is None:
                 return None
-            proposal = result.proposal
-            if self.proposal_selector is not None:
-                proposal.metadata.setdefault("proposal_mode", lane.name)
-
-            embedding = None
-            if self.novelty_gate is not None:
-                # Judge the whole workspace: a mutation that only touches a
-                # non-main file leaves main_text identical (see novelty_text).
-                verdict = self.novelty_gate.check(
-                    novelty_text(
-                        proposal.workspace or parent.workspace, proposal.code
-                    ),
-                    island,
-                )
-                if not verdict.accepted:
-                    report.novelty_rejections += 1
-                    self._notify_rejected(
-                        RejectionEvent(
-                            kind="novelty",
-                            generation=generation,
-                            operator=operator,
-                            parent=parent,
-                            proposal_code=proposal.code,
-                            proposal_workspace=proposal.workspace,
-                            change_title=proposal.title,
-                            max_similarity=verdict.max_similarity,
-                            most_similar_id=verdict.most_similar_id,
-                        )
-                    )
-                    continue  # re-sample a parent, upstream retry semantics
-                embedding = verdict.embedding
-
-            child_ws = proposal.workspace or parent.workspace.with_main_text(
-                proposal.code
+            result = plan.lane.proposer.propose(
+                plan.operator, plan.parent, plan.system, plan.user
             )
-            return Candidate(
-                id=Candidate.new_id(),
-                code=child_ws.serialize(),
-                workspace_kind=child_ws.kind,
-                generation=generation,
-                parent_id=parent.id,
-                island_idx=parent.island_idx,
-                operator=operator,
-                change_title=proposal.title,
-                change_summary=proposal.summary,
-                model_name=proposal.model,
-                inspiration_ids=[
-                    c.id for c in inspirations[0] + inspirations[1]
-                ],
-                embedding=embedding,
-                metadata=dict(proposal.metadata),
+            cand, retry = self._absorb_proposal(
+                generation, report, plan, result
             )
+            if cand is not None:
+                return cand
+            if not retry:
+                return None
         return None
+
+    def _propose_many(
+        self, generation: int, report: RunReport, count: int
+    ) -> list[Candidate]:
+        """Produce up to `count` candidates, overlapping the LLM calls.
+
+        Proposals used to be generated strictly one at a time. Once
+        eval_batch_size went to 16 that became the dominant cost of a
+        generation — sixteen sequential calls at ~105s each, while grading
+        all sixteen concurrently took minutes when the fast path applied.
+        The bottleneck had simply moved.
+
+        Planning stays sequential so rng draws keep their order, the calls
+        overlap because they are pure network waits, and absorption runs in
+        planning order so history and observers see the same sequence a
+        serial run would produce.
+        """
+        workers = max(1, min(self.cfg.proposal_concurrency, count))
+        if workers == 1:
+            found = [self._propose(generation, report) for _ in range(count)]
+            return [c for c in found if c is not None]
+
+        plans: list[_ProposalPlan] = []
+        for _ in range(count):
+            plan = self._plan_proposal(generation)
+            if plan is None:
+                break
+            plans.append(plan)
+        if not plans:
+            return []
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(
+                    plan.lane.proposer.propose,
+                    plan.operator, plan.parent, plan.system, plan.user,
+                )
+                for plan in plans
+            ]
+            results = [f.result() for f in futures]
+
+        cands: list[Candidate] = []
+        for plan, result in zip(plans, results):
+            cand, retry = self._absorb_proposal(
+                generation, report, plan, result
+            )
+            if cand is not None:
+                cands.append(cand)
+            elif retry:
+                # Novelty resample: one sequential retry rather than a whole
+                # second parallel round, which would need re-planning anyway.
+                cand = self._propose(generation, report)
+                if cand is not None:
+                    cands.append(cand)
+        return cands
 
     def _proposal_lane(self, generation: int) -> ProposalLane:
         if self.proposal_selector is not None:
@@ -475,11 +593,9 @@ class SearchLoop:
         and router mutations stay on the main thread. Returns the updated
         infra_streak (same drop semantics as the serial path) and whether the
         generation produced any candidate at all."""
-        cands: list[Candidate] = []
-        for _ in range(self.cfg.eval_batch_size):
-            cand = self._propose(generation, report)
-            if cand is not None:
-                cands.append(cand)
+        cands = self._propose_many(
+            generation, report, self.cfg.eval_batch_size
+        )
         if not cands:
             report.history.append({"generation": generation, "status": "skipped"})
             return infra_streak, False

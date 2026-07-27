@@ -186,3 +186,40 @@ def test_a_healthy_proposer_never_trips_the_new_breaker(tmp_path):
 
     assert report.stopped_reason == "completed"
     assert report.generations_completed == 10
+
+
+def test_parallel_proposals_plan_in_the_same_order_as_sequential(tmp_path):
+    """Overlapping the LLM calls must not change which parent and operator
+    each slot draws.
+
+    Planning consumes self.rng, so doing it concurrently would make a seeded
+    run stop reproducing itself. Only the network wait overlaps: plans are
+    made in order, calls run together, results are absorbed in planning
+    order.
+
+    What this does NOT promise: identical output when something inside the
+    proposer or transport is itself order-dependent. This test's fake
+    transport numbers its answers from a shared counter, and four concurrent
+    calls consume it in whatever order they finish — so the resulting code
+    differs even though every choice this loop makes is the same. A model
+    router that rotates between models has the same property.
+    """
+    plans = []
+    for concurrency in (1, 4):
+        loop, store = build_loop(
+            FlakyGrader(), tmp_path / f"c{concurrency}", generations=1
+        )
+        loop.cfg.eval_batch_size = 4
+        loop.cfg.proposal_concurrency = concurrency
+        loop.run(INITIAL)
+        by_id = {c.id: c for c in store.all_candidates()}
+        # Candidate ids are random UUIDs, so they cannot be compared across
+        # two independent runs; compare the choices themselves.
+        plans.append(sorted(
+            (c.operator, by_id[c.parent_id].code)
+            for c in store.all_candidates()
+            if c.operator != "seed" and c.parent_id in by_id
+        ))
+
+    assert plans[0], "the run produced no offspring to compare"
+    assert plans[0] == plans[1]

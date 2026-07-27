@@ -169,3 +169,13 @@ class SearchConfig:
     # per generation and graded CONCURRENTLY — required when one evaluation
     # is minute-scale (remote GPU training). 1 = upstream-parity serial loop.
     eval_batch_size: int = 1
+    # How many proposal LLM calls may be in flight at once. 1 keeps the
+    # strictly sequential behaviour. Raising it overlaps only the network
+    # wait: planning still runs one at a time so rng draws keep their order,
+    # and absorption runs in planning order, so a seeded run still
+    # reproduces. Worth raising once eval_batch_size is large — at 16 the
+    # sixteen sequential calls became the dominant cost of a generation.
+    # Caveat: this preserves the choices this loop makes, not order-dependent
+    # state inside a proposer, transport or rotating model router — those see
+    # the calls finish in whatever order they finish.
+    proposal_concurrency: int = 1
