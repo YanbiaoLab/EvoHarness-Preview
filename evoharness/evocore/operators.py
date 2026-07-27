@@ -389,6 +389,30 @@ Rules:
 - Keep the program's inputs/outputs and public interface unchanged.
 """
 
+# The same rules minus the format half, for a multi-file genome. rewrite,
+# recombine and repair all end in _REWRITE_RULES, which asks for ONE fenced
+# block and for EDIT-REGION markers to be preserved. A multi-file genome has
+# no markers — the modmul genome has none in any of its three files — and
+# _MULTIFILE_FORMAT is appended to the same prompt asking for one block PER
+# FILE. So the model was handed two contradictory formats and told to keep
+# markers that do not exist. Every repair in runs modmul_r7 and modmul_r8's
+# smoke was rejected for "missing EDIT-REGION markers".
+#
+# Same defect revise had, and _REVISE_MULTIFILE_SPEC only fixed revise.
+_MULTIFILE_RULES = """
+Rules:
+- Keep the program's inputs/outputs and public interface unchanged.
+"""
+
+
+def _for_multifile(spec: str) -> str:
+    """Strip the single-file format rules; _MULTIFILE_FORMAT replaces them."""
+    return (
+        spec.replace(_REWRITE_RULES, _MULTIFILE_RULES)
+        .replace("the editable region", "the program")
+    )
+
+
 # Five guidance variants, sampled uniformly ([parity] with upstream's five
 # full-rewrite system prompt variants; wording original).
 _REWRITE_VARIANTS = [
@@ -580,8 +604,11 @@ class PromptBuilder:
             spec = _REVISE_MULTIFILE_SPEC if multifile else _REVISE_SPEC
         elif ctx.operator == "rewrite":
             spec = _REWRITE_VARIANTS[int(self.rng.integers(len(_REWRITE_VARIANTS)))]
+            if multifile:
+                spec = _for_multifile(spec)
         elif ctx.operator == "recombine":
-            spec = _RECOMBINE_SPEC
+            spec = _for_multifile(_RECOMBINE_SPEC) if multifile \
+                else _RECOMBINE_SPEC
         else:
             raise ValueError(f"build() cannot handle operator {ctx.operator!r}")
         system = self._system(ctx, spec)
@@ -628,10 +655,17 @@ class PromptBuilder:
             operator="repair",
             generation=cand.generation,
         )
-        system = self._system(ctx, _REPAIR_SPEC)
+        multifile = (
+            len(cand.workspace.texts()) > 1 and not self.workspace_agent
+        )
+        system = self._system(
+            ctx, _for_multifile(_REPAIR_SPEC) if multifile else _REPAIR_SPEC
+        )
         parts = [
             _render_candidate(cand, self.language, "Failing program"),
         ]
+        if multifile:
+            parts.append(_MULTIFILE_FORMAT)
         if cand.report:
             if cand.report.fault:
                 parts.append(f"## Failure reason\n{cand.report.fault}")

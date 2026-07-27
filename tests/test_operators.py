@@ -160,3 +160,58 @@ def test_prompt_builder_repair_carries_error_logs():
     system, user = builder.build_repair(failing)
     assert "FAILED" in system
     assert "ZeroDivisionError" in user
+
+
+def _multifile_candidate(tmp_path, passed=True):
+    from evoharness.evocore.population import Candidate, EvalReport
+    from evoharness.evocore.workspace import GitWorkspace
+
+    (tmp_path / "main.py").write_text("def solve(x):\n    return arch.f(x)\n")
+    (tmp_path / "arch.py").write_text("def f(x):\n    return x\n")
+    ws = GitWorkspace.from_directory(tmp_path, main_file="main.py")
+    return Candidate(
+        id="mf",
+        code=ws.serialize(),
+        generation=1,
+        parent_id=None,
+        island_idx=0,
+        operator="rewrite",
+        workspace_kind="git",
+        report=EvalReport(fitness=0.0, passed=passed),
+    )
+
+
+@pytest.mark.parametrize("operator", ["rewrite", "recombine"])
+def test_multifile_prompts_do_not_ask_for_edit_region_markers(
+    tmp_path, operator
+):
+    """Two contradictory formats in one prompt is a rejected proposal.
+
+    rewrite, recombine and repair all ended in _REWRITE_RULES, which asks for
+    ONE fenced block with EDIT-REGION markers preserved, while
+    _MULTIFILE_FORMAT in the same prompt asks for one block PER FILE. The
+    modmul genome has no markers in any file, so complying with the first
+    rule was impossible and complying with the second got the answer thrown
+    away.
+    """
+    parent = _multifile_candidate(tmp_path)
+    ctx = MutationContext(
+        parent=parent,
+        archive_inspirations=[make_candidate("p", 0.5)],
+        top_k_inspirations=[],
+        operator=operator,
+        generation=1,
+    )
+    system, user = PromptBuilder("task").build(ctx)
+    assert "EDIT-REGION" not in system
+    assert "### FILE:" in user
+
+
+def test_multifile_repair_prompt_asks_for_file_blocks(tmp_path):
+    """repair got neither half of the fix: no file-block format at all."""
+    failing = _multifile_candidate(tmp_path, passed=False)
+    failing.report.fault = "ZeroDivisionError"
+    system, user = PromptBuilder("task").build_repair(failing)
+    assert "EDIT-REGION" not in system
+    assert "### FILE:" in user
+    assert "FAILED" in system
