@@ -35,7 +35,15 @@ LR = 1e-3
 WD = 0.0
 SEED = 0
 WARMUP = 300
-TOTAL_STEPS = 2_000_000            # upper bound; the time budget is what binds
+# The comment here used to read "upper bound; the time budget is what binds",
+# and it was wrong. Run modmul_r8's candidate 06dde31b found it in two
+# generations by reading the `training_skipped` diagnostic: an inherited
+# lineage reaches two million steps while later ASHA rungs still have their
+# whole wall-clock allowance, so the rungs report training_skipped and the
+# candidate stops improving with compute left on the table. Raising the cap
+# took tier 9 from 80% to 98% at unchanged wall clock, h90 8 -> 9. Not a
+# ceiling that binds, then -- a ceiling that hid the one that does.
+TOTAL_STEPS = 3_000_000
 
 # Width curriculum. Each entry is a state width in bits; the sampler unlocks
 # them progressively. Tier geometry for reference: t1 needs 2-3 (the fixed
