@@ -5,7 +5,11 @@
 # Two at a time is the conservative starting point for a 46 GB L40S; raise it
 # only after watching nvidia-smi through a generation.
 max_evaluation_jobs: 2
-max_proposal_jobs: 4
+# One LLM request at a time. Two concurrent requests against this endpoint
+# return 504 at exactly 600s, while a single one carrying the full 526-line
+# genome answers in ~130s. Evaluation is the bottleneck anyway (90 minutes
+# per candidate), so serial proposals cost no wall clock.
+max_proposal_jobs: 1
 max_db_workers: 2
 
 # Passed to LocalJobConfig by run_evo.py.
@@ -61,9 +65,9 @@ evo_config:
   # state-width margin) are small targeted edits; a full rewrite of a 500-line
   # file is mostly an opportunity to lose the parts that already work.
   patch_type_probs:
-    - 0.7
-    - 0.2
+    - 0.85
     - 0.1
+    - 0.05
   # A candidate costs up to 90 minutes of GPU. At two in parallel, 60
   # generations is already several days.
   num_generations: 60
@@ -76,10 +80,11 @@ evo_config:
       - 0
       - 0.5
       - 1.0
-    reasoning_efforts:
-      - low
-      - medium
-      - high
+    # reasoning_efforts is deliberately absent (ShinkaEvolve defaults it to
+    # "disabled"). GLM 5.2 is a reasoning model: asked for medium or high
+    # effort it spends the whole token budget on reasoning_content and returns
+    # content=None, which ShinkaEvolve reports as "LLM response content was
+    # None" and drops the generation. It also turned a 130s call into 11min.
     # Measured on this endpoint: the full 526-line genome costs 5.8k input
     # tokens and the model stops on its own at ~3.3k output, so a larger cap
     # buys nothing and only widens the window for a gateway timeout.
