@@ -619,3 +619,34 @@ def test_the_top_rung_is_the_official_problem_set():
     assert problems == grade_module.OFFICIAL_TOTAL_PROBLEMS
     budget = grade_module.SECONDS_PER_PROBLEM * problems
     assert budget == grade_module.OFFICIAL_INFERENCE_BUDGET_S
+
+
+def test_speed_still_matters_after_every_tier_has_run():
+    """The pressure must not switch off at the moment it has the most to do.
+
+    An earlier version went neutral as soon as every scored tier had run, on
+    the reasoning that there was nothing left to unlock. Measurement killed
+    it: the official timer is checked only between batches, so a model that
+    batches a whole tier at once is checked once per tier, at its start.
+    Tier 10 begins at a clock of ~190s, is never checked again, and runs 788
+    seconds. Every tier runs, the total is 978s against a 300s budget, and
+    going neutral there would have scored 978s and 400s identically.
+    """
+    fitness = grade_module._fitness
+    acc = {**{t: 1.0 for t in range(1, 9)}, 9: 0.99, 10: 0.96}
+    measured = dict(zip(range(1, 11),
+                        [0.26, 0.82, 1.6, 1.39, 3.58, 10.8, 11.9, 45.2,
+                         114.8, 788.0]))
+    budget = 300.0
+    assert grade_module._time_factor(measured, budget) < 1.0
+
+    halved = {**measured, 10: 394.0}
+    inside = {t: s * budget / sum(measured.values()) for t, s in measured.items()}
+    assert (fitness(acc, measured, budget)
+            < fitness(acc, halved, budget)
+            < fitness(acc, inside, budget))
+    # ...and crossing into tier 10 still beats being fast without it, because
+    # the leaderboard pays for the crossing.
+    without = {**{t: 1.0 for t in range(1, 9)}, 9: 0.99, 10: 0.0}
+    quick = {t: s for t, s in measured.items() if t != 10}
+    assert fitness(without, quick, budget) < fitness(acc, measured, budget)

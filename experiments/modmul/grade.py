@@ -57,6 +57,24 @@ OFFICIAL_INFERENCE_BUDGET_S = 300.0
 SECONDS_PER_PROBLEM = OFFICIAL_INFERENCE_BUDGET_S / OFFICIAL_TOTAL_PROBLEMS
 
 LOAD_ALLOWANCE_S = 240.0                  # load() 官方单独计量，这里给足余量
+
+# Ceiling on the eval subprocess, as a multiple of the inference budget. This
+# is a pathology stop, NOT the budget -- the budget is enforced inside the
+# runner, exactly as the official pipeline enforces it.
+#
+# It used to be budget + LOAD_ALLOWANCE_S, which made us STRICTER than the
+# official harness and cost run modmul_r9 its seed. The official timer is
+# checked only between batches, so a model that batches a whole tier at once
+# gets one check per tier, at its start: a tier beginning under budget then
+# runs to completion however long it takes, and is scored. Measured on the
+# seed at the official calibration -- tier 10 starts at a clock of ~190s and
+# runs 788 seconds, for 978 seconds total against a 300-second budget. Killing
+# at 540 reported a fault for a run the official pipeline would have scored
+# h90=10.
+#
+# 6x clears the measured 3.3x with room for a candidate several times slower,
+# and still stops a runaway at half an hour.
+INFERENCE_KILL_FACTOR = 6.0
 TRAIN_SLACK_S = 240.0                     # 候选无视自身预算时的硬 kill 余量
 MAX_FEEDBACK_ITEMS_PER_TIER = 20          # 逐题反馈体积上限（报告要进 run.db）
 
@@ -467,7 +485,7 @@ def _run_eval(
         [sys.executable, str(runner), str(model_dir), str(plan_path),
          str(out_path)],
         workdir=model_dir,
-        timeout_s=plan["budget_s"] + LOAD_ALLOWANCE_S,
+        timeout_s=plan["budget_s"] * INFERENCE_KILL_FACTOR + LOAD_ALLOWANCE_S,
         env=_subprocess_env(),
     )
     if out_path.exists():
@@ -616,15 +634,22 @@ def _time_factor(
 
     sum(seconds) is the clock at the moment the first unrun tier would have
     started, so budget/that is exactly the fraction of the way there, and its
-    reciprocal is the speedup still required. Above 1.0 means the missing
-    tiers are missing for some reason other than time -- a lower ASHA rung
-    simply not scoring them -- so the term goes neutral and leaves promotion
-    undistorted.
+    reciprocal is the speedup still required. Above 1.0 -- a lower ASHA rung
+    that simply does not score the upper tiers -- it clamps to neutral and
+    leaves promotion undistorted.
+
+    An earlier version returned neutral as soon as every scored tier had run,
+    on the reasoning that there was then nothing left to unlock. Measurement
+    killed that: the official timer is checked only BETWEEN batches, and a
+    model batching a whole tier at once gets exactly one check per tier, at
+    its start. So tier 10 begins at a clock of ~190s, is never checked again,
+    and runs 788 seconds to completion -- every tier runs, and the run takes
+    978 seconds against a 300-second budget. Going neutral there would switch
+    the pressure off at precisely the point it has the most work to do, and
+    would score 978s and 400s identically.
     """
     if not seconds or not budget or budget <= 0:
         return 1.0
-    if all(tier in seconds for tier in SCORED_TIERS):
-        return 1.0                       # every scored tier ran: nothing left
     spent = sum(seconds.values())
     if spent <= 0:
         return 1.0
