@@ -991,14 +991,32 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
     # best-reasoned offspring of run modmul_r1 collapsed from 0.846 to 0.213
     # purely because it started cold, and nothing recorded which of these
     # branches sent it there.
-    if not ctx.parent_id:
+    # Nearest first: the parent, then ITS parent, and so on. A candidate that
+    # failed evaluation publishes nothing, so without the walk-up its children
+    # start from random initialisation however much the lineage had banked.
+    # Run modmul_r9 lost 323,546 steps in three generations exactly that way --
+    # one candidate faulted, its repair child cold-started at h90=1, and that
+    # cold start OUTSCORED the fully-trained seed, which was scoring 0 for an
+    # unrelated reason. From there the whole island descended from noise.
+    chain = [ctx.parent_id, *ctx.ancestor_ids] if ctx.parent_id else list(
+        ctx.ancestor_ids
+    )
+    seen: set[str] = set()
+    chain = [a for a in chain if a and not (a in seen or seen.add(a))]
+    if not chain:
         why = "no-parent"
     else:
-        parent = Path(ctx.lineage_dir) / ctx.parent_id
-        if (parent / "weights.pt").exists():
-            source, origin, why = parent, "parent", "parent-weights"
-        else:
-            why = "parent-published-no-weights"
+        why = "parent-published-no-weights"
+        for depth, ancestor_id in enumerate(chain):
+            candidate_source = Path(ctx.lineage_dir) / ancestor_id
+            if (candidate_source / "weights.pt").exists():
+                source = candidate_source
+                origin = "parent" if depth == 0 else f"ancestor{depth}"
+                why = (
+                    "parent-weights" if depth == 0
+                    else f"ancestor-weights(+{depth})"
+                )
+                break
     if source is None:
         cached = _pretrained_dir(ctx.lineage_dir, _training_digest(candidate_dir))
         if (cached / "weights.pt").exists():

@@ -28,6 +28,15 @@ class GradeContext:
     # because only the domain knows when two genomes are compatible.
     parent_id: str | None = None
     lineage_dir: Path | None = None
+    # The parent, then ITS parent, and so on, nearest first. A candidate that
+    # failed evaluation publishes nothing, so its children find no state under
+    # its id and start from scratch however much the lineage had accumulated.
+    # Run modmul_r9 lost 323,546 training steps in three generations that way:
+    # one candidate faulted, its repair child cold-started, and the cold start
+    # outscored the fully-trained seed because the seed was scoring 0 for an
+    # unrelated reason. Domains that inherit should walk this until they find
+    # something, rather than treating the immediate parent as the only source.
+    ancestor_ids: tuple[str, ...] = ()
 
 
 @dataclass

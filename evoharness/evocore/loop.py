@@ -53,6 +53,10 @@ from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
+# How far back a child records its ancestry. Deep enough to step over
+# a run of failed generations, short enough not to bloat every row.
+_ANCESTRY_DEPTH = 8
+
 
 @dataclass(frozen=True)
 class _ProposalPlan:
@@ -551,6 +555,14 @@ class SearchLoop:
         origin = parent.metadata.get("seed_copy_of")
         if origin:
             metadata["lineage_parent_id"] = origin
+        # Carry the ancestry so a domain that inherits per-candidate state can
+        # walk past a parent that has none. Self-propagating: each child
+        # prepends its own parent to what the parent was carrying, so no store
+        # lookup is needed and a resumed run reconstructs nothing. Bounded,
+        # because this rides in every row.
+        lineage_id = origin or parent.id
+        ancestry = [lineage_id, *parent.metadata.get("lineage_ancestors", [])]
+        metadata["lineage_ancestors"] = ancestry[:_ANCESTRY_DEPTH]
         return Candidate(
             id=Candidate.new_id(),
             code=child_ws.serialize(),

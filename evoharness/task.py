@@ -77,6 +77,7 @@ class WorkspaceGradeFnGrader:
             parent_id=(
                 cand.metadata.get("lineage_parent_id") or cand.parent_id
             ),
+            ancestor_ids=tuple(cand.metadata.get("lineage_ancestors", ())),
             lineage_dir=self.lineage_dir,
         )
         started = time.monotonic()

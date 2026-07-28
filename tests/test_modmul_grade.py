@@ -676,3 +676,49 @@ def test_the_feedback_names_the_tier_that_spent_the_budget():
     assert "333.7" in text and "300" in text
     assert "[9, 10] never ran" in text
     assert "(H90 + overall)/11" not in text, "stale fitness definition"
+
+
+def test_inheritance_walks_past_an_ancestor_that_published_nothing(tmp_path):
+    """A failed candidate publishes nothing; its children must not start over.
+
+    Run modmul_r9 lost 323,546 training steps in three generations: a
+    candidate faulted, its repair child found no weights under the parent's
+    id and cold-started, and that cold start outscored the fully-trained seed
+    -- which was scoring 0 for an unrelated reason -- so the entire island
+    then descended from noise.
+    """
+    import torch
+
+    lineage = tmp_path / "lineage"
+    grandparent = lineage / "gp"
+    grandparent.mkdir(parents=True)
+    torch.save({"w": torch.zeros(2)}, grandparent / "weights.pt")
+    (grandparent / "arch.sha256").write_text("deadbeef\n")
+    (lineage / "failed-parent").mkdir()          # exists, but has no weights
+
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    for name in ("arch.py", "train.py", "model.py"):
+        (candidate / name).write_text(f"# {name}\n")
+
+    ctx = grade_module.GradeContext(
+        candidate_id="child",
+        workdir=tmp_path / "work",
+        parent_id="failed-parent",
+        ancestor_ids=("gp",),
+        lineage_dir=lineage,
+    )
+    out = grade_module._inherit_from_parent(candidate, ctx)
+    assert (candidate / "weights.pt").exists(), "did not inherit"
+    assert out["warm_start"].startswith("ancestor1"), out
+    assert "ancestor-weights(+1)" in out["warm_start_why"]
+
+    # And with no ancestry recorded it still reports the cold start honestly.
+    cold_ctx = grade_module.GradeContext(
+        candidate_id="child2",
+        workdir=tmp_path / "work2",
+        parent_id="failed-parent",
+        lineage_dir=lineage,
+    )
+    cold = grade_module._inherit_from_parent(tmp_path / "candidate2", cold_ctx)
+    assert cold["warm_start"] == "cold"
