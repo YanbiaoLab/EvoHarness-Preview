@@ -30,7 +30,14 @@ WD = 0.0
 BATCH = 4096
 SEED = 0
 WARMUP = 200
-TOTAL_STEPS = 400_000          # upper bound; the time budget is what binds
+# NOT "an upper bound the time budget beats to" -- that comment was here and
+# it was false, the same way it was false in limb_horner until run modmul_r8's
+# 06dde31b disproved it. This lineage's cached weights stood at exactly
+# 400,000 steps, so the loop below could not execute even once and training
+# became a no-op the moment the cap was reached. Raised to leave room; the
+# wall clock is what should stop training, and if this number ever binds
+# again the run will say so through `training_skipped`.
+TOTAL_STEPS = 2_000_000
 
 # Task-fixed tier geometry (p bit ranges); NOT part of the mutation surface —
 # a candidate must not narrow training to the easy tiers.
@@ -99,7 +106,13 @@ def train(model_dir: str) -> None:
 
     pools = prime_pools(device)
     cell.train()
-    step = done
+    # loss is initialised, not just step: when the cap is already reached or
+    # the budget is spent the loop body never runs, and the state write below
+    # touches `loss`. Run modmul_r11's island-1 seed died on exactly that --
+    # UnboundLocalError, reported as train-failed, which is indistinguishable
+    # from the candidate's own code being broken. limb_horner and serial_ar
+    # both guard this; horner_cell was the one that did not.
+    step, loss = done, torch.tensor(0.0)
     while step < TOTAL_STEPS and time.monotonic() < deadline:
         for group in opt.param_groups:
             group["lr"] = LR * min(1.0, (step + 1) / WARMUP)

@@ -1,3 +1,5 @@
+import re
+import ast
 """Contract tests for the three modmul seed genomes: shape, legality and the
 resumable-training contract only. Real accuracy comes from GPU training, not
 from these seconds-long smoke runs.
@@ -128,3 +130,69 @@ def test_limb_horner_is_width_generic(seed_dir):
         state = torch.zeros(3, width)
         digit = torch.zeros(3, arch.RADIX_BITS)
         assert cell(state, state, state, digit).shape == (3, width)
+
+
+@pytest.mark.parametrize("seed", ["limb_horner", "horner_cell", "serial_ar"])
+def test_training_survives_having_nothing_left_to_do(seed):
+    """A run that executes zero steps must not crash on the way out.
+
+    The loop is `while step < TOTAL_STEPS and time.monotonic() < deadline`, so
+    it is skipped entirely once the cap is reached or the budget is spent, and
+    the state written afterwards refers to `loss`. Run modmul_r11's island-1
+    seed hit this: its cached weights stood at exactly TOTAL_STEPS, the body
+    never ran, and UnboundLocalError came back as `train-failed` -- which
+    reads as the candidate's own code being broken, and cost that island its
+    architecture for the whole run.
+
+    limb_horner and serial_ar already initialised loss; horner_cell did not.
+    """
+    src = (SEEDS / seed / "train.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "train")
+    loops = [n for n in ast.walk(fn) if isinstance(n, (ast.While, ast.For))]
+    assigned_in_loop = {
+        t.id
+        for loop in loops
+        for n in ast.walk(loop)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    used_after = {
+        n.id for n in ast.walk(fn)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    bound_before = set()
+    for node in fn.body:
+        for n in ast.walk(node):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        bound_before.add(t.id)
+                    elif isinstance(t, ast.Tuple):
+                        bound_before.update(
+                            e.id for e in t.elts if isinstance(e, ast.Name)
+                        )
+    risky = (assigned_in_loop & used_after) - bound_before
+    assert not risky, (
+        f"{seed}/train.py uses {sorted(risky)} outside the training loop "
+        "without binding them first; a zero-step run raises UnboundLocalError"
+    )
+
+
+@pytest.mark.parametrize("seed", ["limb_horner", "horner_cell", "serial_ar"])
+def test_the_step_cap_is_not_already_reached(seed):
+    """The cap must not bind before the wall clock does.
+
+    "upper bound; the time budget is what binds" was written in all three and
+    was false in two of them. In limb_horner the lineage silently stopped
+    improving, which run modmul_r8 found and fixed; in horner_cell the cache
+    sat exactly ON the cap, so training became a no-op and then a crash.
+    """
+    src = (SEEDS / seed / "train.py").read_text()
+    cap = int(re.search(r"TOTAL_STEPS\s*=\s*([\d_]+)", src).group(1).replace("_", ""))
+    assert cap >= 1_000_000, (
+        f"{seed} caps training at {cap:,} steps; lineages here already "
+        "accumulate several hundred thousand"
+    )

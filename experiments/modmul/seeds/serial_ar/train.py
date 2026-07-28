@@ -27,7 +27,14 @@ AUX_RAW, AUX_Q = 1.0, 1.0        # loss weight on the intermediate segments
 BATCH = 256
 SEED = 0
 WARMUP = 300
-TOTAL_STEPS = 300_000            # upper bound; the time budget is what binds
+# The comment here used to read "upper bound; the time budget is what binds",
+# and it was false in both of the other seeds. limb_horner silently stopped
+# improving once it reached the cap, which run modmul_r8's 06dde31b found by
+# reading the training_skipped diagnostic; horner_cell's cache sat exactly ON
+# its cap, so training became a no-op and then a crash. This one has not bound
+# yet -- 16,724 steps against 300,000 -- but lineages in this project already
+# reach 740,958 and 1,200,000, so it would have.
+TOTAL_STEPS = 2_000_000
 
 # Task-fixed: (p_bits_lo, p_bits_hi, operand_bits) per tier. Deliberately NOT
 # a mutation target — a candidate must not train only on the easy tiers.
