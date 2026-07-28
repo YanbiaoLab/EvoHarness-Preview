@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -471,23 +473,61 @@ def _run_training(runner: Path, model_dir: Path, seconds: float) -> str | None:
     return None
 
 
+@contextlib.contextmanager
+def _exclusive_gpu(lock_path: Path | None):
+    """Hold the GPU alone for a TIMED inference.
+
+    eval_batch_size is 16, so sixteen candidates train and evaluate on one
+    card at once, and the seconds this harness records are the seconds under
+    that load -- while the official evaluation runs one model alone. Measured
+    on the same weights and the same problems: the diagnostic tier took 61.4s
+    alone and 146.3s under r10's load, tier 9 took 114.8s alone and 235.0s.
+    Roughly 2x, varying with however many siblings happen to be running.
+
+    That is not a small inaccuracy. The wall clock is the only thing standing
+    between this task and its top tier, _fitness now prices it, and a number
+    that moves with the neighbours means selection is partly selecting on
+    noise -- and systematically rejecting candidates the official harness
+    would have passed.
+
+    Only the timed section is serialised. Training stays concurrent, which is
+    where the throughput actually comes from, and the lower rungs stay
+    concurrent too: their inference is seconds, and their timings feed nothing
+    but the promotion gate.
+    """
+    if lock_path is None:
+        yield
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _run_eval(
     runner: Path,
     model_dir: Path,
     plan: dict,
     workdir: Path,
     tag: str,
+    gpu_lock: Path | None = None,
 ) -> tuple[dict | None, str]:
     plan_path = workdir / f"plan_{tag}.json"
     out_path = workdir / f"eval_{tag}.json"
     plan_path.write_text(json.dumps(plan))
-    result = Sandbox().run(
-        [sys.executable, str(runner), str(model_dir), str(plan_path),
-         str(out_path)],
-        workdir=model_dir,
-        timeout_s=plan["budget_s"] * INFERENCE_KILL_FACTOR + LOAD_ALLOWANCE_S,
-        env=_subprocess_env(),
-    )
+    with _exclusive_gpu(gpu_lock):
+        result = Sandbox().run(
+            [sys.executable, str(runner), str(model_dir), str(plan_path),
+             str(out_path)],
+            workdir=model_dir,
+            timeout_s=(
+                plan["budget_s"] * INFERENCE_KILL_FACTOR + LOAD_ALLOWANCE_S
+            ),
+            env=_subprocess_env(),
+        )
     if out_path.exists():
         try:
             return json.loads(out_path.read_text()), ""
@@ -1261,8 +1301,17 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
             "order": order,
             "cases": cases,
         }
+        # The top rung's timings are what _fitness prices and what decides
+        # which tiers get to run at all, so that one measurement takes the
+        # card alone. The cheap rungs stay concurrent -- their inference is
+        # seconds and feeds only the promotion gate.
         result, fault = _run_eval(
-            eval_runner, candidate_dir, plan, workdir, rung.name.lower()
+            eval_runner, candidate_dir, plan, workdir, rung.name.lower(),
+            gpu_lock=(
+                Path(ctx.lineage_dir) / "timed-inference.lock"
+                if rung is _rungs()[-1] and ctx.lineage_dir
+                else None
+            ),
         )
         if result is None:
             return Grade(

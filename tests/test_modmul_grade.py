@@ -771,3 +771,47 @@ def test_the_clock_includes_the_unscored_diagnostic_tier():
                                           13.0, 58.7, 114.8]))
     assert factor(scored_only, 300.0) == 1.0            # 205s, inside budget
     assert factor(scored_only, 300.0, clock_s=205.0 + 244.0) < 1.0
+
+
+def test_the_timed_inference_takes_the_card_alone(tmp_path):
+    """Sixteen candidates share one GPU, and the clock is what we score by.
+
+    Measured on identical weights and identical problems: the diagnostic tier
+    took 61.4s alone and 146.3s under run modmul_r10's load, tier 9 took
+    114.8s alone and 235.0s. Roughly 2x, varying with however many siblings
+    happen to be running -- while the official evaluation runs one model on
+    its own. A wall clock that moves with the neighbours means selection is
+    partly selecting on noise, and rejecting candidates the official harness
+    would pass.
+    """
+    import threading
+    import time as _time
+
+    lock = tmp_path / "timed.lock"
+    order: list[str] = []
+    started = threading.Event()
+
+    def hold():
+        with grade_module._exclusive_gpu(lock):
+            order.append("first-in")
+            started.set()
+            _time.sleep(0.3)
+            order.append("first-out")
+
+    def contend():
+        started.wait(2.0)
+        with grade_module._exclusive_gpu(lock):
+            order.append("second-in")
+
+    threads = [threading.Thread(target=hold), threading.Thread(target=contend)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5.0)
+
+    assert order == ["first-in", "first-out", "second-in"], order
+
+    # And with no lock path it is a no-op, so tasks that never opted in are
+    # unaffected.
+    with grade_module._exclusive_gpu(None):
+        pass
