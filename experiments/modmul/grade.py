@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from evoharness.evoguard import AntiHackScanner, Sandbox
-from evoharness.evoserve import Grade, GradeContext
+from evoharness.evoserve import Grade, GradeContext, InfraError
 
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parents[1] / "third_party" / "modular-arithmetic-challenge"
@@ -531,10 +531,30 @@ finish()
 
 
 def _load_cases(tier: int, count: int, directory: Path = BENCH_DIR) -> list[dict]:
+    """Read a tier's problems. The benchmark is HARNESS state, not candidate
+    state, so a failure to read it is never the candidate's fault.
+
+    Raising InfraError instead of letting the exception escape is what routes
+    it to the framework's existing path: the candidate is dropped rather than
+    inserted, the consecutive-failure breaker counts it, and a run stops
+    instead of grinding on. Without this it lands in task.py's generic
+    handler, which files the candidate as passed=False with "uncaught
+    exception in grade_func" -- a permanent record blaming a candidate for a
+    disk.
+
+    Seen once, on 2026-07-28: OSError(EIO) on tier_1.jsonl during a storage
+    fault that was simultaneously closing ssh sessions. The run kept going and
+    seeded an island with a failure that had nothing to do with its seed. Zero
+    such failures in the 322 candidates of runs r7 through r10, so this is
+    rare -- but the breaker built for exactly this case could not see it.
+    """
     path = directory / f"tier_{tier}.jsonl"
-    if not path.exists():
-        return []
-    lines = path.read_text().splitlines()
+    try:
+        if not path.exists():
+            return []
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        raise InfraError(f"cannot read the benchmark at {path}: {exc}") from exc
     return [json.loads(line) for line in lines[:count]]
 
 

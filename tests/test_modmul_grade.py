@@ -953,3 +953,57 @@ def test_the_r10_generation_that_promoted_nobody(tmp_path):
     assert "2f46bb2f" in promoted, "the one that is known to recover"
     assert "c618ebe8" not in promoted, "the worst of the batch"
     assert 4 <= len(promoted) <= 8, f"kept {len(promoted)} of 13"
+
+
+def test_a_disk_fault_is_not_the_candidates_fault(tmp_path, monkeypatch):
+    """The benchmark is harness state; failing to read it blames the machine.
+
+    Seen once, 2026-07-28: OSError(EIO) on tier_1.jsonl during a storage fault
+    that was closing ssh sessions at the same time. It reached task.py's
+    generic handler and was filed as passed=False, "uncaught exception in
+    grade_func" -- a permanent record against a candidate, on an island that
+    then ran the whole generation with a seed that had never been evaluated.
+
+    Zero such failures in the 322 candidates of r7 through r10, so this is
+    rare. It matters because the framework already has the right path for it,
+    and misclassification is what kept it from being taken: EvalInfraError
+    drops the candidate instead of inserting it, counts against the
+    consecutive-failure breaker, and stops the run rather than recording a
+    generation of machine problems as candidate problems.
+    """
+    real_read = Path.read_text
+
+    def flaky(self, *a, **k):
+        if self.name == "tier_1.jsonl":
+            raise OSError(5, "Input/output error")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    with pytest.raises(grade_module.InfraError):
+        grade_module._load_cases(1, 5)
+
+    # A tier that simply is not in the benchmark is not a fault -- QUICK mode
+    # and partial benchmarks depend on that staying an empty list.
+    assert grade_module._load_cases(1, 5, tmp_path) == []
+
+
+def test_infrastructure_errors_reach_the_frameworks_own_path(tmp_path):
+    """InfraError has to survive the grader adapter as EvalInfraError.
+
+    That is the contract the breaker is built on: dropped, counted, and the
+    run stopped -- not scored zero and inserted.
+    """
+    from evoharness.evocore.population import Candidate
+    from evoharness.evocore.remote import EvalInfraError
+    from evoharness.task import WorkspaceGradeFnGrader
+
+    def grade_that_hits_a_bad_disk(candidate_dir, ctx):
+        raise grade_module.InfraError("cannot read the benchmark")
+
+    grader = WorkspaceGradeFnGrader(grade_that_hits_a_bad_disk)
+    cand = Candidate(
+        id="c", code="# x\n", generation=1, parent_id=None,
+        island_idx=0, operator="rewrite",
+    )
+    with pytest.raises(EvalInfraError):
+        grader.grade(cand, tmp_path / "work")
