@@ -6,6 +6,9 @@
          所以只改 model.py 的变异跳过训练、权重零损失(实测 406s 对 5117s);
          改 arch.py 要付重训,还要带着部分权重闯过第一道晋级闸 —— r10 的岛 0
          九个后代全部倒在这里,墙钟目标因此从未被测量过。
+     v5 修订(同日):"改 arch.py 就付重训 + 闯第一道闸"这条被实测推翻了一半 ——
+     闸本身太早,不是改动太坏。加了恢复期(改架构的候选在第一道闸前拿两档训练
+     时间,实测 1680 秒过线),并说明 warm_start 的 partial 是在讲文件不是讲损失。
      给的是价目表和地形,不是答案:该改 model.py 的什么、那 85 秒从哪省、
      分桶怎么分,一个字没写。radix 取值与状态宽余量继续不写。
 
@@ -152,8 +155,25 @@ from them rather than restarting — `visible_metrics` reports `warm_start` and
 
 Changing `arch.py` does NOT throw all of that away: the loader keeps every
 tensor whose name and shape still match and leaves the rest at their fresh
-initialisation, which `warm_start` reports as `partial`. Raising `RADIX_BITS`,
-for instance, reshapes one matrix — 896 of 91,841 parameters.
+initialisation. Raising `RADIX_BITS`, for instance, reshapes one matrix — 896
+of 91,841 parameters. Some architectural changes reshape nothing at all: a
+different number of refinement rounds, or a different schedule, keeps every
+tensor and changes only what the network is asked to do with them.
+
+`warm_start` reports `partial` whenever `arch.py` differs, which is a
+statement about the FILE and not about how much was lost — read
+`inherited_steps` alongside it.
+
+**An architectural change is given time to re-adapt before it is judged.**
+Whatever the reshaping cost, a network asked to behave differently needs
+training to settle into the change, and the first promotion gate used to close
+before that could happen: measured on one such candidate, accuracy on tier 2
+went 53% at 480 seconds, 50% at 1080, and 67% at 1680, crossing the gate only
+at the end. Candidates whose `arch.py` differs from their parent's therefore
+receive the first two rungs' training budget before the first gate is applied.
+`arch_recovery_s` in `visible_metrics` reports the extra allowance. You do not
+have to keep an architectural change small to survive — but the smaller it is,
+the less there is to re-learn.
 
 **What a mutation costs to evaluate, per file.** The training digest is taken
 over `arch.py` and `train.py` only. A mutation confined to `model.py`

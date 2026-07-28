@@ -30,7 +30,7 @@ import os
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _replace_dc
 from pathlib import Path
 
 from evoharness.evoguard import AntiHackScanner, Sandbox
@@ -1254,9 +1254,39 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     budget_s: float | None = None      # the last rung's clock, for _fitness
     reached = _rungs()[0]
     train_spent = 0.0
+    # A candidate whose arch.py differs from its parent's is being judged on a
+    # network that has not finished adapting to the change, and the first gate
+    # closes long before it can. Measured on run modmul_r10's candidate
+    # 2f46bb2f -- one line, ROUNDS 3 -> 1, weights inherited whole:
+    #
+    #     480s   t1=100%  t2=53%  t3=10%   <- gated out here
+    #    1080s   t1=100%  t2=50%  t3=13%
+    #    1680s   t1=100%  t2=67%  t3=30%   <- clears BOTH gate conditions
+    #
+    # Thirteen of thirteen architecture-changing candidates died at that gate,
+    # including four that had found RADIX_BITS. ROUNDS 3 -> 1 is a threefold
+    # cut in per-step cost, which takes the clock from 385s to roughly 185s
+    # and lets tier 10 run: the search found the lever that wins the task and
+    # the first rung's stopwatch threw it away.
+    #
+    # The allowance is the first two rungs' budgets, 1800s, which clears the
+    # measured 1680 with margin and invents no new number. It is spent ONLY
+    # before the first gate, and only by candidates that changed the
+    # architecture; everything else keeps the original schedule.
+    arch_changed = "full" not in str(lineage.get("warm_start", ""))
+    recovery_bonus = (
+        _rungs()[1].train_seconds
+        if arch_changed and len(_rungs()) > 1
+        else 0.0
+    )
+    lineage["arch_recovery_s"] = round(recovery_bonus, 1)
 
     for index, rung in enumerate(_rungs()):
         reached = rung
+        if index == 0 and recovery_bonus:
+            rung = _replace_dc(
+                rung, train_seconds=rung.train_seconds + recovery_bonus
+            )
         # Per rung, not once: the stored weights cover a specific amount of
         # training, so a candidate reaching further than they go still has to
         # pay for the difference.

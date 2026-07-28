@@ -815,3 +815,57 @@ def test_the_timed_inference_takes_the_card_alone(tmp_path):
     # unaffected.
     with grade_module._exclusive_gpu(None):
         pass
+
+
+def test_an_architecture_change_gets_time_to_re_adapt(tmp_path, monkeypatch):
+    """The first gate was judging a network that had not finished adapting.
+
+    Run modmul_r10's candidate 2f46bb2f is one line -- ROUNDS 3 -> 1, every
+    weight inherited whole, because ROUNDS reshapes nothing. Retrained and
+    probed:
+
+        480s   t1=100%  t2=53%  t3=10%   <- gated out here
+       1080s   t1=100%  t2=50%  t3=13%
+       1680s   t1=100%  t2=67%  t3=30%   <- clears BOTH gate conditions
+
+    Thirteen of thirteen architecture-changing candidates died at that gate,
+    four of them having found RADIX_BITS. ROUNDS 3 -> 1 cuts per-step cost
+    threefold, which is the whole margin between this seed and tier 10.
+    """
+    seen: list[float] = []
+
+    def fake_training(runner, candidate_dir, seconds):
+        seen.append(seconds)
+        return "stop-here"          # a fault ends grading after the first rung
+
+    monkeypatch.setattr(grade_module, "_run_training", fake_training)
+    monkeypatch.setattr(grade_module, "_may_skip_training",
+                        lambda *a, **k: False)
+
+    def grade_with(warm: str) -> float:
+        seen.clear()
+        monkeypatch.setattr(
+            grade_module, "_inherit_from_parent",
+            lambda *a, **k: {"warm_start": warm, "warm_start_why": "test",
+                             "inherited_steps": 1},
+        )
+        candidate = tmp_path / warm
+        candidate.mkdir(exist_ok=True)
+        for name in ("arch.py", "train.py"):
+            (candidate / name).write_text("x = 1\n")
+        (candidate / "model.py").write_text(
+            "MANIFEST = {}\n\n\nclass EvolvedModel:\n    pass\n"
+        )
+        ctx = grade_module.GradeContext(
+            candidate_id=warm, workdir=tmp_path / f"w-{warm}",
+            lineage_dir=tmp_path / "lin",
+        )
+        grade_module.grade_workspace(candidate, ctx)
+        return seen[0] if seen else 0.0
+
+    rungs = grade_module._rungs()
+    unchanged = grade_with("parent-full")
+    changed = grade_with("parent-partial")
+    assert unchanged == rungs[0].train_seconds
+    assert changed == rungs[0].train_seconds + rungs[1].train_seconds
+    assert changed > unchanged
