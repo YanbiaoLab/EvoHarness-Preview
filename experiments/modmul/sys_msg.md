@@ -1,3 +1,14 @@
+<!-- modmul task_sys_msg v5 (2026-07-28)。
+     v4 -> v5:两处纠错 + 一段价目表。
+       * "改 arch.py 就是冷启动"已经不成立(逐张量加载,现在是 partial),
+         指标表里 cold-arch-changed 那一行同样过期 —— 搜索一直在读错的描述;
+       * 新增"每个文件的变异要付什么评测代价":训练摘要只含 arch.py + train.py,
+         所以只改 model.py 的变异跳过训练、权重零损失(实测 406s 对 5117s);
+         改 arch.py 要付重训,还要带着部分权重闯过第一道晋级闸 —— r10 的岛 0
+         九个后代全部倒在这里,墙钟目标因此从未被测量过。
+     给的是价目表和地形,不是答案:该改 model.py 的什么、那 85 秒从哪省、
+     分桶怎么分,一个字没写。radix 取值与状态宽余量继续不写。
+
 <!-- modmul task_sys_msg v4 (2026-07-27)。
      v3 -> v4:加"前三个后代已经犯过的错"——全部选对了轴却没能转成分数,
      具体是捆绑容量、删掉实测证据、复述格式而未作答。注入的是**已发生的
@@ -137,9 +148,32 @@ official harness.
 **Weights are inherited.** If your mutation leaves `arch.py` byte-identical to
 the parent's, the parent's trained weights carry over and training continues
 from them rather than restarting — `visible_metrics` reports `warm_start` and
-`inherited_steps`. Changing `arch.py` resets that to a cold start. This is not
-an argument against touching the architecture, but it does mean an
-architectural change must be worth throwing away accumulated training.
+`inherited_steps`.
+
+Changing `arch.py` does NOT throw all of that away: the loader keeps every
+tensor whose name and shape still match and leaves the rest at their fresh
+initialisation, which `warm_start` reports as `partial`. Raising `RADIX_BITS`,
+for instance, reshapes one matrix — 896 of 91,841 parameters.
+
+**What a mutation costs to evaluate, per file.** The training digest is taken
+over `arch.py` and `train.py` only. A mutation confined to `model.py`
+therefore produces byte-identical training: the parent's weights carry over in
+full and the training stage is skipped outright. Measured on this seed, 406
+seconds end to end, against 5117 seconds for the same content reached the
+other way.
+
+A mutation that touches `arch.py` or `train.py` pays for a training run, and
+if it reshapes a tensor it also pays to re-learn that tensor. Measured on run
+modmul_r10: an architectural change inherited all 323,546 steps but reshaped
+part of the cell, and tier 2 fell from 100% to 53%, tier 3 from 100% to 10%.
+The first promotion gate closed before the 480 seconds of retraining at that
+rung could recover it, so nothing above tier 3 was ever measured for that
+candidate. Nine of nine offspring on that island went the same way.
+
+This is not an argument against touching the architecture; it is the price
+list. An architectural change has to be worth a retrain AND has to survive the
+first gate on partial weights. A change confined to the inference contract is
+measured in minutes at no cost to the weights at all.
 
 ## File contract (violations score 0)
 
@@ -239,7 +273,7 @@ L4 human provenance review of `training_description`.
 |---|---|
 | `budget_headroom` | below 1.0 the top tiers cannot be scored at any accuracy; `1/headroom` is the speedup needed |
 | `projected_infer_s_tier_N` | per-tier time projection behind that headroom |
-| `warm_start` | `full` = inherited the parent's weights, `cold-arch-changed` = `arch.py` differs so training restarted |
+| `warm_start` | `parent-full` = every tensor inherited; `parent-partial` = `arch.py` reshaped something, the rest carried over; `ancestorN-*` = the parent published nothing so it came from N generations further back; `pretrained-cache` = this exact recipe was already trained; `cold` = nothing to inherit |
 | `inherited_steps` | training steps carried over from the parent |
 
 Per-problem `error_category`:
