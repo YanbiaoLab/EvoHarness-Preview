@@ -722,3 +722,52 @@ def test_inheritance_walks_past_an_ancestor_that_published_nothing(tmp_path):
     )
     cold = grade_module._inherit_from_parent(tmp_path / "candidate2", cold_ctx)
     assert cold["warm_start"] == "cold"
+
+
+def test_a_starved_lineage_gets_a_slope_not_a_plateau():
+    """All-zero was a plateau, and the search walked off it the wrong way.
+
+    When the diagnostic tier exhausts the budget, every scored tier is skipped
+    and every candidate in the lineage scores exactly 0 -- however near it is
+    to fixing that. Run modmul_r9 spent eight generations there and a
+    candidate that discarded 323,546 training steps outscored the
+    fully-trained seed, 0.10 against 0.00.
+
+    Honest about what this does not do: the seed reaches 0.0418 against that
+    cold start's 0.1043, so the slope does not rescue a starved lineage from a
+    rival that actually scores. Raising the weight until it did would make
+    "almost ran" worth as much as crossing a tier. The plateau's cause is
+    fixed in the model, not here.
+    """
+    fitness = grade_module._fitness
+    nothing_ran = {t: 0.0 for t in range(1, 11)}
+    scores = [
+        fitness(nothing_ran, {}, 300.0, clock_s=float(c))
+        for c in (600, 400, 340, 310, 301)
+    ]
+    assert scores == sorted(scores), scores
+    assert scores[0] > 0.0, "still a plateau"
+    assert scores[-1] > scores[0] * 1.5
+
+
+def test_a_tier_that_ran_and_scored_zero_earns_no_speed_credit():
+    """The gaming vector: answer nothing, very fast.
+
+    Those tiers RAN -- the model was asked and got it wrong -- which is not
+    the same as never being asked, and only the second earns credit.
+    """
+    fitness = grade_module._fitness
+    nothing = {t: 0.0 for t in range(1, 11)}
+    instant = {t: 0.01 for t in range(1, 11)}
+    assert fitness(nothing, instant, 300.0, clock_s=0.1) == 0.0
+
+
+def test_the_clock_includes_the_unscored_diagnostic_tier():
+    """`seconds` holds only the scored tiers, and on this task the unscored
+    one is the most expensive item in the run: reading the clock off `seconds`
+    under-counted it by 78%."""
+    factor = grade_module._time_factor
+    scored_only = dict(zip(range(1, 10), [0.2, 0.7, 1.5, 1.4, 3.6, 10.8,
+                                          13.0, 58.7, 114.8]))
+    assert factor(scored_only, 300.0) == 1.0            # 205s, inside budget
+    assert factor(scored_only, 300.0, clock_s=205.0 + 244.0) < 1.0

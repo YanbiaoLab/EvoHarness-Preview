@@ -59,7 +59,25 @@ RADIX_BITS = 1
 D_MODEL = 64
 HIDDEN = 128
 ROUNDS = 3                 # learned refinement rounds per Horner step
-MAX_WIDTH = 4096           # honest 0 beyond this
+# The widest state this model will attempt; wider primes get an honest 0.
+#
+# 2048 is the scored range: tier 10's primes are 1025-2048 bits and no scored
+# tier goes above it. It is also where the width curriculum in train.py stops.
+#
+# It used to say 4096, and that costs the run everything. The DIAGNOSTIC tier
+# spans the whole benchmark -- primes from 8 bits to 8192 -- and it is not
+# scored, but it runs FIRST and it spends the same shared clock. Profiled on
+# this seed: its ten problems at width 4096 take 219.7 seconds, 78% of that
+# tier's whole cost, and the budget is 300 seconds for everything. Tier 0 then
+# finishes at ~280-330s and tiers 1 through 10 never start. Measured h90: 0.
+#
+# What this trades, stated plainly: the model answers those ten problems
+# CORRECTLY -- 10/10, generalising past the widths it was trained on -- and
+# declining them gives up ten right answers that are worth no points, to buy
+# tier 9 and tier 10, which are worth two levels of the ranking key. It is a
+# deliberate allocation of a shared budget, not a correctness fix, and it
+# belongs in the submission's model description rather than in a footnote.
+MAX_WIDTH = 2048
 
 
 def pick_device() -> torch.device:

@@ -610,9 +610,51 @@ _SOFT_CEIL = len(SCORED_TIERS) * _sigmoid(0.10 / _THRESHOLD_TAU)
 
 _TIME_WEIGHT = 0.15
 
+# Credit for how close the clock is when tiers were SKIPPED for want of
+# budget. Without it the all-zero case is a plateau: when the diagnostic tier
+# exhausts the budget every candidate in the lineage scores exactly 0, however
+# near it is to fixing that, and the search has no direction at all. Run
+# modmul_r9 spent eight generations on that plateau and walked off it in the
+# wrong direction -- a candidate that discarded 323,546 training steps scored
+# 0.10 against the fully-trained seed's 0.00.
+#
+# This does NOT rescue such a lineage from a rival that actually scores:
+# measured on r9's own numbers, the seed reaches 0.0418 against the cold
+# start's 0.1043. Raising the weight until it did would make "almost ran"
+# worth as much as crossing a tier, which is worse. It turns a plateau into a
+# slope; the plateau's cause is fixed elsewhere.
+_STARVED_WEIGHT = 0.15
+
+
+def _starved_reach(
+    accuracy: dict[int, float],
+    seconds: dict[int, float] | None,
+    budget: float | None,
+    rung_tiers: tuple[int, ...] = SCORED_TIERS,
+    clock_s: float | None = None,
+) -> float:
+    """How near the clock came to letting the skipped tiers run. 0 if none
+    were skipped, or if they were skipped for any reason but time.
+
+    A tier that RAN and scored zero earns nothing here -- that is a model
+    answering wrongly, and paying it for being quick is the gaming vector an
+    existing test already guards. This pays only for tiers never asked.
+    """
+    if not budget or budget <= 0:
+        return 0.0
+    spent = (
+        clock_s if clock_s is not None else sum((seconds or {}).values())
+    )
+    skipped = [t for t in rung_tiers if t not in (seconds or {})]
+    if not skipped or spent < budget:
+        return 0.0
+    return (budget / spent) * (len(skipped) / len(rung_tiers))
+
 
 def _time_factor(
-    seconds: dict[int, float] | None, budget: float | None
+    seconds: dict[int, float] | None,
+    budget: float | None,
+    clock_s: float | None = None,
 ) -> float:
     """How close the clock is to letting the NEXT tier run. 1.0 = no obstacle.
 
@@ -648,10 +690,14 @@ def _time_factor(
     the pressure off at precisely the point it has the most work to do, and
     would score 978s and 400s identically.
     """
-    if not seconds or not budget or budget <= 0:
+    if not budget or budget <= 0:
         return 1.0
-    spent = sum(seconds.values())
-    if spent <= 0:
+    # The FULL clock, which includes the unscored diagnostic tier. `seconds`
+    # only ever holds the scored tiers, and on this task the diagnostic one is
+    # the most expensive item in the run -- reading the clock off `seconds`
+    # under-counted it by 78%.
+    spent = clock_s if clock_s is not None else sum((seconds or {}).values())
+    if not spent or spent <= 0:
         return 1.0
     return min(1.0, budget / spent)
 
@@ -660,6 +706,8 @@ def _fitness(
     accuracy: dict[int, float],
     seconds: dict[int, float] | None = None,
     budget: float | None = None,
+    rung_tiers: tuple[int, ...] | None = None,
+    clock_s: float | None = None,
 ) -> float:
     """**搜索信号**,不是排名键 —— 严格随每一层精度递增。
 
@@ -689,9 +737,19 @@ def _fitness(
     # version of this scored 0.048 on a model emitting malformed digits, and
     # broke the invariant that an all-zero candidate is worth exactly 0.
     # Speed is only worth anything if there is accuracy to convert with it.
-    speed = _TIME_WEIGHT * _time_factor(seconds, budget) * _overall(accuracy)
-    span = 1.0 + _THRESHOLD_WEIGHT * (_SOFT_CEIL - _SOFT_FLOOR) + _TIME_WEIGHT
-    return max(0.0, (_overall(accuracy) + bonus + speed) / span)
+    speed = _TIME_WEIGHT * _time_factor(
+        seconds, budget, clock_s
+    ) * _overall(accuracy)
+    reach = _STARVED_WEIGHT * _starved_reach(
+        accuracy, seconds, budget, rung_tiers or SCORED_TIERS, clock_s
+    )
+    span = (
+        1.0
+        + _THRESHOLD_WEIGHT * (_SOFT_CEIL - _SOFT_FLOOR)
+        + _TIME_WEIGHT
+        + _STARVED_WEIGHT
+    )
+    return max(0.0, (_overall(accuracy) + bonus + speed + reach) / span)
 
 
 def _empty_feedback(summary: str) -> dict:
@@ -1290,7 +1348,12 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     visible = {**metrics, **projection, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}
     return Grade(
-        fitness=_fitness(accuracy, seconds, budget_s),
+        fitness=_fitness(
+            accuracy, seconds, budget_s, reached.tiers,
+            # The clock the official timer would read: every tier that ran,
+            # scored or not.
+            clock_s=sum(seconds.values()) + metrics.get("infer_s_tier_0", 0.0),
+        ),
         visible_metrics=visible,
         hidden_metrics=diagnostic,
         structured_feedback={
