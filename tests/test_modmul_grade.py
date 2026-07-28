@@ -1,3 +1,4 @@
+import dataclasses
 """Tests for the modmul grader (v1: H90-isomorphic fitness, ASHA, time budget,
 weight-perturbation gate).
 
@@ -816,56 +817,139 @@ def test_the_timed_inference_takes_the_card_alone(tmp_path):
     with grade_module._exclusive_gpu(None):
         pass
 
+def _bar_env(tmp_path, stratum, rung, rows):
+    """Seed a promotion log with (generation, score) rows."""
+    path = grade_module._promotion_log(tmp_path, stratum, rung)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(
+        json.dumps({"generation": g, "score": s}) + "\n" for g, s in rows
+    ))
+    return path
 
-def test_an_architecture_change_gets_time_to_re_adapt(tmp_path, monkeypatch):
-    """The first gate was judging a network that had not finished adapting.
 
-    Run modmul_r10's candidate 2f46bb2f is one line -- ROUNDS 3 -> 1, every
-    weight inherited whole, because ROUNDS reshapes nothing. Retrained and
-    probed:
+def test_promotion_compares_a_candidate_only_with_its_own_kind(tmp_path):
+    """A changed architecture scores low at the first rung by construction.
 
-        480s   t1=100%  t2=53%  t3=10%   <- gated out here
-       1080s   t1=100%  t2=50%  t3=13%
-       1680s   t1=100%  t2=67%  t3=30%   <- clears BOTH gate conditions
-
-    Thirteen of thirteen architecture-changing candidates died at that gate,
-    four of them having found RADIX_BITS. ROUNDS 3 -> 1 cuts per-step cost
-    threefold, which is the whole margin between this seed and tier 10.
+    It has been altered and has not re-adapted; its siblings carry the
+    parent's 323,546 steps intact. Judged on one line, the second kind never
+    survives -- run modmul_r10's second generation promoted every
+    fully-inherited candidate and none of the thirteen that touched arch.py,
+    four of which had found RADIX_BITS and one ROUNDS 3->1, which recovers to
+    t2=100% and cuts the wall clock threefold when given the training.
     """
-    seen: list[float] = []
+    rung = grade_module.RUNGS[0]
+    _bar_env(tmp_path, "stable", rung, [(1, 0.85), (1, 0.88), (1, 0.90),
+                                        (2, 0.86), (2, 0.91), (2, 0.93)])
+    _bar_env(tmp_path, "arch", rung, [(1, 0.222), (1, 0.278), (1, 0.300),
+                                      (2, 0.311), (2, 0.344), (2, 0.411)])
+    acc = {1: 1.0, 2: 0.53, 3: 0.10}          # r10's 2f46bb2f, mean 0.544
 
-    def fake_training(runner, candidate_dir, seconds):
-        seen.append(seconds)
-        return "stop-here"          # a fault ends grading after the first rung
+    ok_arch, info_arch = grade_module._promotes(
+        0, acc, rung, "arch", tmp_path, 3
+    )
+    ok_stable, _ = grade_module._promotes(0, acc, rung, "stable", tmp_path, 3)
+    assert ok_arch, info_arch          # top of its own stratum
+    assert not ok_stable               # nowhere near the other one's bar
+    assert info_arch["promotion_reason"] == "quantile"
 
-    monkeypatch.setattr(grade_module, "_run_training", fake_training)
-    monkeypatch.setattr(grade_module, "_may_skip_training",
-                        lambda *a, **k: False)
 
-    def grade_with(warm: str) -> float:
-        seen.clear()
-        monkeypatch.setattr(
-            grade_module, "_inherit_from_parent",
-            lambda *a, **k: {"warm_start": warm, "warm_start_why": "test",
-                             "inherited_steps": 1},
+def test_promotion_reads_only_finished_generations(tmp_path):
+    """Sixteen candidates grade concurrently and finish hours apart.
+
+    Ranking inside the current generation would make the first to finish wait
+    for the last, and the order they finish in varies run to run, so a seeded
+    run would stop reproducing its own decisions.
+    """
+    rung = grade_module.RUNGS[0]
+    _bar_env(tmp_path, "arch", rung,
+             [(1, 0.10)] * 6 + [(2, 0.99)] * 6)      # gen 2 is very strong
+    acc = {1: 0.4, 2: 0.0, 3: 0.0}                   # mean 0.133
+
+    at_gen2, info2 = grade_module._promotes(0, acc, rung, "arch", tmp_path, 2)
+    at_gen3, info3 = grade_module._promotes(0, acc, rung, "arch", tmp_path, 3)
+    assert at_gen2, "generation 2 must not see its own siblings"
+    assert not at_gen3, "generation 3 must see generation 2"
+    assert info2["promotion_history_n"] == 6
+    assert info3["promotion_history_n"] == 12
+
+
+def test_promotion_is_generous_until_it_has_a_distribution(tmp_path):
+    """The alternative to too little history is a hand-picked number, which is
+    what this replaces. One generous generation is the cheaper error."""
+    rung = grade_module.RUNGS[0]
+    acc = {1: 0.0, 2: 0.0, 3: 0.0}
+    ok, info = grade_module._promotes(0, acc, rung, "arch", tmp_path, 1)
+    assert ok and info["promotion_reason"] == "no-history"
+
+    _bar_env(tmp_path, "arch", rung, [(1, 0.5)] * 3)
+    ok, info = grade_module._promotes(0, acc, rung, "arch", tmp_path, 2)
+    assert ok and info["promotion_reason"] == "no-history"
+    assert info["promotion_history_n"] == 3
+
+
+def test_a_seed_is_not_a_sample_of_its_offsprings_distribution(tmp_path):
+    """Generation 0 carries a fully trained lineage; recording it would put
+    the bar where no offspring can reach."""
+    rung = grade_module.RUNGS[0]
+    grade_module._record_rung_score(tmp_path, "stable", rung, 0, 0.99)
+    assert not grade_module._promotion_log(tmp_path, "stable", rung).exists()
+    grade_module._record_rung_score(tmp_path, "stable", rung, 1, 0.42)
+    assert grade_module._promotion_log(tmp_path, "stable", rung).exists()
+
+
+def test_a_changed_rung_shape_starts_a_fresh_distribution(tmp_path):
+    """R2 went from 50 cases to 100 mid-project. Scores from the old shape are
+    not comparable, and silently mixing them would move the bar for reasons
+    that have nothing to do with the candidates."""
+    fifty = dataclasses.replace(grade_module.RUNGS[0], cases=50)
+    hundred = dataclasses.replace(grade_module.RUNGS[0], cases=100)
+    assert (grade_module._promotion_log(tmp_path, "arch", fifty)
+            != grade_module._promotion_log(tmp_path, "arch", hundred))
+
+
+def test_the_top_rung_and_the_override_still_behave(tmp_path):
+    last = len(grade_module.RUNGS) - 1
+    acc = {t: 1.0 for t in range(1, 11)}
+    ok, info = grade_module._promotes(
+        last, acc, grade_module.RUNGS[last], "stable", tmp_path, 5
+    )
+    assert not ok and info["promotion_reason"] == "top-rung"
+
+    import os
+    os.environ["MODMUL_FORCE_ALL_RUNGS"] = "1"
+    try:
+        ok, info = grade_module._promotes(
+            0, {1: 0.0}, grade_module.RUNGS[0], "arch", tmp_path, 9
         )
-        candidate = tmp_path / warm
-        candidate.mkdir(exist_ok=True)
-        for name in ("arch.py", "train.py"):
-            (candidate / name).write_text("x = 1\n")
-        (candidate / "model.py").write_text(
-            "MANIFEST = {}\n\n\nclass EvolvedModel:\n    pass\n"
-        )
-        ctx = grade_module.GradeContext(
-            candidate_id=warm, workdir=tmp_path / f"w-{warm}",
-            lineage_dir=tmp_path / "lin",
-        )
-        grade_module.grade_workspace(candidate, ctx)
-        return seen[0] if seen else 0.0
+        assert ok and info["promotion_reason"] == "forced"
+    finally:
+        del os.environ["MODMUL_FORCE_ALL_RUNGS"]
 
-    rungs = grade_module._rungs()
-    unchanged = grade_with("parent-full")
-    changed = grade_with("parent-partial")
-    assert unchanged == rungs[0].train_seconds
-    assert changed == rungs[0].train_seconds + rungs[1].train_seconds
-    assert changed > unchanged
+
+def test_the_r10_generation_that_promoted_nobody(tmp_path):
+    """Replay of the real thirteen, with the old gate's outcome for contrast.
+
+    Old gate (tier3>=0.15 or tier2>=0.60): 0 of 13.
+    """
+    rung = grade_module.RUNGS[0]
+    real = {                       # id -> (t1, t2, t3)
+        "2f46bb2f": (1.00, 0.53, 0.10), "4c189bd1": (1.00, 0.40, 0.10),
+        "0290ba66": (1.00, 0.17, 0.07), "2c067a30": (0.67, 0.27, 0.10),
+        "ba61a554": (0.77, 0.10, 0.07), "2304a4d1": (0.83, 0.07, 0.03),
+        "4cd21c91": (0.77, 0.07, 0.07), "9afe895f": (0.73, 0.10, 0.07),
+        "417a05eb": (0.73, 0.07, 0.07), "fa1c8cb7": (0.67, 0.10, 0.07),
+        "9d658151": (0.67, 0.10, 0.07), "957081d6": (0.60, 0.10, 0.07),
+        "c618ebe8": (0.53, 0.07, 0.07),
+    }
+    _bar_env(tmp_path, "arch", rung,
+             [(1, sum(v) / 3) for v in real.values()])
+
+    promoted = {
+        cid for cid, v in real.items()
+        if grade_module._promotes(
+            0, {1: v[0], 2: v[1], 3: v[2]}, rung, "arch", tmp_path, 2
+        )[0]
+    }
+    assert "2f46bb2f" in promoted, "the one that is known to recover"
+    assert "c618ebe8" not in promoted, "the worst of the batch"
+    assert 4 <= len(promoted) <= 8, f"kept {len(promoted)} of 13"

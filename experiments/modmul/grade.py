@@ -30,7 +30,7 @@ import os
 import shutil
 import sys
 import time
-from dataclasses import dataclass, replace as _replace_dc
+from dataclasses import dataclass
 from pathlib import Path
 
 from evoharness.evoguard import AntiHackScanner, Sandbox
@@ -126,16 +126,145 @@ def _rungs() -> tuple[Rung, ...]:
     return QUICK_RUNGS if os.environ.get("MODMUL_QUICK") == "1" else RUNGS
 
 
-def _promotes(rung_index: int, acc: dict[int, float], h90: int) -> bool:
-    """晋级判据用**绝对 per-tier 精度**，不用 fitness —— 不同 rung 评的层数
-    不同，fitness 天然不可比（低 rung 的 overall 上限被截断）。"""
+# Promotion is by RANK within a stratum, against the distribution earlier
+# generations produced -- not against a fixed accuracy.
+#
+# Fixed thresholds cannot work here and three attempts proved it. A candidate
+# that changed arch.py scores low at the first rung because it has not
+# re-adapted yet, not because it is bad; a candidate that inherited its
+# parent's weights whole scores high because it carries 323,546 steps of
+# training. Measured on run modmul_r10's second generation, at the first rung:
+#
+#     inherited whole   0.8 and above     all promoted
+#     arch.py changed   0.222 - 0.544     none promoted, 13 of 13
+#
+# One of those thirteen was a one-line ROUNDS 3 -> 1 that recovers to
+# t2=100% t3=90% given the training, and cuts per-step cost threefold -- the
+# margin that decides tier 10. Measuring both groups with one line is a
+# standing decision never to accept an architectural change.
+#
+# Failing this gate is not elimination, which is what makes it expensive: the
+# loop breaks, the unevaluated tiers are scored 0 by _overall, and the
+# candidate is filed permanently as unable to do them. A candidate stopped at
+# R0 cannot exceed fitness 0.2863 however good it is. The record is false and
+# selection reads it forever.
+_PROMOTION_QUANTILE = 0.5          # successive halving: keep the better half
+_PROMOTION_MIN_HISTORY = 6         # below this the distribution is a guess
+_PROMOTION_WINDOW = 60             # recent generations only; the bar moves
+
+
+def _rung_score(acc: dict[int, float], rung: Rung) -> float:
+    """Mean accuracy over the tiers THIS rung evaluated.
+
+    Not fitness: fitness scores unevaluated tiers as 0, so it is not
+    comparable between rungs. This is only ever compared with scores from the
+    same rung.
+    """
+    if not rung.tiers:
+        return 0.0
+    return sum(acc.get(t, 0.0) for t in rung.tiers) / len(rung.tiers)
+
+
+def _promotion_log(lineage_dir: Path, stratum: str, rung: Rung) -> Path:
+    # The rung's shape is in the name: change what a rung evaluates and the
+    # old distribution stops being comparable, so it starts a fresh file
+    # instead of silently poisoning the bar.
+    shape = f"{rung.cases}c{len(rung.tiers)}t"
+    return Path(lineage_dir) / "promotion" / f"{stratum}-{rung.name}-{shape}.jsonl"
+
+
+def _record_rung_score(
+    lineage_dir: Path | None,
+    stratum: str,
+    rung: Rung,
+    generation: int | None,
+    score: float,
+) -> None:
+    """Append one line. Generation 0 is NOT recorded: a seed's score is not a
+    sample from the distribution its offspring are drawn from."""
+    if not lineage_dir or not generation:
+        return
+    path = _promotion_log(lineage_dir, stratum, rung)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"generation": int(generation),
+                       "score": round(float(score), 6)}) + "\n"
+    with _exclusive_gpu(None):          # no GPU needed; kept for symmetry
+        with open(path, "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                handle.write(line)
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _promotion_bar(
+    lineage_dir: Path | None,
+    stratum: str,
+    rung: Rung,
+    generation: int | None,
+) -> tuple[float | None, int]:
+    """The score to beat, and how many samples it came from.
+
+    Reads only generations STRICTLY EARLIER than this one. Sixteen candidates
+    are graded concurrently and finish in an order that varies run to run, so
+    ranking within the current generation would need every sibling to finish
+    first -- the slowest one would hold up the rest, and a resumed run would
+    not reproduce its own decisions. Earlier generations are finished and
+    read-only, so every candidate sees the same bar whenever it happens to
+    arrive.
+    """
+    if not lineage_dir or generation is None:
+        return None, 0
+    path = _promotion_log(lineage_dir, stratum, rung)
+    if not path.exists():
+        return None, 0
+    rows = []
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                    # a torn line is not worth a crash
+        if int(row.get("generation", 0)) < int(generation):
+            rows.append((int(row["generation"]), float(row["score"])))
+    if len(rows) < _PROMOTION_MIN_HISTORY:
+        return None, len(rows)
+    rows.sort(reverse=True)             # newest generations first
+    scores = sorted(s for _g, s in rows[:_PROMOTION_WINDOW])
+    index = min(
+        len(scores) - 1, int(len(scores) * _PROMOTION_QUANTILE)
+    )
+    return scores[index], len(scores)
+
+
+def _promotes(
+    rung_index: int,
+    acc: dict[int, float],
+    rung: Rung,
+    stratum: str,
+    lineage_dir: Path | None,
+    generation: int | None,
+) -> tuple[bool, dict]:
+    """Returns (promote, metrics-about-the-decision).
+
+    The metrics are reported so the scheme can be audited from a run's data
+    rather than argued about: if the number reaching the top rung drifts away
+    from batch/4, the quantile is wrong and the run will say so.
+    """
+    score = _rung_score(acc, rung)
+    info = {"promotion_stratum": stratum, "promotion_score": round(score, 4)}
     if os.environ.get("MODMUL_FORCE_ALL_RUNGS") == "1":
-        return True                        # 基线校准/冠军复测：跑满所有档
-    if rung_index == 0:
-        return acc.get(3, 0.0) >= 0.15 or acc.get(2, 0.0) >= 0.60
-    if rung_index == 1:
-        return h90 >= 3 or acc.get(4, 0.0) >= 0.10
-    return False
+        return True, {**info, "promotion_reason": "forced"}
+    if rung_index >= len(_rungs()) - 1:
+        return False, {**info, "promotion_reason": "top-rung"}
+    bar, n = _promotion_bar(lineage_dir, stratum, rung, generation)
+    info["promotion_history_n"] = n
+    if bar is None:
+        # Nothing to compare against yet. Be generous: the cost is one
+        # generation of candidates running further than they deserve, and the
+        # alternative is a hand-picked number, which is what this replaces.
+        return True, {**info, "promotion_reason": "no-history"}
+    info["promotion_bar"] = round(bar, 4)
+    return score >= bar, {**info, "promotion_reason": "quantile"}
 
 
 # ---------------------------------------------------------------------------
@@ -1254,39 +1383,8 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     budget_s: float | None = None      # the last rung's clock, for _fitness
     reached = _rungs()[0]
     train_spent = 0.0
-    # A candidate whose arch.py differs from its parent's is being judged on a
-    # network that has not finished adapting to the change, and the first gate
-    # closes long before it can. Measured on run modmul_r10's candidate
-    # 2f46bb2f -- one line, ROUNDS 3 -> 1, weights inherited whole:
-    #
-    #     480s   t1=100%  t2=53%  t3=10%   <- gated out here
-    #    1080s   t1=100%  t2=50%  t3=13%
-    #    1680s   t1=100%  t2=67%  t3=30%   <- clears BOTH gate conditions
-    #
-    # Thirteen of thirteen architecture-changing candidates died at that gate,
-    # including four that had found RADIX_BITS. ROUNDS 3 -> 1 is a threefold
-    # cut in per-step cost, which takes the clock from 385s to roughly 185s
-    # and lets tier 10 run: the search found the lever that wins the task and
-    # the first rung's stopwatch threw it away.
-    #
-    # The allowance is the first two rungs' budgets, 1800s, which clears the
-    # measured 1680 with margin and invents no new number. It is spent ONLY
-    # before the first gate, and only by candidates that changed the
-    # architecture; everything else keeps the original schedule.
-    arch_changed = "full" not in str(lineage.get("warm_start", ""))
-    recovery_bonus = (
-        _rungs()[1].train_seconds
-        if arch_changed and len(_rungs()) > 1
-        else 0.0
-    )
-    lineage["arch_recovery_s"] = round(recovery_bonus, 1)
-
     for index, rung in enumerate(_rungs()):
         reached = rung
-        if index == 0 and recovery_bonus:
-            rung = _replace_dc(
-                rung, train_seconds=rung.train_seconds + recovery_bonus
-            )
         # Per rung, not once: the stored weights cover a specific amount of
         # training, so a candidate reaching further than they go still has to
         # pay for the difference.
@@ -1406,7 +1504,18 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
                 _holdout_metrics(eval_runner, candidate_dir, workdir, 20)
             )
 
-        if not _promotes(index, accuracy, _h90(accuracy)):
+        stratum = (
+            "stable" if "full" in str(lineage.get("warm_start", "")) else "arch"
+        )
+        promoted, promo_info = _promotes(
+            index, accuracy, rung, stratum, ctx.lineage_dir, ctx.generation
+        )
+        metrics.update(promo_info)
+        _record_rung_score(
+            ctx.lineage_dir, stratum, rung, ctx.generation,
+            promo_info["promotion_score"],
+        )
+        if not promoted:
             break
         if index == 0 and not projection:
             # At the first promotion: cheap enough to be worth it only for a
