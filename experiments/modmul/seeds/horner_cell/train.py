@@ -101,8 +101,21 @@ def train(model_dir: str) -> None:
     if opt_path.exists():
         try:
             opt.load_state_dict(torch.load(opt_path, map_location=device))
+            # Adam's exp_avg / exp_avg_sq are keyed by parameter POSITION and
+            # carry that parameter's shape. load_state_dict copies them
+            # without checking, so a checkpoint that predates a reshape loads
+            # cleanly and then fails at the first step, deep inside
+            # _multi_tensor_adam, with a size mismatch. `except: pass` around
+            # the load does not help -- nothing is raised there.
+            for param, entry in opt.state.items():
+                for value in entry.values():
+                    if (torch.is_tensor(value) and value.dim()
+                            and value.shape != param.shape):
+                        raise ValueError("optimizer state predates a reshape")
         except Exception:
-            pass
+            # Clear AND remove, so the next rung does not pick it up again.
+            opt.state.clear()
+            opt_path.unlink(missing_ok=True)
 
     pools = prime_pools(device)
     cell.train()

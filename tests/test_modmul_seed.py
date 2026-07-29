@@ -196,3 +196,83 @@ def test_the_step_cap_is_not_already_reached(seed):
         f"{seed} caps training at {cap:,} steps; lineages here already "
         "accumulate several hundred thousand"
     )
+
+
+@pytest.mark.parametrize("seed", ["limb_horner", "horner_cell", "serial_ar"])
+def test_a_reshaping_mutation_can_train_twice(seed, tmp_path):
+    """RADIX_BITS reshapes one matrix, and that used to kill training at the
+    SECOND rung, every time.
+
+    Adam's exp_avg / exp_avg_sq are keyed by parameter position and carry the
+    parameter's shape. load_state_dict copies them without checking, so a
+    checkpoint that predates the reshape loads cleanly and then dies at the
+    first step inside _multi_tensor_adam:
+
+        RuntimeError: The size of tensor a (7) must match the size of
+        tensor b (16) at non-singleton dimension 1
+
+    7 and 16 are in_features for RADIX_BITS 1 and 4. limb_horner tried to
+    guard this by rebinding a local path, which left the stale file on disk:
+    the first rung skipped it and saved elsewhere, and the second rung -- by
+    which point the weights matched and the guard no longer fired -- loaded it
+    and crashed. horner_cell and serial_ar had no guard at all, and their
+    `except: pass` around the load catches nothing, because nothing is raised
+    there.
+
+    Every RADIX_BITS candidate in runs r7, r10 and r11 died this way at R1,
+    which is why the highest-value lever in this task had never once been
+    evaluated end to end.
+    """
+    import torch
+
+    src = (SEEDS / seed / "train.py").read_text()
+
+    # A stale optimizer file must be REMOVED, not merely skipped, or the next
+    # rung finds it again.
+    assert "unlink" in src, (
+        f"{seed}/train.py never removes an optimizer state that no longer fits"
+    )
+    assert "opt.state.clear()" in src
+
+    # And the mismatch has to be detected after load_state_dict, since that
+    # call does not raise.
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "train")
+    handlers = [n for n in ast.walk(fn) if isinstance(n, ast.Try)]
+    checks_shape = any(
+        isinstance(n, ast.Attribute) and n.attr == "shape"
+        for h in handlers for n in ast.walk(h)
+    )
+    assert checks_shape, (
+        f"{seed}/train.py loads optimizer state without comparing shapes; "
+        "load_state_dict does not raise, the first opt.step() does"
+    )
+
+
+def test_the_optimizer_guard_actually_catches_a_reshape(tmp_path):
+    """The mechanism itself, on real tensors rather than on source text."""
+    import torch
+
+    small = torch.nn.Linear(7, 4)
+    opt = torch.optim.AdamW(small.parameters(), lr=1e-3)
+    small(torch.zeros(2, 7)).sum().backward()
+    opt.step()
+    path = tmp_path / "optimizer.pt"
+    torch.save(opt.state_dict(), path)
+
+    wide = torch.nn.Linear(16, 4)                 # the RADIX_BITS 1 -> 4 shape
+    opt2 = torch.optim.AdamW(wide.parameters(), lr=1e-3)
+    opt2.load_state_dict(torch.load(path))        # loads without complaint
+
+    mismatch = [
+        value.shape
+        for param, entry in opt2.state.items()
+        for value in entry.values()
+        if torch.is_tensor(value) and value.dim() and value.shape != param.shape
+    ]
+    assert mismatch, "the shape check would not have noticed"
+
+    wide(torch.zeros(2, 16)).sum().backward()
+    with pytest.raises(RuntimeError):
+        opt2.step()                                # this is what killed r11

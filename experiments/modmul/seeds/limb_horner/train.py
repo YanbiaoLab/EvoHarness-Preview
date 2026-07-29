@@ -166,15 +166,33 @@ def train(model_dir: str) -> None:
             print(f"[train] partial warm start: kept {len(usable)}/{len(current)} "
                   f"tensors, {kept}/{total} params ({kept / total:.1%})",
                   flush=True)
-            # The optimizer state is keyed by parameter position, so it no
-            # longer lines up once the shapes moved; start it fresh.
-            opt_path = Path(str(opt_path) + ".stale")
     opt = torch.optim.AdamW(cell.parameters(), lr=LR, weight_decay=WD)
     if opt_path.exists():
         try:
             opt.load_state_dict(torch.load(opt_path, map_location=device))
+            # Adam's exp_avg / exp_avg_sq are keyed by parameter POSITION and
+            # carry that parameter's shape. load_state_dict copies them
+            # without checking, so a checkpoint that predates a reshape loads
+            # cleanly and then fails at the first step, deep inside
+            # _multi_tensor_adam:
+            #     RuntimeError: The size of tensor a (7) must match the size
+            #     of tensor b (16) at non-singleton dimension 1
+            # 7 and 16 are in_features for RADIX_BITS 1 and 4.
+            for param, entry in opt.state.items():
+                for value in entry.values():
+                    if (torch.is_tensor(value) and value.dim()
+                            and value.shape != param.shape):
+                        raise ValueError("optimizer state predates a reshape")
         except Exception:
-            pass
+            # Clear AND remove. The previous version only rebound the local
+            # path, so the stale file stayed on disk: the first rung skipped
+            # it, saved elsewhere, and the SECOND rung -- by which point the
+            # weights matched and the guard no longer fired -- loaded it and
+            # died. Every RADIX_BITS candidate in runs r7, r10 and r11 was
+            # killed this way at R1, which is why the highest-value lever in
+            # this task had never once been evaluated.
+            opt.state.clear()
+            opt_path.unlink(missing_ok=True)
 
     cell.train()
     step, loss = done, torch.tensor(0.0)
