@@ -139,7 +139,20 @@ Learn from how, rather than rediscovering it:
    itself instead of answering. A mutation identical to its parent is now
    rejected outright.
 
-4. **Four candidates in one generation independently invented padded-width
+4. **Four candidates raised RADIX_BITS and lived through every rung — and
+   still lost everything above tier 1.** The speed side paid exactly as the
+   step model predicts (k=2 halved the diagnostic tier, k=3 cut it to a
+   sixth), but accuracy sat at 2-3% after the full training budget. The
+   per-tensor warm start kept 99% of the parameters and none of the
+   function: one reshaped embedding feeds every layer after it garbage, so
+   the retrain is functionally cold and the budget is nowhere near a cold
+   start's needs. The one public success at k=2 engineered a
+   FUNCTION-PRESERVING warm start — the new cell reproduces the old
+   computation exactly at initialization, and only then trains. If you
+   raise the radix, that construction is the actual work; without it you
+   are re-running a measured failure.
+
+5. **Four candidates in one generation independently invented padded-width
    batching** — rounding the register up to the next power of two so a tier
    runs as a few large batches. The idea was right (it is now in the seed).
    All four scored zero on every tier: the weights they inherited had only

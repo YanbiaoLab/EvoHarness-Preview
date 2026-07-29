@@ -231,6 +231,7 @@ cliff, not a style preference.
 | small-prime fine-tuning without an anchor | fixes small primes, costs large-scale accuracy |
 | padded-width batching on delta=0-trained weights | four independent r12 candidates, all zero on every tier (§7.3); the padding is right, the training coverage is the missing half |
 | a third pass streaming digits sliced from the model's own output | works numerically, but sits in the gray zone of the encoder ruling (§3) and costs one register-width of steps; the two-pass schedule is equivalent, cheaper, and strictly inside the ruling |
+| raising RADIX_BITS with a shape-matched (per-tensor) warm start | the SPEED pays exactly as projected — measured k=2: diagnostic tier 121s -> 51s, tier 9 235s -> 209s under load; k=3: 121s -> 20s, 98s — but accuracy collapsed to 2-3% above tier 1 after the full 5400s of retraining, three times over at k=2 and once at k=3. Keeping 99% of tensors is not keeping the function: the reshaped embed layer feeds every downstream tensor garbage, so the retrain is functionally cold. The public fork that made k=2 work used a FUNCTION-PRESERVING warm start (the k=2 cell reproduces the k=1 computation exactly at init, then trains). Until a mutation engineers that, radix raises buy confirmed speed and pay unaffordable accuracy |
 
 ### 7.5 One cheap thing that does work
 
