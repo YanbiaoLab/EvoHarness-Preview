@@ -25,10 +25,11 @@ from experiments.run_evolution import main as run_evolution
 
 def test_registry_covers_experiment_matrix():
     assert set(recipes.REGISTRY) == {
-        "b0", "e0", "e1", "e2", "e3g", "e3r", "e4a",
+        "b0", "e0", "e1", "e2", "e3g", "e3r", "e4a", "e5s",
     }
     assert "retriev" in recipes.get_recipe("E3R").DESCRIPTION
     assert "negative experience" in recipes.get_recipe("e4a").DESCRIPTION
+    assert "scratchpad" in recipes.get_recipe("e5s").DESCRIPTION
     with pytest.raises(ValueError, match="unknown recipe"):
         recipes.get_recipe("e99")
 
@@ -476,3 +477,16 @@ def test_workspace_agent_prompt_drops_dead_sections(tmp_path):
     )
     assert "This mutation: REWRITE" in rewrite_sys
     assert "meaningfully different" in rewrite_sys
+
+
+def test_e5s_full_stack_builds_and_runs(tmp_path):
+    task = get_task("demo_counter")
+    ctx = _ctx(tmp_path / "e5s", task, generations=2)
+    loop = recipes.get_recipe("e5s").build(ctx)
+    # The full stack is actually mounted: reflector observes gradings, the
+    # contributor runs in lessons+scratchpad mode, the directive leads.
+    assert ctx.extras["reflector"] is not None
+    report = loop.run(task.initial_code)
+    assert report.generations_completed == 2
+    # The evidence buffer recorded the run (mechanics beneath the stack).
+    assert (tmp_path / "e5s" / "experience.jsonl").exists()

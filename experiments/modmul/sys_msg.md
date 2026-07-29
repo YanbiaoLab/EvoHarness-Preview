@@ -104,8 +104,21 @@ Read that carefully, because it inverts the obvious strategy:
 This seed already banks two structural wins over that ancestor: a two-pass
 schedule (one register-width of steps cheaper per problem, and strictly
 inside the organizers' encoder ruling) and bucketed-width batching backed by
-a training distribution that covers padded registers. The generation-0
-metrics of this run are the live baseline — trust them over the table above.
+a training distribution that covers padded registers. Measured on the
+official 1100 problems, quiet card: tiers 0 through 9 in 195.1s against the
+300s budget — tier 0 fell 121.2 -> 24.8, tier 9 fell 234.9 -> 125.2.
+
+The open wound is PRECISION, and right now training pays again: the
+adaptation that bought the padded band lifted the loss from 6.4e-10 to
+4.0e-5, and per-step error compounds over a ~4,000-step rollout — tier 8
+fell to 75%, tier 9 to 20%. This is a healing-in-progress state, not a
+ceiling: the same lineage has reached the 1e-9 floor before. Mutations
+that focus the training mix where inference actually lives (the padded
+band, the widest tiers) are currently high-value; §7.6's "training stops
+paying" warning applies only once the loss is back at the floor. The
+generation-0 metrics of this run are the live baseline — trust them over
+any table above. Tier 10 stands apart: 880.5s measured, so it needs ~8x
+speed before accuracy there counts.
 
 `budget_headroom` in `visible_metrics`: at the top rung it is measured from
 the real per-tier clock (below 1.0 the top tiers cannot be scored however

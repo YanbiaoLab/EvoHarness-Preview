@@ -67,7 +67,15 @@ SPARSE_SHARE = 0.15                # power-of-two-adjacent / sparse operands
 # next power of two for batching (the right idea) and the cell had never
 # seen a padded register. This stratum is the key that unlocks padded
 # batching; inference stays inside the [4, 67] band it covers.
-DELTA_SHARE = 0.5
+# 0.85, not the initial 0.5: inference now ALWAYS pads (the bucket rule
+# guarantees delta >= 4), so the exact-fill stratum is off-distribution
+# spend kept only as a small anchor. The first adaptation pass (92k steps
+# at 0.5) bought the band's CORRECTNESS at the cost of per-step precision
+# (loss 6.4e-10 -> 4.0e-5, which compounds to 20% exact-match over tier
+# 9's ~4k-step rollouts) — the remaining work is pushing the padded band
+# back to the loss floor, and the training mix should point where
+# inference lives.
+DELTA_SHARE = 0.85
 TOKEN_BUDGET = 32_768              # batch = TOKEN_BUDGET // width, clamped
 MIN_BATCH, MAX_BATCH = 16, 512
 
