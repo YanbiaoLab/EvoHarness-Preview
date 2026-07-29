@@ -193,21 +193,32 @@ was a different cell and the trade-off is OPEN for the scan-based cell here.**
 Whether the reliability gained from fewer steps outweighs the reliability lost
 per step is unmeasured, and is the single highest-value question open.
 
-### 7.3 The state-width margin is an untested axis with large known effects
+### 7.3 The state-width margin: now measured, banded, and load-bearing
 
 The width the cell runs at need not equal the prime's bit length; the extra
-high bits are mathematically inert. Another team measured errors across that
-margin on 576 problems per band and found a swing of more than two orders of
-magnitude between margins — **and the exactly-fits choice was not the best
-one**. The mechanism was training coverage, not mathematics: whichever margins
-appear during training are the ones that work at inference.
+high bits are mathematically inert. The community measurement (576 problems
+per band, on a public fork of this exact family) is now precise: with
+delta = register width − prime bits, accuracy collapses to 2-30% at delta in
+{1, 2}, is marginal at 3 (degrades with rollout depth), is safe at 4 and
+above, and the error sets are **identical** across delta 16..64. On the
+original v8 weights the curve is flat at every delta — the difference is the
+training distribution: robustness belongs to whatever margins training
+covered, not to the loop.
 
-Two things follow. First, this axis is only reachable by changing the training
-distribution and the inference width **together** — changing either alone
-either wastes the training or asks for something never trained. Second, the
-same team reports that a plausible-sounding rounding rule for choosing the
-margin landed exactly on the worst region, and that establishing this cost a
-week. Treat any specific margin rule as unverified until measured here.
+This axis was confirmed here the expensive way. In run r12 generation 1,
+four candidates independently invented pad-to-power-of-two batching — the
+right idea, on weights whose training only ever saw delta = 0. All four
+scored zero on every tier while paying 463-477s of clock. The same padding
+on the current weights reproduces the collapse exactly (55/55 correct at
+exact width, 0 at padded width, same problems, same weights).
+
+The seed now covers the axis end to end: `train.py` draws half its samples
+with the prime 4-67 bits narrower than the register (`DELTA_SHARE`), and
+`model.py` buckets inference widths to the next multiple of 64 with at
+least 4 bits of headroom, so a 100-problem tier runs as a few large batches
+instead of ~100 near-singleton ones. Do not undo either side alone: the two
+files are one mechanism, and the delta {1, 2, 3} region is a measured
+cliff, not a style preference.
 
 ### 7.4 Known dead ends — do not spend mutations re-testing
 
@@ -218,6 +229,8 @@ week. Treat any specific margin rule as unverified until measured here.
 | ensembling (width committees, cross-checkpoint voting) | both forms failed |
 | re-annealing with the same recipe, alone | no gain |
 | small-prime fine-tuning without an anchor | fixes small primes, costs large-scale accuracy |
+| padded-width batching on delta=0-trained weights | four independent r12 candidates, all zero on every tier (§7.3); the padding is right, the training coverage is the missing half |
+| a third pass streaming digits sliced from the model's own output | works numerically, but sits in the gray zone of the encoder ruling (§3) and costs one register-width of steps; the two-pass schedule is equivalent, cheaper, and strictly inside the ruling |
 
 ### 7.5 One cheap thing that does work
 

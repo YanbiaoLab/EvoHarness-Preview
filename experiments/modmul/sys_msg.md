@@ -73,35 +73,47 @@ deciding what to change.
 
 ## Where this seed actually loses (measured, full rungs)
 
+The direct ancestor of this seed, measured on the official 1100 problems
+(run r12, generation 0, quiet card):
+
 ```
-tier   1   2   3   4   5   6   7   8      9    10
-acc  100 100 100 100 100 100 100 100  80-92     0
+tier      0*   1    2    3    4    5    6     7     8      9    10
+acc      .80  1.0  1.0  1.0  1.0  1.0  1.0   1.0   .99   1.0     0
+seconds  121  0.2  0.6  1.4  1.3  3.3  10.5  27.0  69.4  234.9   —
 ```
 
-Tier 10 scored 0 **without a single case being run**. It was never reached:
-the inference time budget was already spent. Tier 9 alone consumed 83% of the
-whole budget, at 8.6x the per-problem rate the official evaluator allows, and
-the full set projects to roughly 3x over budget.
+(* tier 0 is unscored but runs FIRST on the same shared 300-second clock.)
+
+Total clock 470s against a 300s budget. Under the official between-batch
+timer that is h90=8: the clock expires inside tier 9, and every later tier
+scores zero. The gap to h90=9 was 1.57x; tier 10 on top of that needs more.
 
 Read that carefully, because it inverts the obvious strategy:
 
-- The frontier is **not** an accuracy problem. More training, more capacity and
-  better representations do not move tier 10 off zero while it never runs.
-- The binding constraint is **total serial work per problem**. What decides how
-  far this family reaches is how many sequential steps a problem costs and how
-  expensive each step is.
+- The frontier is **not** an accuracy problem. Given unlimited time this
+  cell scores 100/100 on tier 9 and 96/100 on tier 10. More training, more
+  capacity and better representations move nothing while the tiers never run.
+- The binding constraint is **total serial work per problem**, times how the
+  problems are batched. Tier 9's 234.9s was ~100 near-singleton batches run
+  back to back; the current seed buckets widths so a tier runs as a few
+  large batches (see the delta band below), which attacks the same seconds
+  from a second, independent direction.
 - Anything that cuts steps or per-step cost is worth accuracy, up to a point:
-  fewer steps also means fewer chances to make a mistake, so the per-step
-  reliability needed to finish a tier relaxes as steps fall.
+  fewer steps also means fewer chances to make a mistake.
 
-You are told this because it took ninety minutes of training to discover. You
-are NOT told what to set — the trade-off between step count and per-step
-learnability is real, is specific to this cell, and is yours to find.
+This seed already banks two structural wins over that ancestor: a two-pass
+schedule (one register-width of steps cheaper per problem, and strictly
+inside the organizers' encoder ruling) and bucketed-width batching backed by
+a training distribution that covers padded registers. The generation-0
+metrics of this run are the live baseline — trust them over the table above.
 
-`budget_headroom` in `visible_metrics` reports this directly, measured a few
-minutes in rather than at the end: below 1.0 the top tiers cannot be scored
-however accurate the model becomes, and `1 / budget_headroom` is the speedup
-needed. `projected_infer_s_tier_N` gives the per-tier projection behind it.
+`budget_headroom` in `visible_metrics`: at the top rung it is measured from
+the real per-tier clock (below 1.0 the top tiers cannot be scored however
+accurate the model becomes; `1 / budget_headroom` is the speedup needed).
+For candidates that die earlier, `budget_headroom` is a cheap-probe
+projection — read it as a direction, not a price; the probe once said 19x
+where the measurement said 1.57x, and it now carries the probe's own value
+in `budget_headroom_probe` when the measured number replaces it.
 
 ## What earlier mutations already got wrong
 
@@ -126,6 +138,19 @@ Learn from how, rather than rediscovering it:
 3. **One emitted no change at all**, having quoted the response format back to
    itself instead of answering. A mutation identical to its parent is now
    rejected outright.
+
+4. **Four candidates in one generation independently invented padded-width
+   batching** — rounding the register up to the next power of two so a tier
+   runs as a few large batches. The idea was right (it is now in the seed).
+   All four scored zero on every tier: the weights they inherited had only
+   ever trained with the prime exactly filling the register, and the padded
+   band is a measured cliff (accuracy 2-30% at 1-2 bits of padding on a
+   delta=0-trained cell). The lesson is not "don't batch" — it is that
+   `train.py`'s data distribution and `model.py`'s inference geometry are
+   ONE mechanism. If you change what inference asks for, change what
+   training covers in the same mutation, and keep inside the measured-safe
+   band (>=4 bits of headroom, verified identical up to 64) unless you are
+   deliberately re-measuring the band itself.
 
 ## The genome: three files
 
@@ -244,7 +269,11 @@ Consequences worth internalizing:
   (narrower cell, fewer refinement rounds), or both, is a first-class
   optimization — but a bigger radix makes each step harder to learn.
 - Size the computation to the input: state width should follow `p`'s
-  bit-length, not a worst-case constant.
+  bit-length, not a worst-case constant — but follow it in BUCKETS. Exact
+  bit-length grouping splits a 100-problem tier into ~100 near-singleton
+  batches whose launches serialize; the seed's rule (next multiple of 64
+  with >=4 bits of headroom) keeps padding inside the trained band while a
+  tier runs as a few large batches.
 
 ## Adjudication (four layers — assume all are active)
 
