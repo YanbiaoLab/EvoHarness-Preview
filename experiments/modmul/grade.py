@@ -85,6 +85,11 @@ MAX_FEEDBACK_ITEMS_PER_TIER = 20          # 逐题反馈体积上限（报告要
 # 看的是 tier>=2 的实力,不是任意一层的分数。
 PERTURB_PROBE_CASES = 10
 PERTURB_MIN_TIER_ACC = 0.30        # 哪些层拿来做探针
+# 探针不取 tier 3 以下：tier 1 的模数只有固定的 2/3/5/7，答案空间小到随机
+# 权重也能蒙中三分之一——r11 和 r12 的 horner_cell 种子都是这么被误杀的
+# （随机化后 0.33，阈值 0.20×原始分，判为“答案不来自参数”）。那是小模数的
+# 天花板效应，不是作弊证据。tier 3 起模数至少 9 位，蒙中率不到千分之二。
+PERTURB_PROBE_MIN_TIER = 3
 PERTURB_TRIGGER_TIER_ACC = 0.50    # tier>=2 到这个水平才值得查
 PERTURB_MAX_SURVIVING_RATIO = 0.20
 
@@ -604,7 +609,21 @@ def _adjudicate(candidate_dir: Path) -> str | None:
     return None
 
 
-def _run_training(runner: Path, model_dir: Path, seconds: float) -> str | None:
+def _run_training(
+    runner: Path,
+    model_dir: Path,
+    seconds: float,
+    gpu_lock: Path | None = None,
+) -> str | None:
+    # Close the freeze's one race: a trainer SPAWNED during a timed section
+    # would land on the supposedly-quiet card unfrozen. Queue behind any
+    # holder of the timed-inference lock, then release immediately -- the
+    # touch costs microseconds when no timed eval is running, and the wait
+    # happens before the training process exists, so it is billed to nobody.
+    if gpu_lock is not None and gpu_lock.parent.exists():
+        with open(gpu_lock, "a+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            fcntl.flock(handle, fcntl.LOCK_UN)
     result = Sandbox().run(
         [sys.executable, str(runner), str(model_dir)],
         workdir=model_dir,
@@ -639,10 +658,22 @@ def _exclusive_gpu(lock_path: Path | None):
     noise -- and systematically rejecting candidates the official harness
     would have passed.
 
-    Only the timed section is serialised. Training stays concurrent, which is
-    where the throughput actually comes from, and the lower rungs stay
-    concurrent too: their inference is seconds, and their timings feed nothing
-    but the promotion gate.
+    The lock alone was not enough. It serialised timed evals against each
+    other but left training running, and training IS the load: re-timing the
+    r12 seed's diagnostic tier under nine concurrent trainers gave 175.5s
+    against 121.2s on the quiet card at generation 0 -- a 1.45x, worth about
+    0.027 of fitness through the time term, when the margin between the seed
+    and r11's best offspring was 0.0011. Every child was timed on a busy card
+    and compared against a seed timed on an idle one.
+
+    So while the lock is held, training is FROZEN: every train_runner.py gets
+    SIGSTOP on entry and SIGCONT on exit. In-flight kernels drain in under a
+    second; a stopped process issues no new ones. The trainers' own deadline
+    accounting compensates for the gap (see the seeds' train.py), so frozen
+    time is not billed to any candidate's training budget. Training between
+    timed sections stays fully concurrent, which is where the throughput
+    comes from; the cheap rungs stay concurrent too -- their timings feed
+    nothing but the promotion gate.
     """
     if lock_path is None:
         yield
@@ -650,10 +681,49 @@ def _exclusive_gpu(lock_path: Path | None):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
+        frozen = _freeze_trainers()
         try:
             yield
         finally:
+            _thaw_trainers(frozen)
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _freeze_trainers() -> list[int]:
+    """SIGSTOP every training subprocess; return the pids actually stopped.
+
+    Matched by the runner FILENAME, which no other process on the box embeds
+    -- the grading loop is `python -m experiments.run_evolution`, the eval
+    runner is eval_runner.py, and pgrep sees neither. (Lesson already paid
+    for once: a pkill pattern that matched its own ssh command line.)
+    """
+    import signal
+    import subprocess
+    try:
+        listing = subprocess.run(
+            ["pgrep", "-f", "train_runner.py"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return []
+    frozen = []
+    for token in listing.split():
+        try:
+            os.kill(int(token), signal.SIGSTOP)
+            frozen.append(int(token))
+        except (ValueError, ProcessLookupError, PermissionError):
+            continue
+    return frozen
+
+
+def _thaw_trainers(frozen: list[int]) -> None:
+    """SIGCONT exactly the pids we stopped -- nothing else."""
+    import signal
+    for pid in frozen:
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError):
+            continue
 
 
 def _run_eval(
@@ -960,7 +1030,9 @@ def _perturbation_verdict(
         for tier, value in accuracy.items()
     )
     probes = sorted(
-        (t for t in accuracy if accuracy[t] >= PERTURB_MIN_TIER_ACC),
+        (t for t in accuracy
+         if t >= PERTURB_PROBE_MIN_TIER
+         and accuracy[t] >= PERTURB_MIN_TIER_ACC),
         key=lambda t: -t,
     )[:3]
     if not strong or not probes:
@@ -1036,13 +1108,27 @@ def _cost_projection(
         return {}
     tiers = tuple(sorted(truth))
     total = sum(len(c) for c in truth.values())
+    order = [str(t) for t in tiers]
+    cases = {str(t): _inputs_only(truth[t]) for t in tiers}
+    # A warm-up tier ahead of the timed ones. The probe runs in a fresh
+    # process, so its first cases pay CUDA context creation and first-kernel
+    # compilation; over three cases that fixed cost read as 14.6s/case for a
+    # tier the top rung later measured at 2.3s/case, and the projection said
+    # 19x over budget when the truth was 1.57x -- pushing the optimizer
+    # toward tearing down an architecture that needed a 1.6x nudge. One
+    # tier-1 case eats the warm-up; its timing is discarded (the loop below
+    # reads COST_PROBE_TIERS only).
+    warmup = _load_cases(1, 1)
+    if warmup:
+        order = ["1", *order]
+        cases["1"] = _inputs_only(warmup)
     plan = {
         # Generous: this measures cost, so it must not be cut off by the very
         # budget it is measuring.
         "mode": "normal",
         "budget_s": SECONDS_PER_PROBLEM * total * 100,
-        "order": [str(t) for t in tiers],
-        "cases": {str(t): _inputs_only(truth[t]) for t in tiers},
+        "order": order,
+        "cases": cases,
     }
     result, fault = _run_eval(runner, model_dir, plan, workdir, "costprobe")
     if result is None or result.get("error"):
@@ -1414,7 +1500,13 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
             train_spent += rung.train_seconds
             lineage["training_skipped"] += 1
         else:
-            fault = _run_training(train_runner, candidate_dir, rung.train_seconds)
+            fault = _run_training(
+                train_runner, candidate_dir, rung.train_seconds,
+                gpu_lock=(
+                    Path(ctx.lineage_dir) / "timed-inference.lock"
+                    if ctx.lineage_dir else None
+                ),
+            )
             if fault:
                 return Grade(
                     fitness=_fitness(accuracy), passed=False, stage_reached=1,
@@ -1553,6 +1645,18 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # success path: a candidate that faulted has nothing worth inheriting.
     _publish_to_lineage(candidate_dir, ctx, train_spent)
 
+    # Headroom from MEASUREMENT once the top rung has run all the tiers: the
+    # probe's extrapolation exists for candidates that die early, but where
+    # the real per-tier clock is on the table it wins. (The probe once said
+    # 19x over budget where the measurement said 1.57x.)
+    if reached is _rungs()[-1] and budget_s and seconds:
+        total_clock = sum(seconds.values())
+        if total_clock > 0:
+            if "budget_headroom" in projection:
+                projection["budget_headroom_probe"] = (
+                    projection["budget_headroom"]
+                )
+            projection["budget_headroom"] = round(budget_s / total_clock, 3)
     visible = {**metrics, **projection, **lineage, **_metric_block(accuracy),
                **{f"infer_s_tier_{t}": s for t, s in seconds.items()}}
     return Grade(
