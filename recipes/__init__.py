@@ -9,6 +9,7 @@ from . import (
     e2_behavior,
     e3g_global,
     e3r_retrieval,
+    e4a_rejected,
 )
 from .common import RecipeContext, TaskBundle, assemble
 from .config_io import load_experiment_config
@@ -20,6 +21,7 @@ _MODULES = [
     e2_behavior,
     e3g_global,
     e3r_retrieval,
+    e4a_rejected,
 ]
 
 REGISTRY = {m.NAME: m for m in _MODULES}

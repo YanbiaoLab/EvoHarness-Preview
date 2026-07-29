@@ -24,8 +24,11 @@ from experiments.run_evolution import main as run_evolution
 
 
 def test_registry_covers_experiment_matrix():
-    assert set(recipes.REGISTRY) == {"b0", "e0", "e1", "e2", "e3g", "e3r"}
+    assert set(recipes.REGISTRY) == {
+        "b0", "e0", "e1", "e2", "e3g", "e3r", "e4a",
+    }
     assert "retriev" in recipes.get_recipe("E3R").DESCRIPTION
+    assert "negative experience" in recipes.get_recipe("e4a").DESCRIPTION
     with pytest.raises(ValueError, match="unknown recipe"):
         recipes.get_recipe("e99")
 

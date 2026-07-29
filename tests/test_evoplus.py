@@ -767,3 +767,99 @@ def test_reflector_is_told_when_the_evaluation_never_ran(tmp_path):
         )
     )
     assert rendered is None or "advice-c0" not in rendered
+
+
+# -- C3 v3: evidence + convergence clustering ---------------------------------
+
+def test_evaluated_entry_carries_report_evidence(tmp_path):
+    pop = PopulationStore(PopulationConfig())
+    parent = make_candidate("p", 0.85)
+    parent.report.visible_metrics = {
+        "acc_tier_2": 1.0, "infer_s_tier_0": 121.2, "warm_start": "full",
+        "rung": "R2",
+    }
+    pop.insert(parent)
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    child = make_candidate("c", 0.06, parent_id="p", generation=2)
+    child.report.fault = None
+    child.report.visible_metrics = {
+        "acc_tier_2": 0.03, "infer_s_tier_0": 51.2,
+        "warm_start": "parent-partial", "rung": "R2",
+    }
+    xs.on_candidate_graded(child, pop)
+    entry = xs.entries[0]
+    # Largest RELATIVE shift first: the accuracy collapse outranks the
+    # timing halving; unchanged strings ("rung") never appear.
+    assert entry.evidence.index("acc_tier_2 1->0.03") < entry.evidence.index(
+        "infer_s_tier_0 121.2->51.2"
+    )
+    assert "warm_start full->parent-partial" in entry.evidence
+    assert "rung" not in entry.evidence
+    assert "evidence:" in entry.render()
+    # v3 rows roundtrip; v1/v2 rows without the field load as "".
+    reloaded = ExperienceStore(tmp_path / "exp.jsonl")
+    assert reloaded.entries[0].evidence == entry.evidence
+
+
+def test_evidence_leads_with_the_fault(tmp_path):
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 0.85))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    child = make_candidate("c", 0.0, parent_id="p", passed=False, generation=2)
+    child.report.fault = "perturbation-insensitive (L3): randomizing the\nweights left accuracy at 0.33"
+    xs.on_candidate_graded(child, pop)
+    assert xs.entries[0].evidence.startswith(
+        "fault: perturbation-insensitive (L3): randomizing the weights"
+    )
+
+
+def _loss(xs, pop, cid, fitness, summary, generation=2):
+    child = make_candidate(cid, fitness, parent_id="p", generation=generation)
+    child.operator, child.change_title = "rewrite", f"edit {cid}"
+    xs.on_candidate_graded(child, pop)
+    # describe_change synthesizes an empty diff for identical texts, so the
+    # store fell back to change_summary="", overwrite with the fixture.
+    xs.entries[-1].change_summary = summary
+    return child
+
+
+def test_loss_clusters_group_convergent_failures(tmp_path):
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 0.85))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    for cid, fit, val in (("a", 0.08, 2), ("b", 0.06, 2), ("c", 0.05, 3), ("d", 0.04, 2)):
+        _loss(xs, pop, cid, fit, f"arch.py +1/-1 | added: RADIX_BITS = {val}")
+    _loss(xs, pop, "solo", 0.50, "model.py +3/-1 | added: CHUNK = 64")
+    clusters = xs.loss_clusters(top_n=2)
+    # The four same-identifier deaths are ONE cluster and rank above the
+    # singleton despite the singleton's smaller delta magnitude.
+    assert [len(c) for c in clusters] == [4, 1]
+    line = ExperienceStore.render_cluster(clusters[0])
+    assert "tried 4 times INDEPENDENTLY" in line
+    assert "helped 0 times" in line
+    ctx = _ctx_for(pop)
+    contrib = ExperienceContributor(xs, mode="retrieval")
+    text = contrib.contribute(ctx)
+    assert "tried 4 times INDEPENDENTLY" in text
+
+
+def test_redeemed_entries_leave_their_cluster(tmp_path):
+    pop = PopulationStore(PopulationConfig())
+    pop.insert(make_candidate("p", 0.85))
+    xs = ExperienceStore(tmp_path / "exp.jsonl")
+    for cid in ("a", "b"):
+        _loss(xs, pop, cid, 0.05, "arch.py +1/-1 | added: ROUNDS = 1")
+    pop.insert(make_candidate("a", 0.05, parent_id="p", generation=2))
+    redeemer = make_candidate("r", 0.95, parent_id="a", generation=3)
+    xs.on_candidate_graded(redeemer, pop)
+    assert [len(c) for c in xs.loss_clusters(top_n=2)] == [1]
+
+
+def _ctx_for(pop):
+    return MutationContext(
+        parent=pop.get("p"),
+        archive_inspirations=[],
+        top_k_inspirations=[],
+        operator="revise",
+        generation=3,
+    )

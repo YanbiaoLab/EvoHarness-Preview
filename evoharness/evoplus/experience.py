@@ -13,6 +13,7 @@ from __future__ import annotations
 import difflib
 import json
 import random
+import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -127,6 +128,59 @@ def _describe_proposal(
     )
 
 
+def _report_evidence(
+    parent_report,
+    child_report,
+    *,
+    max_metrics: int = 4,
+    max_chars: int = 300,
+) -> str:
+    """Compress WHY a mutation scored what it did, domain-agnostically.
+
+    Motivating autopsy (modmul r12): four candidates raised the Horner radix
+    and their buffer entries read "did NOT help (Δfitness -0.78): arch.py
+    +1/-1" — the WHAT. The WHY (inference time halved exactly as projected
+    while accuracy above tier 1 collapsed to 2-3%) was sitting in the graded
+    report's fault string and visible_metrics the whole time, and never
+    reached a single future proposal. Fitness deltas say that something
+    died; the evidence says what killed it, and only the second prevents
+    the next attempt from dying the same way.
+
+    Mechanically: the fault first, then the metrics whose RELATIVE change
+    vs the parent is largest (an accuracy 1.0 -> 0.02 outranks a timing
+    121 -> 51), then changed short strings (a warm_start flip is evidence
+    too). The metrics stay opaque key-values — nothing here knows any
+    domain's names, which is what keeps this in the framework layer.
+    """
+    parts: list[str] = []
+    fault = (getattr(child_report, "fault", None) or "").strip()
+    if fault:
+        parts.append("fault: " + " ".join(fault.split())[:140])
+    parent_m = getattr(parent_report, "visible_metrics", None) or {}
+    child_m = getattr(child_report, "visible_metrics", None) or {}
+    numeric: list[tuple[float, str, float, float]] = []
+    worded: list[str] = []
+    for key in child_m:
+        pv, cv = parent_m.get(key), child_m[key]
+        if isinstance(pv, bool) or isinstance(cv, bool):
+            continue
+        if isinstance(pv, (int, float)) and isinstance(cv, (int, float)):
+            if pv != cv:
+                rel = abs(pv - cv) / max(abs(pv), abs(cv), 1e-9)
+                numeric.append((rel, key, float(pv), float(cv)))
+        elif (
+            isinstance(pv, str) and isinstance(cv, str) and pv != cv
+            and len(pv) <= 24 and len(cv) <= 24
+        ):
+            worded.append(f"{key} {pv}->{cv}")
+    numeric.sort(key=lambda t: (-t[0], t[1]))
+    shifted = [f"{k} {pv:g}->{cv:g}" for _, k, pv, cv in numeric[:max_metrics]]
+    shifted += worded[: max(0, max_metrics - len(shifted))]
+    if shifted:
+        parts.append("shifted: " + ", ".join(shifted))
+    return " | ".join(parts)[:max_chars]
+
+
 @dataclass
 class ExperienceEntry:
     # Schema v2 (design §3). `kind` discriminates: "evaluated" rows come
@@ -148,6 +202,9 @@ class ExperienceEntry:
     # L1 attribution (design §2b), written back by MutationReflector:
     # {"verdict": "improved|regressed|noise", "why", "advice", "tags": [...]}
     lesson: dict | None = None
+    # Schema v3: compact WHY from the graded report (fault + largest metric
+    # shifts vs the parent) — see _report_evidence. Older rows load as "".
+    evidence: str = ""
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -185,6 +242,8 @@ class ExperienceEntry:
         )
         if self.change_summary:
             line += f": {self.change_summary}"
+        if self.evidence:
+            line += f"\n  evidence: {self.evidence}"
         return line
 
 
@@ -289,6 +348,7 @@ class ExperienceStore:
             island_idx=cand.island_idx,
             parent_id=parent.id,
             child_id=cand.id,
+            evidence=_report_evidence(parent.report, cand.report),
         )
         self.entries.append(entry)
         self._append_row(entry.to_json())
@@ -327,6 +387,73 @@ class ExperienceStore:
             )
         self.entries.append(entry)
         self._append_row(entry.to_json())
+
+    _PATTERN_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+    @classmethod
+    def _pattern_key(cls, entry: ExperienceEntry) -> tuple[str, str] | None:
+        """(files touched, first identifier added) — the convergence key.
+
+        Derived from the diff-summary format _summarize_patch emits
+        ("arch.py +1/-1 | added: RADIX_BITS = 2"), so it is exactly as
+        domain-agnostic as the diff itself. Entries whose summary carries
+        no added line get no key and never cluster.
+        """
+        summary = entry.change_summary or ""
+        files_part, sep, added = summary.partition(" | added: ")
+        if not sep:
+            return None
+        files = ",".join(sorted(
+            chunk.split(" ")[0]
+            for chunk in files_part.split("; ") if chunk.strip()
+        ))
+        match = cls._PATTERN_IDENT.search(added.split(" ¶ ")[0])
+        if not match:
+            return None
+        return (files, match.group(0))
+
+    def loss_clusters(self, top_n: int = 2) -> list[list[ExperienceEntry]]:
+        """Unredeemed evaluated failures, grouped by convergence key.
+
+        Four independent candidates raising the same constant and dying the
+        same way is ONE pattern with four bodies, not four unrelated lines
+        — and repeated independent failure is the strongest negative signal
+        the buffer holds, precisely the one that per-instance rendering
+        dilutes (with top_n=2, two of the four r12 radix deaths displaced
+        every other failure mode and the count "4" appeared nowhere).
+        Returns clusters worst-first by (size, worst delta); singletons are
+        clusters of one.
+        """
+        losses = [
+            e for e in self.entries
+            if e.kind == "evaluated" and not e.success and e.redeemed_by is None
+        ]
+        groups: dict[object, list[ExperienceEntry]] = {}
+        for index, entry in enumerate(losses):
+            key = self._pattern_key(entry) or ("", f"solo-{index}")
+            groups.setdefault(key, []).append(entry)
+        return sorted(
+            groups.values(),
+            key=lambda g: (-len(g), min(e.fitness_delta for e in g)),
+        )[:top_n]
+
+    @staticmethod
+    def render_cluster(cluster: list[ExperienceEntry]) -> str:
+        if len(cluster) == 1:
+            return cluster[0].render()
+        worst = min(cluster, key=lambda e: e.fitness_delta)
+        best = max(cluster, key=lambda e: e.fitness_delta)
+        title = worst.change_title or worst.operator
+        line = (
+            f"- [{worst.operator}] {title} — tried {len(cluster)} times "
+            f"INDEPENDENTLY, helped 0 times (Δfitness "
+            f"{worst.fitness_delta:+.4g}..{best.fitness_delta:+.4g})"
+        )
+        if worst.change_summary:
+            line += f": {worst.change_summary}"
+        if worst.evidence:
+            line += f"\n  evidence (worst instance): {worst.evidence}"
+        return line
 
     def recent_wins(self, top_m: int = 3) -> list[ExperienceEntry]:
         """Best evaluated improvements, best-first."""
@@ -482,13 +609,16 @@ class ExperienceContributor:
 
     def _retrieve(self, ctx: MutationContext) -> str | None:
         wins = self.store.recent_wins(self.top_m)
-        losses = self.store.recent_losses(self.top_n)
-        if not wins and not losses:
+        # Clusters, not instances: N independent same-shape failures render
+        # as one line carrying the count, instead of two of them displacing
+        # every other failure mode (see loss_clusters).
+        clusters = self.store.loss_clusters(self.top_n)
+        if not wins and not clusters:
             return None
         lines = ["# Experience from this run (past mutation outcomes)"]
         # Losses first, wins worst->best: the strongest positive example
         # lands last, where LLM recency bias weighs it most.
-        lines += [e.render() for e in losses]
+        lines += [self.store.render_cluster(c) for c in clusters]
         lines += [e.render() for e in reversed(wins)]
         return "\n".join(lines)[: self.max_bytes]
 
