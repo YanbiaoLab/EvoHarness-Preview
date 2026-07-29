@@ -1,0 +1,7 @@
+{
+  "entry_class": "model.EvolvedModel",
+  "output_base": 2,
+  "framework": "pytorch",
+  "model_description": "width-generic modulus-conditioned Horner cell (~100K params): per-bit local windows of (state, multiplicand, modulus) plus a learned associative scan (Hillis-Steele, depth log2(width), one shared operator) resolve carries, so the same weights run at any state width. Two passes with shared weights over the RAW operands: pass 1 reduces a mod p by Horner over a's digits with multiplicand 1; pass 2 streams b's raw digits with the multiplicand register holding the pass-1 residue, accumulating (a mod p)*b mod p. The register width is the prime's exact bit length (these weights trained with the prime filling the register). Emits the state bits directly as base-2 digits. Deliberate budget allocation: primes wider than MAX_WIDTH (2048 bits, the top of the scored range) are declined with an honest zero \u2014 the model generalises past that width, but answering the unscored diagnostic tier's widest problems would spend the shared wall clock that tiers 9-10 need.",
+  "training_description": "trained at eval time from random init on exact transition tuples s' = (2^k*s + d*x) mod p over a width curriculum (8 -> 2048 bits, warm-started across widths) with a power-of-two-adjacent stratum; BCE on the target bits, AdamW, fixed seed 0. Labels come from exact integer arithmetic at TRAIN time only; the inference path has none."
+}
