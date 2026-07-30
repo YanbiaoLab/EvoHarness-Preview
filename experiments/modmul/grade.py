@@ -652,7 +652,7 @@ def _run_training(
 
 
 @contextlib.contextmanager
-def _exclusive_gpu(lock_path: Path | None):
+def _exclusive_gpu(lock_path: Path | None, freeze: bool = True):
     """Hold the GPU alone for a TIMED inference.
 
     eval_batch_size is 16, so sixteen candidates train and evaluate on one
@@ -691,7 +691,7 @@ def _exclusive_gpu(lock_path: Path | None):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        frozen = _freeze_trainers()
+        frozen = _freeze_trainers() if freeze else []
         try:
             yield
         finally:
@@ -743,11 +743,18 @@ def _run_eval(
     workdir: Path,
     tag: str,
     gpu_lock: Path | None = None,
+    freeze_trainers: bool = True,
 ) -> tuple[dict | None, str]:
     plan_path = workdir / f"plan_{tag}.json"
     out_path = workdir / f"eval_{tag}.json"
     plan_path.write_text(json.dumps(plan))
-    with _exclusive_gpu(gpu_lock):
+    # The lock without the freeze: probe and perturbation runs are not
+    # timed, so concurrent TRAINING is fine -- but they are hundreds of
+    # GPU-seconds each, and letting them overlap a sibling's TIMED window
+    # is how the r15 champion seed measured 214.7s on a tier it runs in
+    # 22s. Queueing them behind the lock keeps every timed window clean;
+    # not freezing keeps training throughput.
+    with _exclusive_gpu(gpu_lock, freeze=freeze_trainers):
         result = Sandbox().run(
             [sys.executable, str(runner), str(model_dir), str(plan_path),
              str(out_path)],
@@ -1030,6 +1037,7 @@ def _perturbation_verdict(
     model_dir: Path,
     workdir: Path,
     accuracy: dict[int, float],
+    gpu_lock: Path | None = None,
 ) -> tuple[str | None, dict]:
     """官方 L3 的自测版：随机化权重后精度必须塌。
 
@@ -1075,7 +1083,8 @@ def _perturbation_verdict(
         "order": [str(t) for t in sorted(probes)],
         "cases": {str(t): _inputs_only(truth[t]) for t in probes},
     }
-    result, fault = _run_eval(runner, model_dir, plan, workdir, "perturb")
+    result, fault = _run_eval(runner, model_dir, plan, workdir, "perturb",
+                              gpu_lock=gpu_lock, freeze_trainers=False)
     if result is None or result.get("error"):
         # A crash under randomized weights is itself evidence of dependence.
         return None, {"perturbation": "collapsed-to-error",
@@ -1118,6 +1127,7 @@ def _cost_projection(
     workdir: Path,
     measured: dict[int, float],
     measured_cases: int,
+    gpu_lock: Path | None = None,
 ) -> dict:
     """Project whether the top tiers can be answered inside the time budget.
 
@@ -1160,7 +1170,8 @@ def _cost_projection(
         "order": order,
         "cases": cases,
     }
-    result, fault = _run_eval(runner, model_dir, plan, workdir, "costprobe")
+    result, fault = _run_eval(runner, model_dir, plan, workdir, "costprobe",
+                              gpu_lock=gpu_lock, freeze_trainers=False)
     if result is None or result.get("error"):
         return {"cost_probe": "unavailable"}
     out: dict = {"cost_probe": "checked"}
@@ -1630,7 +1641,11 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
         if rung.perturbation:
             verdict, perturb_metrics = _perturbation_verdict(
-                eval_runner, candidate_dir, workdir, accuracy
+                eval_runner, candidate_dir, workdir, accuracy,
+                gpu_lock=(
+                    Path(ctx.lineage_dir) / "timed-inference.lock"
+                    if ctx.lineage_dir else None
+                ),
             )
             metrics.update(perturb_metrics)
             if verdict:
@@ -1663,7 +1678,11 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
             # At the first promotion: cheap enough to be worth it only for a
             # candidate that survived R0, early enough to matter.
             projection = _cost_projection(
-                eval_runner, candidate_dir, workdir, seconds, rung.cases
+                eval_runner, candidate_dir, workdir, seconds, rung.cases,
+                gpu_lock=(
+                    Path(ctx.lineage_dir) / "timed-inference.lock"
+                    if ctx.lineage_dir else None
+                ),
             )
             if projection.get("budget_headroom", 1.0) < 1.0:
                 diagnostic["budget_verdict"] = (

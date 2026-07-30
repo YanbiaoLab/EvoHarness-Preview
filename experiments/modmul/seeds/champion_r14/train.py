@@ -206,12 +206,22 @@ def train(model_dir: str) -> None:
     cell.train()
     last_save = time.monotonic()
     steps_this_call = 0
+    last_tick = time.monotonic()
 
     while done < TOTAL_STEPS:
         # Include all queued CUDA work before deciding whether another batch is
         # safe.  This is required for MODMUL_TRAIN_SECONDS compliance.
         _sync(device)
         now = time.monotonic()
+        # The grader freezes this process (SIGSTOP) while a timed inference
+        # holds the card alone. A synced step is sub-second, so a gap this
+        # size can only be an external stop -- push the deadline out by the
+        # gap instead of billing frozen time to this candidate's training.
+        # Measured cost of NOT doing this (r15 generation 0): 48.7k steps
+        # trained out of an expected ~150k, and the top tiers never healed.
+        if now - last_tick > 5.0:
+            deadline += now - last_tick
+        last_tick = now
         if now >= deadline:
             break
 

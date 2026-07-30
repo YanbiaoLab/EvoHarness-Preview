@@ -554,7 +554,8 @@ def test_the_cost_probe_survives_the_later_rungs(tmp_path, monkeypatch):
     calls = []
     real = grade_module._cost_projection
 
-    def spy(runner, model_dir, workdir, measured, measured_cases):
+    def spy(runner, model_dir, workdir, measured, measured_cases,
+            gpu_lock=None):
         calls.append(measured_cases)
         return {"cost_probe": "checked", "budget_headroom": 0.31,
                 "projected_infer_s_all_tiers": 464.0}
