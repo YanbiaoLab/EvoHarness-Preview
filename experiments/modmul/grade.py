@@ -1048,7 +1048,27 @@ def _perturbation_verdict(
     if not strong or not probes:
         return None, {"perturbation": "skipped-weak-candidate"}
 
-    truth = {t: _load_cases(t, PERTURB_PROBE_CASES) for t in probes}
+    # Zero-answer cases carry NO information about whether capability lives
+    # in the parameters, and they nearly killed the strongest genome twice.
+    # The benchmark's first ten rows per tier include two edge cases whose
+    # true answer is 0 (an operand is a multiple of p). A cell with
+    # randomized FP16 weights saturates to NaN, every `logits > 0` reads
+    # False, and the constant all-zero register "answers" exactly those:
+    # 6/30 = 0.2000 random accuracy on the r14 champion, one rounding step
+    # over the 0.20 kill ratio (it had scored 4/30 = 0.1333 in r14 and
+    # passed — same floor, different side of the line). Grader-side integer
+    # arithmetic is legal; the candidate still never sees an answer.
+    def _nonzero(tier: int) -> list[dict]:
+        pool = _load_cases(tier, PERTURB_PROBE_CASES * 3)
+        keep = [c for c in pool
+                if (int(c["a"]) * int(c["b"])) % int(c["p"]) != 0]
+        return keep[:PERTURB_PROBE_CASES]
+
+    truth = {t: _nonzero(t) for t in probes}
+    truth = {t: cases for t, cases in truth.items() if cases}
+    if not truth:
+        return None, {"perturbation": "skipped-no-informative-cases"}
+    probes = sorted(truth)
     plan = {
         "mode": "perturb",
         "budget_s": SECONDS_PER_PROBLEM * PERTURB_PROBE_CASES * len(probes) * 4,

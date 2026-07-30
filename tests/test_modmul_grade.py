@@ -308,6 +308,10 @@ def test_train_artifact_reaches_predict(tmp_path):
 
 def test_runaway_training_is_killed_and_judged(tmp_path, monkeypatch):
     monkeypatch.setattr(grade_module, "TRAIN_SLACK_S", 2.0)
+    # The freeze allowance exists for trainers SIGSTOP'd behind a timed
+    # evaluation; zeroed here so the kill mechanism itself stays testable
+    # in seconds. (Un-patched, this test faithfully waits the full hour.)
+    monkeypatch.setattr(grade_module, "TRAIN_FREEZE_ALLOWANCE_S", 0.0)
     report = grade(tmp_path, HANGER)
     assert report.passed is False
     assert report.fault.startswith("train-timeout")
