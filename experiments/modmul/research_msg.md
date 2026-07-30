@@ -1,3 +1,8 @@
+<!-- modmul research_msg v6 (v5 -> v6, 2026-07-30):加 §9 定向线索(战场收敛到
+     tier 10 的一个 2x 后,按 期望倍数x概率x代价 排序:固定空洞扫描调度、
+     去噪多步训练、CUDA graphs 纠偏),§9.4 与死路表加"结合律并行扫描"陷阱
+     (每个扫描节点都是全宽模乘 = 问题本身)。破例给了机制与实验形状,仍不给
+     常数 —— k 取几、m 取几、噪声率多少留给搜索。原 v5 头注如下。 -->
 <!-- modmul research_msg v5 (v4 -> v5, 2026-07-28):加 §8.4(tier 0 不计分
      但第一个跑且占同一时钟;实测吃掉 81% 预算;它是唯一横跨全宽度范围的层)。
      同样只给现象与坐标轴。原 v4 头注如下。 -->
@@ -230,6 +235,7 @@ cliff, not a style preference.
 | re-annealing with the same recipe, alone | no gain |
 | small-prime fine-tuning without an anchor | fixes small primes, costs large-scale accuracy |
 | padded-width batching on delta=0-trained weights | four independent r12 candidates, all zero on every tier (§7.3); the padding is right, the training coverage is the missing half |
+| parallelizing the Horner chain as an associative scan over affine maps | every scan node is a full-width modular multiply -- the whole problem again; see §9.4 |
 | a third pass streaming digits sliced from the model's own output | works numerically, but sits in the gray zone of the encoder ruling (§3) and costs one register-width of steps; the two-pass schedule is equivalent, cheaper, and strictly inside the ruling |
 | raising RADIX_BITS with a shape-matched (per-tensor) warm start | the SPEED pays exactly as projected — measured k=2: diagnostic tier 121s -> 51s, tier 9 235s -> 209s under load; k=3: 121s -> 20s, 98s — but accuracy collapsed to 2-3% above tier 1 after the full 5400s of retraining, three times over at k=2 and once at k=3. Keeping 99% of tensors is not keeping the function: the reshaped embed layer feeds every downstream tensor garbage, so the retrain is functionally cold. The public fork that made k=2 work used a FUNCTION-PRESERVING warm start (the k=2 cell reproduces the k=1 computation exactly at init, then trains). Until a mutation engineers that, radix raises buy confirmed speed and pay unaffordable accuracy |
 
@@ -340,3 +346,82 @@ Two consequences:
   spread of widths is a separate property, and the scored tiers are all narrow
   while the unscored one is maximally wide. Whether a model's cost is
   sensitive to that spread, and whether it has to be, is unmeasured here.
+
+## 9. Directed leads (2026-07-30) — the remaining battlefield is one 2x
+
+All ten scored tiers now clear 90% given time, and tiers 0-9 fit the budget
+with ~165s to spare. Everything left is tier 10's clock: measured 336s,
+needs ~165s. These leads are ranked by (expected factor x probability x
+cheapness). None of them prescribes constants; each names the mechanism,
+the evidence, and the shape of a first experiment.
+
+### 9.1 A fixed dilated scan schedule (attacks per-step cost, est. 1.5-2.5x)
+
+Every Horner step currently pays the FULL bidirectional scan
+(2 x ROUNDS x log2(width) shared-operator applications), but the work that
+needs full width every step is rare: carries propagate a few positions on
+average, and the reduction decision flips at most once per step. The wasted
+depth is spent confirming nothing happened.
+
+The compliant version of adaptivity is a FIXED, input-independent schedule
+— the same idea as dilated convolutions: most steps run only the lowest k
+scan levels (local carry propagation), and every m-th step runs the full
+depth (global reconciliation: the reduction decision and long carries catch
+up). Fixed k and m keep the encoder feedback-free (squarely inside the
+organizers' ruling — unlike LEARNED halting, which is the community's
+still-unanswered gating question; do not go there), keep batches
+convergence-free on GPU, and make the change a schedule edit in the cell's
+forward, trainable with inherited weights since no tensor reshapes.
+
+The risk to respect: training must SEE the schedule it will run
+(train.py/arch.py are one mechanism here, as with the width band). A cell
+trained on full-depth steps and run on dilated ones is off-distribution in
+exactly the way the delta band was.
+
+### 9.2 Denoising multi-step training (attacks the last accuracy points)
+
+The cell is trained on exact single transitions and run on its own
+thresholded outputs for ~6,000 chained steps — it has never seen an error
+and cannot repair one, which is why per-step exactness must reach 1e-5
+before a tier closes. Two train.py-only changes give the rollout a repair
+mechanism:
+
+- flip each input state bit with a small probability during training, with
+  the exact target unchanged — the learned map acquires a basin of
+  attraction around the correct state instead of a knife edge;
+- supervise 2-4 CHAINED steps with a straight-through estimator through
+  the inter-step threshold, so compounding is in the training signal at
+  all.
+
+This is the scheduled-sampling / denoising-autoencoder observation applied
+to an exact-arithmetic rollout. It composes with everything else, costs no
+inference time, inherits all weights, and is the direct attack on tier
+10's remaining misses — which community data suggests concentrate in the
+power-of-two-adjacent operand family at >=1024-bit primes (failures group
+by exponent, sparse and dense extremes failing together), so weight that
+stratum when adding noise.
+
+### 9.3 CUDA graphs, not TorchScript (attacks launch overhead)
+
+The digit loop launches every cell step from Python; at tier 10 that is
+~8,000 sequential launch groups per bucket, and the workload is
+launch-bound — the tensor-core win came from this same family. One
+candidate already tried to freeze the schedule with TorchScript and died
+at load time; the direction was right and the tool was wrong.
+`torch.compile(mode="reduce-overhead")` (CUDA graph capture) applied to
+the per-step cell call, captured once per bucket width, replays the step
+without Python dispatch. Constraints that matter: static shapes per
+bucket (already true after bucketing), no data-dependent control flow
+inside the captured region (already true — the schedule is fixed), and
+capture cost paid once per width (amortized over 100-case tiers).
+
+### 9.4 A trap, named so nobody walks in
+
+Horner steps are affine maps mod p, and affine maps compose associatively,
+so the whole chain LOOKS like a 13-level parallel scan instead of 8,192
+serial steps. The trap: the composition of two such maps requires
+multiplying two full-width residues mod p — every internal node of that
+scan is an instance of the whole problem. That is the monolithic-model
+wall wearing a parallel-scan costume. Recorded here as measured-adjacent:
+the community's capacity experiments (§4) already show single-shot
+full-width modmul does not train at these scales.
