@@ -242,14 +242,50 @@ class _LockedConnection:
     cursor would let one thread's fetch interleave with another thread's
     execute on the same connection, which is exactly what sqlite's
     same-thread check exists to prevent.
+
+    Storage blips are survived, not re-raised: run modmul_r15 died 17
+    hours of state into `attempt to write a readonly database` when the
+    box's overlay storage hiccuped for a moment (the same volume once
+    returned EIO mid-benchmark-read). The filesystem was writable again
+    by the time anyone looked. A transient fault through a stale fd needs
+    a RECONNECT, not just a retry — the old descriptor can stay pinned to
+    the read-only view after the volume recovers.
     """
 
-    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+    _TRANSIENT = ("readonly database", "disk i/o error")
+    _BACKOFF_S = (0.5, 2.0, 8.0)
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        lock: threading.RLock,
+        path: str = ":memory:",
+    ):
         self._conn = conn
         self._lock = lock
+        self._path = path
+
+    def _reconnect(self) -> None:
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
 
     def execute(self, *args, **kwargs) -> _Rows:
         with self._lock:
+            for pause in self._BACKOFF_S:
+                try:
+                    return _Rows(
+                        self._conn.execute(*args, **kwargs).fetchall()
+                    )
+                except sqlite3.OperationalError as exc:
+                    text = str(exc).lower()
+                    if (self._path == ":memory:"
+                            or not any(t in text for t in self._TRANSIENT)):
+                        raise
+                    time.sleep(pause)
+                    self._reconnect()
             return _Rows(self._conn.execute(*args, **kwargs).fetchall())
 
     def executescript(self, *args, **kwargs) -> None:
@@ -277,7 +313,8 @@ class PopulationStore:
         # mutates only from the main thread.
         self._lock = threading.RLock()
         self._conn = _LockedConnection(
-            sqlite3.connect(str(path), check_same_thread=False), self._lock
+            sqlite3.connect(str(path), check_same_thread=False), self._lock,
+            path=str(path),
         )
         self._conn.executescript(_SCHEMA)
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(candidates)")}
