@@ -1,0 +1,49 @@
+# modmul Round-15 主跑(L40S 46GB)。
+#
+# r14 停机原因(17 小时 / 7 代 / 112 个已评分候选):冻结补偿与外层沙箱
+# 超时的相互作用 —— 计时评测持锁 SIGSTOP 训练进程,train.py 顺延内部
+# deadline,但外层 kill 时钟(budget+240s)不知道冻结;R2 计时评测(tier 10
+# 会跑之后)动辄 500-1300 秒,重叠的 R0 训练必死。41/112(37%)死于
+# train-timeout,含 ROUNDS 3->2 全部六次尝试。尸检:死者 train_state 全是
+# 继承值,进程被杀时一次保存都没完成。修复:TRAIN_FREEZE_ALLOWANCE_S=3600
+# 进外层超时,内层 deadline 照旧管真实训练时长。
+#
+# r14 的战果随种子晋升制度化(task.py 三岛异种):
+#   岛 0  champion_r14 — 第 4 代冠军 12b1e74c(f=0.8910 / h90=9):
+#         FP16 autocast + TF32 张量核推理、每步状态重二值化、去偏置输出头
+#         (防随机权重恒零寄存器在小模数上蒙分 —— 对我们的扰动闸和官方 L3
+#         同时免疫)、wall-clock-safe 训练。实测 t0 21.7 / t9 63.4 /
+#         t10 336.0,acc 8/9/10 = 1.00/0.97/0.78。
+#   岛 1  limb_horner — 愈合后的原种子(保底 + 对照)
+#   岛 2  decoder_r14 — horner_cell 家族最好后代 eb6f2aee(0.2638),
+#         唯一异构血统
+#
+# 距 h90=10:tier 10 时钟 336->195 秒(1.7x)+ 精度 0.78->0.90。
+# ROUNDS 3->2 在公平评测器下的重测是第一优先级假设(推算 t9 ~45s /
+# t10 ~230s)。
+
+search:
+  num_generations: 200
+  eval_batch_size: 16
+  proposal_concurrency: 16
+  llm_models: ["gpt-5.6-sol"]         # 2026-07-30 用户指定换型号。同一
+                                      # provider(krill-ai.net),并发曲线
+                                      # 沿用 terra 实测的 16;sol 未单独
+                                      # 测,前两代若超时率异常先查这里
+  llm_max_tokens: 40960
+  seed: 29
+  operator_probs: [0.45, 0.45, 0.1]
+  repair_probability: 0.4
+  max_consecutive_infra_failures: 5
+
+population:
+  num_islands: 3
+  migration_interval: 10
+  migration_rate: 0.1
+  archive_size: 60
+
+# 随行资产(launch 脚本):_pretrained 权重缓存整搬 + champion/decoder 权重
+# 以各自 (arch.py, train.py) 新 digest 入缓存(train_seconds=0,档位训练
+# 继续压 tier 10 精度);promotion/ 晋级历史;experience.jsonl 经验台账
+# (147 行,含 41 条 train-timeout 死因证据 —— 修复后这些证据教搜索识别
+# "被评测器杀"和"被自己杀"的区别)。recipe 维持 e5s 全栈。

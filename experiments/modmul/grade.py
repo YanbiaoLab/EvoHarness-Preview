@@ -78,6 +78,14 @@ LOAD_ALLOWANCE_S = 240.0                  # load() 官方单独计量，这里�
 # and still stops a runaway at half an hour.
 INFERENCE_KILL_FACTOR = 6.0
 TRAIN_SLACK_S = 240.0                     # 候选无视自身预算时的硬 kill 余量
+# 冻结余量:计时评测持锁期间训练进程被 SIGSTOP,train.py 检测到间隙后顺延
+# 自己的 deadline —— 但外层沙箱的 kill 时钟原本不知道冻结这回事。r14 里
+# R2 计时评测(tier 10 会跑了)动辄 500-1300 秒,任何与之重叠的 R0 训练
+# 被冻超过 240 秒的余量,解冻后必然撞上外层 kill:112 个已评分候选里
+# 41 个死于 "train-timeout ... killed at 720s",包括 ROUNDS 3->2 全部
+# 六次尝试 —— 尸检确认死时连一次保存都没完成(train_state 还是继承值)。
+# 内层 deadline 管真实训练时长,外层只防真死锁,余量给足。
+TRAIN_FREEZE_ALLOWANCE_S = 3600.0
 MAX_FEEDBACK_ITEMS_PER_TIER = 20          # 逐题反馈体积上限（报告要进 run.db）
 
 # 扰动闸：只对"强到值得怀疑"的候选跑。弱候选塌不塌没有信息量,而且 tier 1 的
@@ -627,13 +635,15 @@ def _run_training(
     result = Sandbox().run(
         [sys.executable, str(runner), str(model_dir)],
         workdir=model_dir,
-        timeout_s=seconds + TRAIN_SLACK_S,
+        timeout_s=seconds + TRAIN_SLACK_S + TRAIN_FREEZE_ALLOWANCE_S,
         env=_subprocess_env({"MODMUL_TRAIN_SECONDS": str(int(seconds))}),
     )
     if result.timed_out:
         return (
             f"train-timeout: ignored the {seconds:.0f}s budget and was killed "
-            f"at {seconds + TRAIN_SLACK_S:.0f}s"
+            f"at {seconds + TRAIN_SLACK_S + TRAIN_FREEZE_ALLOWANCE_S:.0f}s "
+            "(the kill line already includes the freeze allowance, so this is "
+            "a genuine hang or runaway, not a frozen trainer)"
         )
     if result.return_code != 0:
         tail = "\n".join(result.stderr.strip().splitlines()[-6:])

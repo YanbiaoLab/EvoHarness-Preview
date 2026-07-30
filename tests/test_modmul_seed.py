@@ -22,7 +22,7 @@ torch = pytest.importorskip("torch")
 from modmul.grade import BENCH_DIR, check_submission
 
 SEEDS = Path(__file__).resolve().parents[1] / "experiments" / "modmul" / "seeds"
-SEED_NAMES = ("limb_horner", "horner_cell", "serial_ar")
+SEED_NAMES = ("champion_r14", "limb_horner", "decoder_r14")
 GENOME_FILES = ("model.py", "arch.py", "train.py")
 
 
@@ -48,6 +48,10 @@ def shrink(seed_dir: Path, name: str) -> None:
     replaced strings so a drifting seed fails loudly instead of silently
     training at full size inside the test suite."""
     edits = {
+        "champion_r14": [("arch.py", "D_MODEL = 64", "D_MODEL = 16"),
+                         ("arch.py", "HIDDEN = 128", "HIDDEN = 32")],
+        "decoder_r14": [("arch.py", "HIDDEN = 512", "HIDDEN = 32"),
+                        ("train.py", "BATCH = 4096", "BATCH = 64")],
         "limb_horner": [("arch.py", "D_MODEL = 64", "D_MODEL = 16"),
                         ("arch.py", "HIDDEN = 128", "HIDDEN = 32")],
         "horner_cell": [("arch.py", "HIDDEN = 512", "HIDDEN = 32"),

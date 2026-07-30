@@ -108,17 +108,25 @@ a training distribution that covers padded registers. Measured on the
 official 1100 problems, quiet card: tiers 0 through 9 in 195.1s against the
 300s budget — tier 0 fell 121.2 -> 24.8, tier 9 fell 234.9 -> 125.2.
 
-The open wound is PRECISION, and right now training pays again: the
-adaptation that bought the padded band lifted the loss from 6.4e-10 to
-4.0e-5, and per-step error compounds over a ~4,000-step rollout — tier 8
-fell to 75%, tier 9 to 20%. This is a healing-in-progress state, not a
-ceiling: the same lineage has reached the 1e-9 floor before. Mutations
-that focus the training mix where inference actually lives (the padded
-band, the widest tiers) are currently high-value; §7.6's "training stops
-paying" warning applies only once the loss is back at the floor. The
+That precision wound has since HEALED in-run (rung training on the padded
+band brought the loss back near its floor), and the seed you are mutating
+additionally banks tensor-core inference (FP16 autocast + TF32 for the
+dense layers, state re-thresholded to exact binary after every Horner
+step) and a bias-free output head (a randomized cell with a biased head
+emits a constant register that scores accidental accuracy on small
+moduli — the same mechanism the official L3 check randomizes against).
+Measured on this exact seed: tier 0 21.7s, tier 9 63.4s at 0.97, tier 8
+at 1.00 — h90=9 with roughly 195s of headroom left inside the budget.
+
+Everything still to win lives in ONE tier. Tier 10 runs in 336.0s at
+accuracy 0.78, and h90=10 needs BOTH numbers moved: the clock to ~195s
+(1.7x — the whole gap from 880s to 336s came from tensor cores, so the
+next factor needs a different lever), and the accuracy to 0.90. On
+accuracy, training still pays here — the loss is near 2e-6, not at the
+1e-9 floor this lineage has reached before, and tier 10's error budget
+over a ~6,000-step rollout is the tightest in the task. The
 generation-0 metrics of this run are the live baseline — trust them over
-any table above. Tier 10 stands apart: 880.5s measured, so it needs ~8x
-speed before accuracy there counts.
+any table above.
 
 `budget_headroom` in `visible_metrics`: at the top rung it is measured from
 the real per-tier clock (below 1.0 the top tiers cannot be scored however
@@ -152,7 +160,17 @@ Learn from how, rather than rediscovering it:
    itself instead of answering. A mutation identical to its parent is now
    rejected outright.
 
-4. **Four candidates raised RADIX_BITS and lived through every rung — and
+4. **`ROUNDS` 3→2 has never been fairly tested — six attempts were all
+   killed by a harness bug, since fixed.** Every one of them died of
+   `train-timeout` while frozen behind another candidate's timed
+   evaluation; the autopsy shows none survived long enough to save
+   weights once. The step-cost model says one fewer refinement round is
+   worth roughly a third of per-step work (tier 9 ~63s → ~45s, tier 10
+   ~336s → ~230s) at some accuracy price nobody has measured. It is the
+   highest-priority untested hypothesis in this genome. If you try it,
+   change nothing else, so the answer is finally clean.
+
+5. **Four candidates raised RADIX_BITS and lived through every rung — and
    still lost everything above tier 1.** The speed side paid exactly as the
    step model predicts (k=2 halved the diagnostic tier, k=3 cut it to a
    sixth), but accuracy sat at 2-3% after the full training budget. The
@@ -165,7 +183,7 @@ Learn from how, rather than rediscovering it:
    raise the radix, that construction is the actual work; without it you
    are re-running a measured failure.
 
-5. **Four candidates in one generation independently invented padded-width
+6. **Four candidates in one generation independently invented padded-width
    batching** — rounding the register up to the next power of two so a tier
    runs as a few large batches. The idea was right (it is now in the seed).
    All four scored zero on every tier: the weights they inherited had only

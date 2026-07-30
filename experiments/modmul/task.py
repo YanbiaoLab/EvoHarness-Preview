@@ -31,8 +31,16 @@ _HERE = Path(__file__).resolve().parent
 _SEEDS = _HERE / "seeds"
 _GENOME_FILES = ("model.py", "arch.py", "train.py")
 
-PRIMARY_SEED = "limb_horner"
-EXTRA_SEEDS = ("horner_cell", "serial_ar")
+# r15 三岛异种(2026-07-30):
+#   champion_r14 — r14 第 4 代冠军 12b1e74c 的基因组(张量核推理 + 去偏置
+#                  输出头 + wall-clock-safe 训练),f=0.8910 / h90=9
+#   limb_horner  — 愈合后的原种子,保底 + 对照
+#   decoder_r14  — r14 里从 horner_cell 家族长出的最好个体 eb6f2aee
+#                  (double-and-add 解码谱系,f=0.2638),唯一活着的异构血统
+# horner_cell / serial_ar 原始种子退役:前者被其后代 decoder_r14 取代,
+# 后者五轮没有超过 0.07。
+PRIMARY_SEED = "champion_r14"
+EXTRA_SEEDS = ("limb_horner", "decoder_r14")
 
 
 def _workspace(name: str) -> GitWorkspace:
