@@ -84,6 +84,8 @@ TRAIN_SLACK_S = 240.0                     # 候选无视自身预算时的硬 ki
 # 固定余量。外层超时的唯一正当职责是防真死锁,于是按预算翻倍再加三小时:
 # 真死锁最多浪费三小时(从未观测到一例),错杀已三次团灭最短路假设。
 TRAIN_FREEZE_ALLOWANCE_S = 10800.0
+# 权重合并只是几十兆张量的加权平均,一分钟够宽裕;它不上 GPU,也不排计时锁。
+MERGE_TIMEOUT_S = 120.0
 MAX_FEEDBACK_ITEMS_PER_TIER = 20          # 逐题反馈体积上限（报告要进 run.db）
 
 # 扰动闸：只对"强到值得怀疑"的候选跑。弱候选塌不塌没有信息量,而且 tier 1 的
@@ -316,6 +318,63 @@ if trainer is None:
     raise SystemExit("candidate has neither train.py nor model.py")
 if hasattr(trainer, "train"):
     trainer.train(model_dir)
+'''
+
+
+_MERGE_RUNNER = '''\
+"""Harness-side state-merge driver: blend several checkpoints into one.
+
+Runs in a subprocess for the same reason training and inference do -- the
+harness process does not import torch. Reads a plan of {path, weight} entries
+and writes the weighted average into the candidate directory.
+
+Refuses rather than approximates. A blend is only meaningful when every
+source has the same tensors with the same shapes; anything else would
+silently produce a model that is neither parent, and the resulting score
+would be attributed to a merge that never happened.
+"""
+import json
+import sys
+
+import torch
+
+plan = json.loads(sys.argv[1])
+destination = sys.argv[2]
+
+states = [(entry["weight"], torch.load(entry["path"], map_location="cpu"))
+          for entry in plan]
+if not states:
+    raise SystemExit("empty merge plan")
+
+reference = states[0][1]
+for _weight, state in states[1:]:
+    if set(state) != set(reference):
+        raise SystemExit("merge sources disagree on tensor names")
+    for key in reference:
+        if state[key].shape != reference[key].shape:
+            raise SystemExit(f"merge sources disagree on shape of {key}")
+
+total = sum(weight for weight, _ in states)
+if total <= 0:
+    raise SystemExit("merge weights must sum to a positive number")
+
+merged = {}
+for key, template in reference.items():
+    if template.dtype.is_floating_point:
+        acc = None
+        for weight, state in states:
+            term = state[key].to(torch.float64) * (weight / total)
+            acc = term if acc is None else acc + term
+        merged[key] = acc.to(template.dtype)
+    else:
+        # Integer buffers (step counters, masks) do not average. Taking the
+        # heaviest source keeps them self-consistent.
+        heaviest = max(states, key=lambda item: item[0])[1]
+        merged[key] = heaviest[key].clone()
+
+torch.save(merged, destination)
+print(json.dumps({"tensors": len(merged),
+                  "params": int(sum(t.numel() for t in merged.values()))}))
 '''
 
 
@@ -1421,6 +1480,78 @@ def _inherit_from_parent(candidate_dir: Path, ctx: GradeContext) -> dict:
     }
 
 
+def _merge_state_donors(
+    candidate_dir: Path, runner: Path, ctx: GradeContext
+) -> dict:
+    """Replace the inherited weights with a blend of several candidates'.
+
+    The framework picks the donors -- it can see from the per-item pass
+    vectors which candidates fail DIFFERENT problems -- and this decides
+    whether the blend is possible and performs it. Measured on the public
+    benchmark: the run champion missed one top-tier problem, a sibling
+    instance missed three, the two error sets were disjoint, and a 0.75 blend
+    of their weights solved all four while beating both sources on five
+    independently seeded test sets.
+
+    Runs AFTER _inherit_from_parent, never instead of it. Inheritance is what
+    puts a usable optimizer state and step count in place; this overwrites
+    only the weights, and only when every donor is actually available.
+    """
+    donors = list(ctx.state_donors or ())
+    if not donors:
+        return {}
+    if not ctx.lineage_dir:
+        return {"state_merge": "skipped", "state_merge_why": "no-lineage-dir"}
+
+    plan = []
+    for donor in donors:
+        weight = float(donor.get("weight", 0.0))
+        if weight <= 0:
+            continue
+        source = Path(ctx.lineage_dir) / str(donor.get("id", "")) / "weights.pt"
+        if not source.exists():
+            # One absent donor makes the requested blend unavailable. Falling
+            # back to a DIFFERENT blend would report a merge that was never
+            # the one planned, and the fitness would be attributed to it.
+            return {
+                "state_merge": "skipped",
+                "state_merge_why": f"donor-has-no-weights:{donor.get('id','')[:8]}",
+            }
+        plan.append({"path": str(source), "weight": weight})
+    if len(plan) < 2:
+        return {"state_merge": "skipped", "state_merge_why": "fewer-than-two-donors"}
+
+    runner.write_text(_MERGE_RUNNER)
+    destination = candidate_dir / "weights.pt"
+    result = Sandbox().run(
+        [sys.executable, str(runner), json.dumps(plan), str(destination)],
+        workdir=candidate_dir,
+        timeout_s=MERGE_TIMEOUT_S,
+        env=_subprocess_env(),
+    )
+    if result.timed_out or result.return_code != 0:
+        tail = "\n".join(result.stderr.strip().splitlines()[-4:])
+        return {
+            "state_merge": "failed",
+            "state_merge_why": (
+                "timeout" if result.timed_out else f"exit {result.return_code}: {tail[:200]}"
+            ),
+        }
+    # Optimizer moments describe a trajectory that ended at one of the
+    # sources, not at their average. Carrying them into a blended model is
+    # the shape-mismatch family this project has already lost three
+    # generations to; drop them and let any later training rebuild.
+    (candidate_dir / "optimizer.pt").unlink(missing_ok=True)
+    return {
+        "state_merge": "applied",
+        "state_merge_why": "+".join(
+            f"{d.get('id','')[:8]}@{float(d.get('weight', 0.0)):.2f}"
+            for d in donors
+        ),
+        "state_merge_sources": len(plan),
+    }
+
+
 def _cached_train_seconds(candidate_dir: Path, ctx: GradeContext) -> float:
     """How much training the reusable weights for this recipe represent.
 
@@ -1459,7 +1590,10 @@ def _may_skip_training(
 
 
 def _publish_to_lineage(
-    candidate_dir: Path, ctx: GradeContext, train_seconds: float
+    candidate_dir: Path,
+    ctx: GradeContext,
+    train_seconds: float,
+    merged: bool = False,
 ) -> None:
     """Hand these trained weights to children, and to anything that would
     otherwise re-derive them."""
@@ -1470,7 +1604,14 @@ def _publish_to_lineage(
     # Fill the shared entry only when this run trained the recipe FURTHER than
     # whatever is there. Otherwise a candidate cut off at the first rung would
     # overwrite a fully trained entry with its own undertrained weights.
-    if train_seconds > _cached_train_seconds(candidate_dir, ctx):
+    #
+    # A merged candidate is barred from the shared entry outright. Its genome
+    # is byte-identical to the base's, so it hashes to the SAME recipe — and
+    # publishing a blend there would hand these weights to every future
+    # candidate sharing the recipe, none of which asked for a merge. The
+    # per-candidate directory is still written, so the merge's own children
+    # inherit it normally.
+    if not merged and train_seconds > _cached_train_seconds(candidate_dir, ctx):
         targets.append(cached)
     for target in targets:
         target.mkdir(parents=True, exist_ok=True)
@@ -1514,6 +1655,14 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
     # order is load-bearing), before training: inherit the parent's weights
     # so training continues rather than restarting.
     lineage = _inherit_from_parent(candidate_dir, ctx)
+    # A framework-planned state merge, if this candidate is one. It overwrites
+    # the weights inheritance just produced -- which is why it runs after, not
+    # instead of, inheritance: the optimizer state and step count still come
+    # from the lineage.
+    lineage.update(
+        _merge_state_donors(candidate_dir, workdir / "merge_runner.py", ctx)
+    )
+    merged = lineage.get("state_merge") == "applied"
     lineage["training_skipped"] = 0
 
     accuracy: dict[int, float] = {}
@@ -1533,7 +1682,12 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
         # Per rung, not once: the stored weights cover a specific amount of
         # training, so a candidate reaching further than they go still has to
         # pay for the difference.
-        if _may_skip_training(
+        # A merge proposes THIS blend, as it stands. Training would walk the
+        # weights away from the thing being measured, and the blend's whole
+        # economic case is that it costs no training at all -- the win it was
+        # built from took twenty minutes of evaluation against the seven
+        # generations of search that had failed to find it.
+        if merged or _may_skip_training(
             candidate_dir, ctx, train_spent + rung.train_seconds
         ):
             train_spent += rung.train_seconds
@@ -1690,7 +1844,7 @@ def grade_workspace(candidate_dir: Path, ctx: GradeContext) -> Grade:
 
     # Hand the trained weights to this candidate's children. Only done on the
     # success path: a candidate that faulted has nothing worth inheriting.
-    _publish_to_lineage(candidate_dir, ctx, train_spent)
+    _publish_to_lineage(candidate_dir, ctx, train_spent, merged=merged)
 
     # Headroom from MEASUREMENT once the top rung has run all the tiers: the
     # probe's extrapolation exists for candidates that die early, but where
