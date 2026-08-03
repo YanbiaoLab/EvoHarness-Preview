@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem in EvoHarness
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for reporting a bug. Remove credentials and sensitive model or
+        dataset content from logs before attaching them.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest command, configuration, or code sample that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: EvoHarness revision
+      description: Commit SHA, tag, or package version.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and relevant provider or runtime.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste a minimal, redacted traceback or artifact excerpt.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: I removed API keys, credentials, and private data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

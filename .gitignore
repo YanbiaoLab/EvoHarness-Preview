@@ -1,16 +1,35 @@
+# Secrets and local configuration
 .env
 .env.*
-docs
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
 .venv/
+venv/
+
+# JavaScript
+node_modules/
+
+# Editors and operating systems
 .DS_Store
 .idea/
-.pytest_cache/
+
+# Local experiments and generated artifacts
 tmp/
 results/
-third_party
-__pycache__/
-*.egg-info/
-node_modules/
+third_party/
+docs/
 
 # torch.distributed.rpc jit writes these into whatever directory it is
 # pointed at; a training run inside a seed dir got one committed (0366c56).

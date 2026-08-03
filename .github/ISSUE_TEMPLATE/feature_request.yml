@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a focused improvement to EvoHarness
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete limitation or user need should be addressed?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful behavior and its public contract.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and validation
+      description: How would we test correctness or measure the claimed improvement?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or simpler approaches have you considered?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue or pull request.
+          required: true
+        - label: I can distinguish the requested behavior from any longer-term design.
+          required: true

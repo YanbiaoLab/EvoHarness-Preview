@@ -693,7 +693,7 @@ def test_inheritance_walks_past_an_ancestor_that_published_nothing(tmp_path):
     -- which was scoring 0 for an unrelated reason -- so the entire island
     then descended from noise.
     """
-    import torch
+    torch = pytest.importorskip("torch")
 
     lineage = tmp_path / "lineage"
     grandparent = lineage / "gp"

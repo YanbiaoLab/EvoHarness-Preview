@@ -1,4 +1,4 @@
-"""Layering rules for the framework and independent experiments.
+"""Layering rules for the framework and experiment packages.
 
 evoharness/ is the framework main package; modmul/tasks/recipes/experiments
 are consumer packages that import DOWNWARD only. Within the framework:
@@ -20,6 +20,12 @@ FORBIDDEN = {
     ),
     # 引擎永不 import 任务/装配层(依赖方向只准从消费者指向框架)
     "evoharness/evocore": ("modmul", "tasks", "recipes", "evoharness.evoplus"),
+}
+
+# Comparison adapters may build directly on the domain they compare against.
+# Keep the exception explicit so ordinary experiment packages remain isolated.
+ALLOWED_EXPERIMENT_DEPS = {
+    "hyperagents_imo": {"imo_proof"},
 }
 
 
@@ -44,7 +50,12 @@ def test_experiment_packages_do_not_import_each_other():
     )
 
     for package in packages:
-        forbidden = {f"experiments.{name}" for name in packages if name != package}
+        allowed = ALLOWED_EXPERIMENT_DEPS.get(package, set())
+        forbidden = {
+            f"experiments.{name}"
+            for name in packages
+            if name != package and name not in allowed
+        }
         for path in (experiments / package).rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imported = set()

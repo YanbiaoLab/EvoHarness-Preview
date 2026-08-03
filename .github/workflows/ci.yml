@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          version: "0.12.1"
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --locked --extra dev
+
+      - name: Run test suite
+        run: uv run pytest -m "not slow" -q
+
+  package:
+    name: Build package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          version: "0.12.1"
+          enable-cache: true
+
+      - name: Build source and wheel distributions
+        run: uv build

@@ -1,24 +1,54 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "evoharness"
 version = "0.1.0"
-description = "Self-hosted evolutionary harness engine (evocore) with guardrails (evoguard), research extensions (evoplus) and the eval-side SDK (evoserve)"
+description = "Verifier-grounded evolutionary search for code and agent workspaces"
+readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = [
+    "agents",
+    "evolutionary-search",
+    "llm",
+    "program-synthesis",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "litellm>=1.92.0",
     "numpy>=1.24",
-    "pyrefly>=0.60.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/YanbiaoLab/EvoHarness-Preview"
+Issues = "https://github.com/YanbiaoLab/EvoHarness-Preview/issues"
+Repository = "https://github.com/YanbiaoLab/EvoHarness-Preview.git"
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+    "pyrefly>=0.60.0",
+    "pytest>=8",
+]
 
 [tool.setuptools.packages.find]
-include = ["evoharness*", "modmul*"]
+include = ["evoharness*"]
+
+[tool.setuptools.package-data]
+"evoharness.evoweb" = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
