@@ -1,19 +1,25 @@
-"""Inference contract for the width-generic Horner family.
+"""CUDA-graph inference for the width-generic Horner family.
 
-The fixed encoder schedule feeds raw operand digits through trained recurrent
-transitions. No modular arithmetic, comparison, or answer correction is
-performed outside the learned cell.
+The fixed encoder schedule feeds raw operand digits through the trained
+recurrent transition. No modular arithmetic, operand reduction, comparison
+against the modulus, or answer correction is performed outside the network.
 
-CUDA inference uses the inherited FP16 cell through a shape-specific CUDA
-graph containing one complete learned Horner transition. The graph is replayed
-for successive raw digits, retaining all three trained refinement rounds and
-binary state feedback while removing thousands of Python-dispatched kernel
-launches.
+On CUDA, the cell and recurrent registers are stored in FP16 and one complete
+learned Horner transition is captured as a CUDA graph. Replaying that graph
+for successive raw input digits removes Python dispatch from the expensive
+cell execution while preserving all three refinement rounds and exact binary
+feedback at every recurrent boundary.
 
-Width buckets are partitioned into moderate length-local groups. Groups of up
-to sixteen retain substantially more GPU parallelism than the earlier
-eight-row graph schedule while still limiting zero-prefix Horner work and graph
-memory. CPU and MPS retain ordinary eager FP32 execution.
+The architecture's training-mode branch is selected intentionally during
+inference. HornerCell contains no dropout or normalization whose numerical
+behavior depends on this flag; it only bypasses arch.py's experimental
+cross-stream scan scheduler. The established serial bidirectional scan can be
+captured reliably as one graph.
+
+Within each register-width bucket, operands are commutatively oriented and
+partitioned into length-local groups. This avoids charging every item for the
+two independently longest operand streams while retaining enough parallel
+work for tensor-core kernels.
 """
 
 from __future__ import annotations
@@ -31,33 +37,29 @@ MANIFEST = {
     "output_base": 2,
     "framework": "pytorch",
     "model_description": (
-        "Width-generic modulus-conditioned Horner cell (~100K parameters): "
-        "per-bit local windows of state, multiplicand, and modulus plus a "
-        "learned bidirectional associative scan resolve carries at arbitrary "
-        "register widths. Two shared-weight passes consume raw operands: the "
-        "first reduces one operand with multiplicand one and the second "
-        "streams the other raw operand with the learned first-pass residue as "
-        "multiplicand. Commutative operand pairs are oriented so the longer "
-        "encoding is consistently assigned to the first pass. Register-width "
-        "buckets are partitioned into length-local groups of up to sixteen, "
-        "limiting learned zero-prefix transitions while retaining broad GPU "
-        "parallelism. Prime registers are bucketed to multiples of 64 with at "
-        "least four headroom bits, a training-covered padding band. CUDA "
-        "stores the inherited learned cell and recurrent state in FP16 and "
-        "replays a captured graph of one complete learned transition for "
-        "successive raw digits. This reduces dispatch overhead without "
-        "changing the transition, its three refinement rounds, or binary "
-        "state feedback. The learned state is emitted directly as base-2 "
-        "digits. Primes wider than MAX_WIDTH are deliberately declined to "
-        "avoid spending the shared scored clock on the unscored diagnostic."
+        "Width-generic modulus-conditioned Horner cell (~100K parameters). "
+        "Per-bit local windows and a learned bidirectional associative scan "
+        "propagate carry and modular-reduction information at arbitrary "
+        "register widths. Two shared-weight passes consume only raw operand "
+        "digits: the first produces a learned residue and the second uses "
+        "that residue as its multiplicand. On CUDA, the inherited cell and "
+        "recurrent registers use FP16, and one complete three-round learned "
+        "transition is captured as a CUDA graph and replayed for successive "
+        "input digits. Every replay thresholds the learned logits back to a "
+        "binary recurrent state. Commutative operand orientation and "
+        "length-local groups of at most twenty reduce zero-prefix work while "
+        "retaining tensor-core parallelism. Register widths are bucketed to "
+        "multiples of 64 with at least four padding bits, matching training. "
+        "Primes wider than the scored 2048-bit range are declined so the "
+        "unscored diagnostic cannot consume the shared inference budget."
     ),
     "training_description": (
         "Trained at evaluation time on exact transition tuples "
-        "s' = (2^k*s + d*x) mod p using a width curriculum through 2048 bits, "
-        "padded-register examples, and power-of-two-adjacent examples. BCE "
-        "loss, AdamW, and fixed seed 0 are used. Exact integer arithmetic is "
-        "used only to synthesize training labels; inference transitions and "
-        "emitted digits are produced by trained parameters."
+        "s' = (2^k*s + d*x) mod p over a progressive 2-to-2112-bit width "
+        "curriculum, including padded-register and power-of-two-adjacent "
+        "strata. Uses BCE, AdamW, deterministic seed 0, and resumable "
+        "checkpoints. Exact integer arithmetic is used only to synthesize "
+        "training labels; inference answers are produced by trained weights."
     ),
 }
 
@@ -72,7 +74,10 @@ class EvolvedModel(ModularMultiplicationModel):
         if self.device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-            torch.set_float32_matmul_precision("high")
+            try:
+                torch.set_float32_matmul_precision("high")
+            except (AttributeError, RuntimeError):
+                pass
 
         self.cell = HornerCell().to(self.device)
         state = torch.load(
@@ -80,16 +85,23 @@ class EvolvedModel(ModularMultiplicationModel):
             map_location=self.device,
         )
         self.cell.load_state_dict(state)
-        if self.compute_dtype == torch.float16:
+
+        if self.device.type == "cuda":
             self.cell.half()
-        self.cell.eval()
+
+        # HornerCell has no dropout or batch normalization. Training mode only
+        # selects arch.py's serial scan path, which is suitable for graph
+        # capture; it does not alter the learned function.
+        self.cell.train()
 
     def max_batch_size(self) -> int:
         return 128
 
+    # -- isolated per-argument preprocessing -------------------------------
+
     @staticmethod
     def _radix_digits(text: str) -> tuple[int, ...]:
-        """Own-argument decimal conversion to MSB-first base-2^k digits."""
+        """Convert this hook's own argument to MSB-first base-2^k digits."""
         value = int(text)
         if value == 0:
             return (0,)
@@ -110,14 +122,23 @@ class EvolvedModel(ModularMultiplicationModel):
     def preprocess_p(self, p: str):
         value = int(p)
         width = max(value.bit_length(), 2)
-        return tuple((value >> i) & 1 for i in range(width)), width
+        bits = tuple((value >> bit) & 1 for bit in range(width))
+        return bits, width
+
+    # -- tensor preparation -------------------------------------------------
 
     @staticmethod
     def _digit_bits(digit: int) -> list[float]:
-        return [float((digit >> i) & 1) for i in range(RADIX_BITS)]
+        return [
+            float((digit >> bit) & 1)
+            for bit in range(RADIX_BITS)
+        ]
 
-    def _pack_digits(self, digit_lists: list[tuple[int, ...]]) -> torch.Tensor:
-        """Left-pad a pass with zero digits to its subgroup-wide length."""
+    def _pack_digits(
+        self,
+        digit_lists: list[tuple[int, ...]],
+    ) -> torch.Tensor:
+        """Left-pad a subgroup with exact Horner no-op zero digits."""
         length = max(len(digits) for digits in digit_lists)
         zero = self._digit_bits(0)
         rows = [
@@ -133,16 +154,12 @@ class EvolvedModel(ModularMultiplicationModel):
 
     @staticmethod
     def _bucket_width(bits: int) -> int:
-        """Next 64-bit register bucket with at least four padding bits.
-
-        The training distribution covers the resulting 4..67-bit padding
-        band, while grouping avoids serial near-singleton width batches.
-        """
+        """Round to a trained 64-bit bucket with at least four headroom bits."""
         return ((bits + 4 + 63) // 64) * 64
 
     @staticmethod
     def _oriented_lengths(item: tuple) -> tuple[int, int]:
-        """Lengths after assigning the longer operand to the first pass."""
+        """Lengths after consistently assigning the longer operand first."""
         a, b, _p = item
         if len(a) >= len(b):
             return len(a), len(b)
@@ -153,33 +170,30 @@ class EvolvedModel(ModularMultiplicationModel):
         indices: list[int],
         inputs,
     ) -> list[list[int]]:
-        """Make groups of at most sixteen with local lengths in both passes.
+        """Partition one width bucket by both oriented operand lengths.
 
-        A monolithic width bucket charges every row for the independently
-        longest first and second operands. Exact-length grouping has the
-        opposite problem: it creates many tiny launches and graph captures.
-
-        Sorting 32-row bands by the longer operand and splitting each band
-        after sorting by the shorter operand bounds both padding dimensions.
-        Sixteen tier-10 rows still expose over thirty thousand bit positions to
-        every dense operator, enough parallel work to amortize graph replay and
-        tensor-core execution. This doubles the useful batch width of the
-        earlier eight-row graph schedule without returning to monolithic
-        zero-prefix work.
+        A whole-tier group pays max(first length) + max(second length) for
+        every row. Exact-length grouping avoids that padding but produces too
+        many small captures. Sorting forty-row bands on the first length, then
+        sorting each band on the second and splitting into groups of twenty,
+        bounds both kinds of padding while leaving substantial GPU occupancy.
         """
         ordered = sorted(
             indices,
             key=lambda index: self._oriented_lengths(inputs[index])[0],
         )
+
         groups: list[list[int]] = []
-        for start in range(0, len(ordered), 32):
-            band = ordered[start : start + 32]
+        for start in range(0, len(ordered), 40):
+            band = ordered[start : start + 40]
             band.sort(
                 key=lambda index: self._oriented_lengths(inputs[index])[1]
             )
-            for offset in range(0, len(band), 16):
-                groups.append(band[offset : offset + 16])
+            for offset in range(0, len(band), 20):
+                groups.append(band[offset : offset + 20])
         return groups
+
+    # -- recurrent execution ------------------------------------------------
 
     @torch.inference_mode()
     def _run_pass_eager(
@@ -188,7 +202,7 @@ class EvolvedModel(ModularMultiplicationModel):
         x_bits: torch.Tensor,
         p_bits: torch.Tensor,
     ) -> torch.Tensor:
-        """Portable eager execution used on CPU and MPS."""
+        """Portable eager path for CPU and MPS."""
         state = torch.zeros_like(p_bits)
         for tick in range(digit_rows.shape[1]):
             logits = self.cell(
@@ -207,18 +221,16 @@ class EvolvedModel(ModularMultiplicationModel):
         second_rows: torch.Tensor,
         p_bits: torch.Tensor,
     ) -> torch.Tensor:
-        """Replay one captured complete learned transition for both passes.
+        """Capture one learned transition and replay it for both raw streams.
 
-        The graph's tensors have fixed addresses and shapes. Before each
-        replay, only the next raw input digit is copied into the static digit
-        slot. The captured graph evaluates the full inherited cell, including
-        all refinement rounds, thresholds its learned logits, and writes the
-        binary result back to the recurrent state.
+        The graph evaluates the complete inherited HornerCell, thresholds its
+        logits, and copies the binary output back into the same static state
+        storage. Thus every replay is one unchanged recurrent transition.
 
-        After pass one, its learned residue is copied into the static
-        multiplicand and the recurrent state is reset. The identical captured
-        transition then consumes pass two. Graph capture therefore changes
-        dispatch only; no learned operation or Horner step is omitted.
+        Only the next isolated raw input digit is copied into the graph's
+        static digit slot between replays. After pass one, its learned state is
+        copied into the static multiplicand; the state register is then reset
+        before pass two.
         """
         static_state = torch.zeros_like(p_bits)
         static_x = torch.zeros_like(p_bits)
@@ -231,12 +243,11 @@ class EvolvedModel(ModularMultiplicationModel):
             device=self.device,
         )
 
-        # Initialize allocator and dense-library workspaces on a side stream.
-        # Restore every recurrent input afterward so synthetic warmup data does
-        # not enter either real pass.
+        # Initialize allocator and dense-library workspaces before capture.
         warmup_stream = torch.cuda.Stream(device=self.device)
         current_stream = torch.cuda.current_stream(self.device)
         warmup_stream.wait_stream(current_stream)
+
         with torch.cuda.stream(warmup_stream):
             for _ in range(3):
                 warmup_logits = self.cell(
@@ -248,8 +259,10 @@ class EvolvedModel(ModularMultiplicationModel):
                 static_state.copy_(
                     (warmup_logits > 0).to(dtype=self.compute_dtype)
                 )
+
         current_stream.wait_stream(warmup_stream)
 
+        # Synthetic warmup state must not enter either real encoder pass.
         static_state.zero_()
         static_x.zero_()
         static_x[:, 0] = 1.0
@@ -271,8 +284,8 @@ class EvolvedModel(ModularMultiplicationModel):
             static_digit.copy_(first_rows[:, tick])
             graph.replay()
 
-        # Clone before resetting state because captured inputs use fixed
-        # storage addresses.
+        # The captured graph requires fixed storage addresses. Preserve the
+        # learned residue before resetting the recurrent register.
         residue = static_state.clone()
         static_x.copy_(residue)
         static_state.zero_()
@@ -284,28 +297,40 @@ class EvolvedModel(ModularMultiplicationModel):
         return static_state.clone()
 
     @torch.inference_mode()
-    def _solve_group(self, batch: list[tuple], width: int) -> list[list[int]]:
+    def _solve_group(
+        self,
+        batch: list[tuple],
+        width: int,
+    ) -> list[list[int]]:
+        """Solve one length-local group at a shared register width."""
         p_bits = torch.zeros(
             len(batch),
             width,
             dtype=self.compute_dtype,
             device=self.device,
         )
+
         for row, (_a, _b, p_enc) in enumerate(batch):
-            p_bits[row, :p_enc[1]] = torch.tensor(
-                p_enc[0],
+            encoded_bits, prime_width = p_enc
+            p_bits[row, :prime_width] = torch.as_tensor(
+                encoded_bits,
                 dtype=self.compute_dtype,
                 device=self.device,
             )
 
-        # Consistent commutative orientation changes padded batch cost from
-        # max(original-a) + max(original-b) to max(longer) + max(shorter).
+        # Modular multiplication is commutative. A consistent orientation
+        # changes batched padding cost from max(a)+max(b) to
+        # max(longer)+max(shorter), without changing the requested function.
         oriented = [
             (a, b) if len(a) >= len(b) else (b, a)
             for a, b, _p in batch
         ]
-        first_rows = self._pack_digits([first for first, _ in oriented])
-        second_rows = self._pack_digits([second for _, second in oriented])
+        first_rows = self._pack_digits(
+            [first for first, _second in oriented]
+        )
+        second_rows = self._pack_digits(
+            [second for _first, second in oriented]
+        )
 
         if self.device.type == "cuda":
             output = self._run_two_passes_cuda_graph(
@@ -319,27 +344,29 @@ class EvolvedModel(ModularMultiplicationModel):
             residue = self._run_pass_eager(first_rows, ones, p_bits)
             output = self._run_pass_eager(second_rows, residue, p_bits)
 
-        bits = output.to(torch.int64).tolist()
-        return [list(reversed(row)) for row in bits]
+        rows = output.to(dtype=torch.int64).cpu().tolist()
+        return [list(reversed(row)) for row in rows]
+
+    # -- public prediction interface ---------------------------------------
 
     def predict_digits(self, a_enc, b_enc, p_enc) -> list[int]:
         return self.predict_digits_batch([(a_enc, b_enc, p_enc)])[0]
 
     @torch.inference_mode()
     def predict_digits_batch(self, inputs) -> list[list[int]]:
-        results: list[list[int]] = [[0]] * len(inputs)
+        results: list[list[int]] = [[0] for _ in inputs]
         width_groups: dict[int, list[int]] = defaultdict(list)
 
         for index, (_a, _b, p_enc) in enumerate(inputs):
-            bits = p_enc[1]
-            if bits <= MAX_WIDTH:
-                width_groups[self._bucket_width(bits)].append(index)
+            prime_width = p_enc[1]
+            if prime_width <= MAX_WIDTH:
+                width_groups[self._bucket_width(prime_width)].append(index)
 
         for width, width_indices in width_groups.items():
             for indices in self._length_local_groups(width_indices, inputs):
                 batch = [inputs[index] for index in indices]
-                digits_batch = self._solve_group(batch, width)
-                for index, digits in zip(indices, digits_batch):
+                solved = self._solve_group(batch, width)
+                for index, digits in zip(indices, solved):
                     results[index] = digits
 
         return results

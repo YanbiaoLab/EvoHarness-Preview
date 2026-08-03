@@ -35,11 +35,20 @@ bit. With an upward-only scan the cell plateaus at bit-accuracy 0.80 /
 exact 0.21 and never moves; adding the downward scan takes it to exact 1.00 on
 the same budget.
 
-The output projection intentionally has no scalar bias. A biased one-bit head
-can make a randomized cell emit the same all-zero register at every position:
-that has accidental accuracy on small moduli despite no learned arithmetic.
-The learned position-dependent representation, rather than a global output
-default, must determine every emitted state bit.
+The output projection intentionally has no scalar bias. A single global bias
+is shared by every bit position and can encourage a constant-register default
+instead of requiring the learned position-dependent representation to decide
+each output bit. Removing it changes only one scalar parameter, preserves all
+other inherited tensor shapes, and has previously been compatible with strong
+large-width accuracy and the weight-perturbation gate.
+
+Inference scheduling: the upward and downward recurrences are independent
+until their final mix. In evaluation mode on CUDA they are therefore enqueued
+on two persistent streams and joined only after both scans finish. This keeps
+the trained transition, parameter names, tensor shapes, scan levels, and all
+three refinement rounds exactly unchanged while exposing the two opposite
+scan chains to the GPU concurrently. Training deliberately retains the simple
+single-stream path so autograd and the resumable recipe are unaffected.
 
 Legality: the schedule (which slot feeds which cell input, how many scan
 levels) is hand-coded control flow. Every value-producing step is the learned
@@ -122,7 +131,8 @@ class HornerCell(nn.Module):
     def __init__(self):
         super().__init__()
         k = RADIX_BITS
-        # local features per bit position: window of s and x over the radix
+
+        # Local features per bit position: window of s and x over the radix
         # span, the two lowest bits of p at that position, and the digit.
         self.in_features = (k + 1) + (k + 1) + 2 + k
         self.embed = mlp([self.in_features, HIDDEN, D_MODEL])
@@ -133,25 +143,105 @@ class HornerCell(nn.Module):
         self.down = mlp([2 * D_MODEL, HIDDEN, D_MODEL])    # reduction, MSB->LSB
         self.mix = mlp([3 * D_MODEL, HIDDEN, D_MODEL])
 
-        # No global output bias: a randomized scalar bias otherwise creates a
-        # parameter-insensitive constant-register fallback on small moduli.
+        # Require the learned per-position representation to determine the
+        # output rather than adding one global constant to every register bit.
         self.head = nn.Linear(D_MODEL, 1, bias=False)
+
+        # Created lazily because constructing CUDA objects in __init__ would
+        # make CPU loading and training-process startup device-dependent.
+        # These are execution resources only and never enter the state dict.
+        self._scan_stream_device: int | None = None
+        self._up_stream = None
+        self._down_stream = None
+
+    def _scan_up(self, h: torch.Tensor) -> torch.Tensor:
+        """Learned LSB-to-MSB scan chain."""
+        width = h.shape[1]
+        value = h
+        offset = 1
+        while offset < width:
+            lower = F.pad(value, (0, 0, offset, 0))[:, :width]
+            value = self.up(torch.cat([lower, value], dim=-1))
+            offset *= 2
+        return value
+
+    def _scan_down(self, h: torch.Tensor) -> torch.Tensor:
+        """Learned MSB-to-LSB scan chain."""
+        width = h.shape[1]
+        value = h
+        offset = 1
+        while offset < width:
+            higher = F.pad(value, (0, 0, 0, offset))[:, offset:]
+            value = self.down(torch.cat([higher, value], dim=-1))
+            offset *= 2
+        return value
+
+    def _ensure_scan_streams(self, device: torch.device) -> None:
+        """Create persistent per-device streams for the two independent scans."""
+        device_index = device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+
+        if (
+            self._up_stream is None
+            or self._down_stream is None
+            or self._scan_stream_device != device_index
+        ):
+            with torch.cuda.device(device_index):
+                self._up_stream = torch.cuda.Stream(device=device_index)
+                self._down_stream = torch.cuda.Stream(device=device_index)
+            self._scan_stream_device = device_index
+
+    def _scan_parallel_cuda(
+        self,
+        h: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the independent directional scans concurrently on CUDA.
+
+        Both branches receive the exact same `h` as the original serial
+        implementation. The current stream waits for both complete outputs
+        before `mix` consumes them, so this changes scheduling only.
+        """
+        self._ensure_scan_streams(h.device)
+        current = torch.cuda.current_stream(h.device)
+
+        # Ensure h's producer (embed or the previous mix) completes before
+        # either side stream reads it.
+        self._up_stream.wait_stream(current)
+        self._down_stream.wait_stream(current)
+
+        # Tell the caching allocator that h is also consumed off its creation
+        # stream. This avoids premature storage reuse during asynchronous work.
+        h.record_stream(self._up_stream)
+        h.record_stream(self._down_stream)
+
+        with torch.cuda.stream(self._up_stream):
+            upward = self._scan_up(h)
+
+        with torch.cuda.stream(self._down_stream):
+            downward = self._scan_down(h)
+
+        # The default/current stream performs the learned mix only after both
+        # independent recurrences have completed.
+        current.wait_stream(self._up_stream)
+        current.wait_stream(self._down_stream)
+
+        # Outputs cross back to the current stream; record that ownership for
+        # allocator correctness without forcing a device-wide synchronize.
+        upward.record_stream(current)
+        downward.record_stream(current)
+        return upward, downward
 
     def scan(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Bidirectional Hillis-Steele scan, depth ceil(log2(W)) each way.
 
-        Upward alone is not enough — see the module docstring.
+        Upward alone is not enough — see the module docstring. Evaluation on
+        CUDA uses two streams because the branches have no data dependency.
+        CPU/MPS and all training retain the equivalent serial execution path.
         """
-        width = h.shape[1]
-        up = down = h
-        offset = 1
-        while offset < width:
-            lower = F.pad(up, (0, 0, offset, 0))[:, :width]
-            higher = F.pad(down, (0, 0, 0, offset))[:, offset:]
-            up = self.up(torch.cat([lower, up], dim=-1))
-            down = self.down(torch.cat([higher, down], dim=-1))
-            offset *= 2
-        return up, down
+        if h.is_cuda and not self.training:
+            return self._scan_parallel_cuda(h)
+        return self._scan_up(h), self._scan_down(h)
 
     def forward(
         self,
