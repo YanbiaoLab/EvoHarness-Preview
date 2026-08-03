@@ -37,6 +37,20 @@ class GradeContext:
     # unrelated reason. Domains that inherit should walk this until they find
     # something, rather than treating the immediate parent as the only source.
     ancestor_ids: tuple[str, ...] = ()
+    # A state merge, planned by the framework and executed by the domain.
+    # Each entry is {"id": candidate id, "weight": float}, weights summing to
+    # one, the base first. The framework picks the ids -- it can see from the
+    # per-item pass vectors which candidates fail DIFFERENT items -- but it
+    # cannot know what the carried state is, so combining is the domain's job.
+    # Empty for every ordinary candidate; a domain that carries no state, or
+    # cannot blend it, ignores this and inherits as usual.
+    #
+    # Two hazards, both learned the expensive way. A merge child's genome is
+    # byte-identical to the base's, so (a) any content-addressed cache keyed
+    # on genome text will hand back the BASE's state unless the merge is
+    # applied after inheritance, and (b) publishing merged state into that
+    # cache poisons every future candidate sharing the recipe.
+    state_donors: tuple[dict, ...] = ()
 
 
 @dataclass

@@ -29,7 +29,9 @@ from .config import PopulationConfig, SearchConfig
 from .interfaces import (
     BudgetLike,
     Grader,
+    IslandHealthPolicy,
     LoopObserver,
+    MergePlanner,
     MutationContext,
     NullBudget,
     OperatorSelector,
@@ -42,8 +44,10 @@ from .operators import PromptBuilder, sample_operator
 from .population import Candidate, PopulationStore
 from .proposer import (
     HybridProposalSelector,
+    Proposal,
     ProposalLane,
     Proposer,
+    ProposeResult,
     SingleShotProposer,
 )
 from .remote import EvalInfraError
@@ -71,6 +75,10 @@ class _ProposalPlan:
     inspirations: tuple[list, list]
     system: str
     user: str
+    # Set only for a state merge, which needs no model call at all: the
+    # genome is the base's, unchanged, and the mutation lives entirely in
+    # which trained state the domain is told to inherit.
+    merge: object | None = None
 
 
 @dataclass
@@ -109,6 +117,8 @@ class SearchLoop:
         proposal_selector: HybridProposalSelector | None = None,
         checkpoint_configs: tuple[object, ...] = (),
         operator_selector: OperatorSelector | None = None,
+        merge_planner: MergePlanner | None = None,
+        island_health: IslandHealthPolicy | None = None,
     ):
         self.cfg = cfg
         self.pop_cfg = pop_cfg
@@ -135,6 +145,8 @@ class SearchLoop:
         )
         self.proposal_selector = proposal_selector
         self.operator_selector = operator_selector
+        self.merge_planner = merge_planner
+        self.island_health = island_health
 
     # -- checkpoint / resume -----------------------------------------------------
 
@@ -146,10 +158,19 @@ class SearchLoop:
             self.parent_selector,
             *self.observers,
             *self.prompt_builder.contributors,
+            self.merge_planner,
+            self.island_health,
         ]
         out: dict[str, object] = {}
         counts: dict[str, int] = {}
+        # An island monitor is registered as an observer AND held directly,
+        # so the same object arrives twice; keying it under two names would
+        # restore it twice and shift every later index of its class.
+        seen: set[int] = set()
         for obj in objs:
+            if obj is None or id(obj) in seen:
+                continue
+            seen.add(id(obj))
             if hasattr(obj, "state") and hasattr(obj, "set_state"):
                 name = obj.__class__.__name__
                 idx = counts.get(name, 0)
@@ -393,6 +414,32 @@ class SearchLoop:
 
         lane = self._proposal_lane(generation)
 
+        # A state merge is offered first because it is the cheapest proposal
+        # the loop can make -- no model call, no training -- and it competes
+        # for the same evaluation slot as everything else. The planner does
+        # its own probability roll, so this consumes one rng draw whether or
+        # not it fires, keeping a seeded run's stream predictable.
+        if self.merge_planner is not None:
+            merge = self.merge_planner.plan(island, self.rng)
+            if merge is not None:
+                self.store.note_attempt(merge.base.id)
+                logger.info(
+                    "plan gen=%d slot=%d island=%d merge base=%s donors=%s",
+                    generation, slot, island.island_idx,
+                    merge.base.id[:8],
+                    [d["id"][:8] for d in merge.state_donors()],
+                )
+                return _ProposalPlan(
+                    lane=lane,
+                    island=island,
+                    parent=merge.base,
+                    operator="merge",
+                    inspirations=([], []),
+                    system="",
+                    user="",
+                    merge=merge,
+                )
+
         failed = (
             self.store.latest_failed() if self.cfg.repair_enabled else None
         )
@@ -505,14 +552,29 @@ class SearchLoop:
         if self.proposal_selector is not None:
             proposal.metadata.setdefault("proposal_mode", lane.name)
 
+        # Build the child genome BEFORE judging it. A single-file proposer
+        # returns code without a workspace, and the gate used to fall back to
+        # the PARENT's workspace — which novelty_text renders in full,
+        # discarding the proposed code entirely. Every single-file proposal
+        # was therefore judged as a copy of its parent and rejected outright
+        # in identity mode: a single-file domain could not produce offspring
+        # at all with the gate on. Multi-file domains ship a child workspace
+        # and never took that path, which is why the run this project spends
+        # its GPU budget on never showed it.
+        child_ws = proposal.workspace or parent.workspace.with_main_text(
+            proposal.code
+        )
+
         embedding = None
-        if self.novelty_gate is not None:
+        # A state merge is a duplicate BY CONSTRUCTION: its genome is the
+        # base's, byte for byte, and the mutation lives in the inherited
+        # state instead. Judging it on program text would reject every merge
+        # the planner ever produced.
+        if self.novelty_gate is not None and plan.merge is None:
             # Judge the whole workspace: a mutation that only touches a
             # non-main file leaves main_text identical (see novelty_text).
             verdict = self.novelty_gate.check(
-                novelty_text(
-                    proposal.workspace or parent.workspace, proposal.code
-                ),
+                novelty_text(child_ws, proposal.code),
                 island,
             )
             if not verdict.accepted:
@@ -534,9 +596,6 @@ class SearchLoop:
                 return None, True
             embedding = verdict.embedding
 
-        child_ws = proposal.workspace or parent.workspace.with_main_text(
-            proposal.code
-        )
         # A seed copy is a database row, not an evaluated candidate: it reuses
         # the original's report and is never handed to the grader, so nothing
         # is ever published under its id. A domain that carries per-candidate
@@ -581,6 +640,38 @@ class SearchLoop:
             metadata=metadata,
         ), False
 
+    @staticmethod
+    def _execute_plan(plan: "_ProposalPlan") -> ProposeResult:
+        """Turn a plan into a proposal, by model call or by merge.
+
+        A merge is assembled here rather than by a Proposer because there is
+        nothing to generate: the child's genome IS the base's, and the only
+        new information is which state the domain should inherit. Charging it
+        an LLM cost of zero is not a formality — it is the whole economic
+        argument for the operator.
+        """
+        if plan.merge is None:
+            return plan.lane.proposer.propose(
+                plan.operator, plan.parent, plan.system, plan.user
+            )
+        merge = plan.merge
+        base = merge.base
+        return ProposeResult(
+            proposal=Proposal(
+                code=base.workspace.main_text,
+                title=merge.title(),
+                summary=merge.summary(),
+                model="(state-merge)",
+                workspace=base.workspace,
+                metadata={
+                    "state_donors": merge.state_donors(),
+                    **(merge.audit() if hasattr(merge, "audit") else {}),
+                },
+            ),
+            llm_cost=0.0,
+            attempts=1,
+        )
+
     def _propose(
         self, generation: int, report: RunReport, slot: int = 0
     ) -> Candidate | None:
@@ -588,9 +679,7 @@ class SearchLoop:
             plan = self._plan_proposal(generation, slot)
             if plan is None:
                 return None
-            result = plan.lane.proposer.propose(
-                plan.operator, plan.parent, plan.system, plan.user
-            )
+            result = self._execute_plan(plan)
             cand, retry = self._absorb_proposal(
                 generation, report, plan, result
             )
@@ -635,11 +724,7 @@ class SearchLoop:
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
-                pool.submit(
-                    plan.lane.proposer.propose,
-                    plan.operator, plan.parent, plan.system, plan.user,
-                )
-                for plan in plans
+                pool.submit(self._execute_plan, plan) for plan in plans
             ]
             results = [f.result() for f in futures]
 
@@ -737,10 +822,45 @@ class SearchLoop:
             })
         self.store.refresh_archive()
         self.store.maybe_migrate(generation, self.rng)
+        self._revive_islands(generation, report)
         best = self.store.best()
         if best is not None:
             report.best_id, report.best_fitness = best.id, best.fitness
         return infra_streak, True
+
+    def _revive_islands(self, generation: int, report: RunReport) -> None:
+        """Give an island that has gone quiet something new to breed from.
+
+        Runs after archive refresh and migration, the only point where the
+        whole generation's results are visible. Every restart is written to
+        history: an injection changes where later candidates came from, and
+        a run that cannot show when it happened cannot be read afterwards.
+        """
+        if self.island_health is None:
+            return
+        for event in self.island_health.maybe_restart(
+            self.store, generation, self.pop_cfg.num_islands
+        ):
+            logger.info(
+                "island %d revived at gen %d: best %.4f vs global %.4f after "
+                "%d quiet generations; seeded %s from island %d",
+                event.island_idx, generation, event.island_best,
+                event.global_best, event.stalled_for,
+                event.donor_id[:8], event.donor_island,
+            )
+            report.history.append(
+                {
+                    "generation": generation,
+                    "status": "island_revived",
+                    "island_idx": event.island_idx,
+                    "donor_island": event.donor_island,
+                    "donor_id": event.donor_id,
+                    "injected_id": event.injected_id,
+                    "island_best": event.island_best,
+                    "global_best": event.global_best,
+                    "stalled_for": event.stalled_for,
+                }
+            )
 
     # -- main loop ---------------------------------------------------------------
 
@@ -854,6 +974,7 @@ class SearchLoop:
             self.store.insert(cand)
             self.store.refresh_archive()
             self.store.maybe_migrate(generation, self.rng)
+            self._revive_islands(generation, report)
             self._log_metrics(generation, cand, report)
 
             reward = 0.0

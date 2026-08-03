@@ -225,6 +225,8 @@ def assemble(
     observers: list | None = None,
     weight_policies: list | None = None,
     operator_selector: object | None = None,
+    merge_planner: object | None = None,
+    island_health: object | None = None,
 ) -> SearchLoop:
     """One canonical wiring; recipes differ only in the plugin lists.
 
@@ -277,6 +279,22 @@ def assemble(
             f"{item.__class__.__module__}.{item.__class__.__qualname__}"
             for item in weight_policies
         ],
+        # Both change which candidates exist, not merely how they are
+        # ranked, so a run that used them is not comparable to one that did
+        # not. Naming them in the fingerprint is what makes the two runs
+        # distinguishable after the fact.
+        "merge_planner": (
+            f"{merge_planner.__class__.__module__}."
+            f"{merge_planner.__class__.__qualname__}"
+            if merge_planner is not None
+            else None
+        ),
+        "island_health": (
+            f"{island_health.__class__.__module__}."
+            f"{island_health.__class__.__qualname__}"
+            if island_health is not None
+            else None
+        ),
     }
     ctx.extras["assembly_fingerprint"] = assembly_fingerprint
     prompt_builder = PromptBuilder(
@@ -332,4 +350,6 @@ def assemble(
             assembly_fingerprint,
         ),
         operator_selector=operator_selector,
+        merge_planner=merge_planner,
+        island_health=island_health,
     )

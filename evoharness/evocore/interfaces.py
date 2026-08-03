@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from .population import Candidate, PopulationStore
+    from .population import Candidate, IslandView, PopulationStore
     from .workspace import Workspace
 
 
@@ -87,6 +87,46 @@ class OperatorSelector(Protocol):
     config probabilities when none is supplied."""
 
     def sample_operator(self, has_inspirations: bool, rng: object) -> str: ...
+
+
+@runtime_checkable
+class MergePlanner(Protocol):
+    """Optional: proposes a merge of two candidates' carried state.
+
+    Implemented by evoplus (StateMergePlanner). Returning None means "no
+    merge this time" and the loop plans an ordinary proposal instead. A merge
+    costs no model call: the returned plan is turned into a candidate whose
+    genome is the base's, unchanged, carrying `state_donors` for the domain.
+    """
+
+    def plan(self, island: "IslandView", rng: object) -> "MergePlanLike | None": ...  # noqa: F821
+
+
+@runtime_checkable
+class MergePlanLike(Protocol):
+    """What SearchLoop needs from a merge plan; evoplus owns the rest."""
+
+    @property
+    def base(self) -> "Candidate": ...
+
+    def state_donors(self) -> list[dict]: ...
+
+    def title(self) -> str: ...
+
+    def summary(self) -> str: ...
+
+
+@runtime_checkable
+class IslandHealthPolicy(Protocol):
+    """Optional: revives islands that have stopped contributing.
+
+    Called once per generation after archive refresh and migration, which is
+    the only point at which the generation's results are all visible.
+    """
+
+    def maybe_restart(
+        self, store: "PopulationStore", generation: int, num_islands: int
+    ) -> list: ...
 
 
 @runtime_checkable

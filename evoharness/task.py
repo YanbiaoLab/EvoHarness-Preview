@@ -79,6 +79,7 @@ class WorkspaceGradeFnGrader:
             ),
             ancestor_ids=tuple(cand.metadata.get("lineage_ancestors", ())),
             lineage_dir=self.lineage_dir,
+            state_donors=tuple(cand.metadata.get("state_donors", ())),
         )
         started = time.monotonic()
         try:

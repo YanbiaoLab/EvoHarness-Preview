@@ -29,12 +29,20 @@ from .feedback import (
     ItemResult,
     StructuredFeedback,
 )
+from .islands import IslandHealth, IslandHealthMonitor, IslandRestart
+from .merge import (
+    Complementarity,
+    MergePlan,
+    StateMergePlanner,
+    complementarity,
+)
 from .reflection import MutationReflector
 
 __all__ = [
     "BehaviorSignature",
     "BehavioralNoveltyPolicy",
     "Cheatsheet",
+    "Complementarity",
     "CoverageStats",
     "ExperienceContributor",
     "ExperienceEntry",
@@ -43,12 +51,18 @@ __all__ = [
     "ExperienceStore",
     "FeedbackContributor",
     "HumanDirectiveContributor",
+    "IslandHealth",
+    "IslandHealthMonitor",
+    "IslandRestart",
     "LessonDirectiveContributor",
     "LineageVetoPolicy",
+    "MergePlan",
     "MutationReflector",
     "OperatorBandit",
     "RegressionSoftPenalty",
+    "StateMergePlanner",
     "append_directive",
+    "complementarity",
     "ItemResult",
     "SignatureRecorder",
     "StaticBriefContributor",

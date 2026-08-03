@@ -25,11 +25,12 @@ from experiments.run_evolution import main as run_evolution
 
 def test_registry_covers_experiment_matrix():
     assert set(recipes.REGISTRY) == {
-        "b0", "e0", "e1", "e2", "e3g", "e3r", "e4a", "e5s",
+        "b0", "e0", "e1", "e2", "e3g", "e3r", "e4a", "e5s", "e6p",
     }
     assert "retriev" in recipes.get_recipe("E3R").DESCRIPTION
     assert "negative experience" in recipes.get_recipe("e4a").DESCRIPTION
     assert "scratchpad" in recipes.get_recipe("e5s").DESCRIPTION
+    assert "merging" in recipes.get_recipe("e6p").DESCRIPTION
     with pytest.raises(ValueError, match="unknown recipe"):
         recipes.get_recipe("e99")
 
@@ -490,3 +491,29 @@ def test_e5s_full_stack_builds_and_runs(tmp_path):
     assert report.generations_completed == 2
     # The evidence buffer recorded the run (mechanics beneath the stack).
     assert (tmp_path / "e5s" / "experience.jsonl").exists()
+
+
+def test_e6p_mounts_the_population_mechanisms(tmp_path):
+    task = get_task("demo_counter")
+    ctx = _ctx(tmp_path / "e6p", task, generations=2)
+    loop = recipes.get_recipe("e6p").build(ctx)
+
+    assert loop.merge_planner is ctx.extras["merge_planner"]
+    assert loop.island_health is ctx.extras["island_health"]
+    # Both change which candidates exist, so a run that used them must be
+    # distinguishable from one that did not after the fact.
+    fingerprint = ctx.extras["assembly_fingerprint"]
+    assert "StateMergePlanner" in fingerprint["merge_planner"]
+    assert "IslandHealthMonitor" in fingerprint["island_health"]
+
+    report = loop.run(task.initial_code)
+    assert report.generations_completed == 2
+
+
+def test_e5s_leaves_the_population_mechanisms_off(tmp_path):
+    """The baseline this arm is compared against must stay untouched."""
+    task = get_task("demo_counter")
+    ctx = _ctx(tmp_path / "e5s_off", task, generations=1)
+    loop = recipes.get_recipe("e5s").build(ctx)
+    assert loop.merge_planner is None and loop.island_health is None
+    assert ctx.extras["assembly_fingerprint"]["merge_planner"] is None
