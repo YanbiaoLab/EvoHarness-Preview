@@ -1,5 +1,10 @@
 # AgentSessionProposer 详细实现计划
 
+> 状态：**已落地**（核心链 2026-07-20 进代码：GitWorkspace、结构化工具调用、
+> 会话持久化、transcript、preflight 双跑、hybrid 通道；modmul r12–r15 与 IMO
+> 生产在用）。本文保留为设计依据。仍开的验收：tools=[] 消融臂 vs 工具型
+> Agent 的 DOA 对照实验（docs/EvoHarness.md P1.1）；跨进程会话恢复未做
+> （审计报告 7.3）。原始状态行如下。
 > 状态：Draft v3（2026-07-16，吸收 Claude Code Agent Loop 架构研究）  
 > 对应：`docs/EvoHarness.md` P1.1、`todo/strategy_roadmap.md` WS-3 M3  
 > 目标：用可审计、可预算、厂商无关的 Agent 工具循环取代单发盲重采，降低结构候选

@@ -1,5 +1,12 @@
 # Rejected-Edit / Experience Buffer 设计 v2
 
+> ✅ **已全线落地并有生产实测**(2026-08-04 复核):清单 1–10 完成(2026-07-24),
+> 证据签名/趋同聚类/e4a/e5s 入册(commit 49f2241/3de402b),modmul r14–r15
+> 全栈在用。实测:**死路重复购买 8/16(r12 第 1 代)→ 0/16(r15 第 1 代)**,
+> CUDA graphs 胜利经验跨轮次重启自主复活两次(docs/EvoHarness.md 证据 E-deadend)。
+> 仍开:代内并发盲区(16 提案互不见死)、任务级与轮次级经验合流、检索语义化
+> (EvoHarness.md P2.3)。本文保留为设计依据。
+
 2026-07-24 修订。v1 的缺陷(用户指正):把机械记录当成了设计主体,而两个
 参照系的核心价值在**评测后的 LLM 归因**——SkillOpt 的 reflect 步骤、Shinka
 的 MetaSummarizer 都是让 LLM 读结果写教训,机械台账只是它们的证据底座。

@@ -1,5 +1,9 @@
 # ScorableTask + IMO Proof 主计划
 
+> 状态：**主体完成**（2026-08-04 复核）：ScorableTask / WorkspaceGradeFnGrader
+> 入口已落地，IMO 域已迁至新入口且离线全绿（2026-07-20），modmul 亦经
+> WorkspaceGradeFn 路径生产运行 r12–r15。仍开：DryRunReport、ScoreContract v0
+> （docs/EvoHarness.md §4 CD-0B/C）。原始状态行如下。
 > 状态：执行中（2026-07-20）  
 > 产品边界：用户提供 `grade_func + seed_agent`；EvoHarness 负责候选复制、Agent 修改、
 > 工作区恢复、执行评分、失败归类、选择、归档和 transcript。  

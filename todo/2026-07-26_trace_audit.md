@@ -1,5 +1,10 @@
 # 运行轨迹审计:框架缺陷清单(2026-07-26)
 
+> **历史证据文档**(2026-08-04 标注):所列缺陷已在 07-26 至 08-03 间陆续
+> 修复(算子可见性、novelty 挂载、预算记账、超时挂死等);同方法后续又
+> 捕获扰动闸误杀、外层冻结互杀、pgrep 转义陷阱、新颖性闸判父代等缺陷。
+> 方法论沉淀在 scripts/audit.py 与"活性审计"纪律里。数字与推理保留原样。
+
 对象:`results/e5s_r2`(lessons+scratchpad,15 代)、`results/e3r_r2`
 (retrieval 基线,13 代)、`results/e5s_s0`、`results/imo_multi_island`。
 证据来自 `run.db` / `metrics.jsonl` / `experience.jsonl` /
