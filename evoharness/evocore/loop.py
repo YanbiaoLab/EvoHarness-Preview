@@ -52,7 +52,7 @@ from .proposer import (
 )
 from .remote import EvalInfraError
 from .routing import ModelRouter
-from .selection import InspirationSelector, ParentSelector
+from .selection import InspirationDraw, InspirationSelector, ParentSelector
 from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class _ProposalPlan:
     island: object
     parent: Candidate
     operator: str
-    inspirations: tuple[list, list]
+    inspirations: InspirationDraw
     system: str
     user: str
     # Set only for a state merge, which needs no model call at all: the
@@ -434,7 +434,7 @@ class SearchLoop:
                     island=island,
                     parent=merge.base,
                     operator="merge",
-                    inspirations=([], []),
+                    inspirations=InspirationDraw(),
                     system="",
                     user="",
                     merge=merge,
@@ -448,7 +448,7 @@ class SearchLoop:
         if failed is not None:
             operator = "repair"
             parent = failed
-            inspirations: tuple[list, list] = ([], [])
+            inspirations = InspirationDraw()
             self.store.mark_repair_attempted(failed.id)
             system, user = lane.prompt_builder.build_repair(parent)
         else:
@@ -463,7 +463,7 @@ class SearchLoop:
             inspirations = self.inspiration_selector.sample(
                 parent, self.store, self.rng
             )
-            has_insp = bool(inspirations[0] or inspirations[1])
+            has_insp = bool(inspirations.archive or inspirations.top_k)
             if self.operator_selector is not None:
                 operator = self.operator_selector.sample_operator(
                     has_insp, self.rng
@@ -474,17 +474,14 @@ class SearchLoop:
                 )
             ctx = MutationContext(
                 parent=parent,
-                archive_inspirations=inspirations[0],
-                top_k_inspirations=inspirations[1],
+                archive_inspirations=inspirations.archive,
+                top_k_inspirations=inspirations.top_k,
+                inspiration_notes=inspirations.notes,
                 operator=operator,
                 generation=generation,
             )
             system, user = lane.prompt_builder.build(ctx)
 
-        # Run modmul_r7 drew the same parent 15 times out of 15 and nothing
-        # in the log said so — the concentration had to be reconstructed
-        # from the database afterwards. Record the choice as it is made, so
-        # the next run can be checked instead of guessed at.
         logger.info(
             "plan gen=%d slot=%d island=%d parent=%s children=%d op=%s",
             generation, slot, island.island_idx, parent.id[:8],
@@ -634,7 +631,7 @@ class SearchLoop:
             change_summary=proposal.summary,
             model_name=proposal.model,
             inspiration_ids=[
-                c.id for c in inspirations[0] + inspirations[1]
+                c.id for c in inspirations.all
             ],
             embedding=embedding,
             metadata=metadata,

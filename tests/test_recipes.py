@@ -505,6 +505,7 @@ def test_e6p_mounts_the_population_mechanisms(tmp_path):
     fingerprint = ctx.extras["assembly_fingerprint"]
     assert "StateMergePlanner" in fingerprint["merge_planner"]
     assert "IslandHealthMonitor" in fingerprint["island_health"]
+    assert "ComplementaryInspiration" in fingerprint["inspiration_policy"]
 
     report = loop.run(task.initial_code)
     assert report.generations_completed == 2

@@ -219,6 +219,26 @@ def _build_proposer(
     return agent_proposer, None
 
 
+# Which feedback layer a mounted plugin implies. Declared capability is
+# derived from the assembly rather than asserted by hand, so it cannot drift
+# from what was actually mounted; observed capability comes from the
+# CapabilityLedger at runtime, and the manifest reports both side by side.
+_CAPABILITY_MARKERS: dict[str, tuple[str, ...]] = {
+    "structured_feedback": ("FeedbackContributor", "SignatureRecorder"),
+    "behavior_signature": ("SignatureRecorder", "BehavioralNoveltyPolicy"),
+    "experience": ("ExperienceContributor", "ExperienceStore"),
+    "reflection": ("MutationReflector",),
+}
+
+
+def _declared_capabilities(mounted_class_names: set[str]) -> list[str]:
+    declared = ["scalar"]     # every grader produces at least a fitness
+    for capability, markers in _CAPABILITY_MARKERS.items():
+        if any(marker in mounted_class_names for marker in markers):
+            declared.append(capability)
+    return sorted(declared)
+
+
 def assemble(
     ctx: RecipeContext,
     contributors: list | None = None,
@@ -227,6 +247,7 @@ def assemble(
     operator_selector: object | None = None,
     merge_planner: object | None = None,
     island_health: object | None = None,
+    inspiration_policy: object | None = None,
 ) -> SearchLoop:
     """One canonical wiring; recipes differ only in the plugin lists.
 
@@ -251,6 +272,15 @@ def assemble(
     weight_policies = list(weight_policies or [])
     weight_policies.append(LineageVetoPolicy(book, store))
     ctx.extras["directive_book"] = book
+
+    # Observed-capability ledger: always mounted, like the HITL channel --
+    # observability, not an ablation variable. Appended LAST below so every
+    # recipe observer (signature recorders above all) has already run when
+    # it looks at the candidate.
+    from evoharness.evoplus import CapabilityLedger
+
+    capability_ledger = CapabilityLedger()
+    ctx.extras["capability_ledger"] = capability_ledger
     model_router = StaticRouter(ctx.search.llm_models)
     # Upstream's rejection sampling was never actually mounted here: with no
     # gate, candidates carried no embeddings, novelty_rejections was pinned
@@ -295,8 +325,19 @@ def assemble(
             if island_health is not None
             else None
         ),
+        "inspiration_policy": (
+            f"{inspiration_policy.__class__.__module__}."
+            f"{inspiration_policy.__class__.__qualname__}"
+            if inspiration_policy is not None
+            else None
+        ),
     }
     ctx.extras["assembly_fingerprint"] = assembly_fingerprint
+    mounted_names = {
+        item.__class__.__qualname__
+        for item in [*contributors, *(observers or []), *weight_policies]
+    }
+    ctx.extras["capabilities_declared"] = _declared_capabilities(mounted_names)
     prompt_builder = PromptBuilder(
         ctx.search.task_sys_msg,
         language=ctx.search.language,
@@ -335,10 +376,12 @@ def assemble(
         llm=ctx.llm,
         prompt_builder=prompt_builder,
         parent_selector=make_parent_selector(ctx.population, weight_policies),
-        inspiration_selector=InspirationSelector(ctx.population),
+        inspiration_selector=InspirationSelector(
+            ctx.population, policy=inspiration_policy
+        ),
         model_router=model_router,
         novelty_gate=novelty_gate,
-        observers=observers or [],
+        observers=[*(observers or []), capability_ledger],
         budget=ctx.budget,
         workdir=ctx.run_dir,
         metric_log=MetricLog(ctx.run_dir / "metrics.jsonl"),

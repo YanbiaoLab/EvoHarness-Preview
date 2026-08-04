@@ -27,6 +27,7 @@ untouched baseline to sit beside.
 from evoharness.evocore import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
+    ComplementaryInspiration,
     ExperienceContributor,
     ExperienceStore,
     FeedbackContributor,
@@ -40,7 +41,10 @@ from .behavior_stack import SignatureRecorder
 from .common import RecipeContext, assemble
 
 NAME = "e6p"
-DESCRIPTION = "experience stack + state merging + island revival"
+DESCRIPTION = (
+    "experience stack + state merging + island revival "
+    "+ complementary inspiration"
+)
 
 
 def build(ctx: RecipeContext) -> SearchLoop:
@@ -69,11 +73,15 @@ def build(ctx: RecipeContext) -> SearchLoop:
         min_generation=ctx.plus.island_min_generation,
         max_restarts_per_island=ctx.plus.island_max_restarts,
     )
+    # Deterministic and rng-free: mounting it does not move the seeded
+    # random stream, so this arm stays replayable against e5s draws.
+    inspiration_policy = ComplementaryInspiration()
     ctx.extras["behavior_policy"] = policy
     ctx.extras["experience_store"] = xstore
     ctx.extras["reflector"] = reflector
     ctx.extras["merge_planner"] = merge_planner
     ctx.extras["island_health"] = island_health
+    ctx.extras["inspiration_policy"] = inspiration_policy
     return assemble(
         ctx,
         contributors=[
@@ -100,4 +108,5 @@ def build(ctx: RecipeContext) -> SearchLoop:
         weight_policies=[policy],
         merge_planner=merge_planner,
         island_health=island_health,
+        inspiration_policy=inspiration_policy,
     )

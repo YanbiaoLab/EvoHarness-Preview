@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-from evoharness.evocore import MetricLog, PopulationConfig, PopulationStore
+from evoharness.evocore import MetricLog, PopulationStore
 
 OPERATOR_COLORS = {
     "seed": "#888780",
@@ -42,7 +42,7 @@ svg{background:#fff;border:1px solid #e2e0da;border-radius:8px}
 
 def load_run(run_dir: Path | str) -> dict:
     run_dir = Path(run_dir)
-    store = PopulationStore(PopulationConfig(), run_dir / "run.db")
+    store = PopulationStore.open_readonly(run_dir / "run.db")
     candidates = store.all_candidates()
     store.close()
     metrics = MetricLog(run_dir / "metrics.jsonl")

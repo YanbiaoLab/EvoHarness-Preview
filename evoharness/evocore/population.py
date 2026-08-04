@@ -260,17 +260,41 @@ class _LockedConnection:
         conn: sqlite3.Connection,
         lock: threading.RLock,
         path: str = ":memory:",
+        readonly: bool = False,
     ):
         self._conn = conn
         self._lock = lock
         self._path = path
+        self._readonly = readonly
 
     def _reconnect(self) -> None:
         try:
             self._conn.close()
         except sqlite3.Error:
             pass
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        # A read-only connection must come back read-only. The plain
+        # reconnect would silently upgrade a viewer to writable -- the
+        # exact breach the read-only mode exists to prevent.
+        if self._readonly:
+            self._conn = sqlite3.connect(
+                f"file:{self._path}?mode=ro", uri=True,
+                check_same_thread=False,
+            )
+        else:
+            self._conn = sqlite3.connect(
+                self._path, check_same_thread=False
+            )
+
+    def _is_transient(self, exc: sqlite3.OperationalError) -> bool:
+        text = str(exc).lower()
+        if self._path == ":memory:":
+            return False
+        if self._readonly and "readonly database" in text:
+            # On a read-only connection this is the contract working, not
+            # a storage blip: retrying would stall a viewer for the whole
+            # backoff schedule and then fail anyway.
+            return False
+        return any(t in text for t in self._TRANSIENT)
 
     def execute(self, *args, **kwargs) -> _Rows:
         with self._lock:
@@ -280,9 +304,7 @@ class _LockedConnection:
                         self._conn.execute(*args, **kwargs).fetchall()
                     )
                 except sqlite3.OperationalError as exc:
-                    text = str(exc).lower()
-                    if (self._path == ":memory:"
-                            or not any(t in text for t in self._TRANSIENT)):
+                    if not self._is_transient(exc):
                         raise
                     time.sleep(pause)
                     self._reconnect()
@@ -304,14 +326,41 @@ class _LockedConnection:
 class PopulationStore:
     """SQLite-backed population with islands, elite archive and migration."""
 
-    def __init__(self, cfg: PopulationConfig, path: Path | str = ":memory:"):
+    def __init__(
+        self,
+        cfg: PopulationConfig,
+        path: Path | str = ":memory:",
+        readonly: bool = False,
+    ):
         self.cfg = cfg
+        self.readonly = readonly
         # Agent tools read candidates from the runtime's worker threads, and
         # sqlite refuses a connection outside its creating thread. One
         # connection guarded by one lock keeps the store single-writer while
         # letting those reads through; the evolution loop itself still
         # mutates only from the main thread.
         self._lock = threading.RLock()
+        if readonly:
+            # mode=ro refuses to create the file, runs no DDL, and makes
+            # sqlite itself reject any write this class fails to guard.
+            self._conn = _LockedConnection(
+                sqlite3.connect(
+                    f"file:{path}?mode=ro", uri=True,
+                    check_same_thread=False,
+                ),
+                self._lock, path=str(path), readonly=True,
+            )
+            cols = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(candidates)")
+            }
+            if "workspace_kind" not in cols:
+                raise RuntimeError(
+                    f"{path} predates the current schema; open it once with "
+                    "its own writer (resuming the run migrates it) before "
+                    "viewing it read-only"
+                )
+            return
         self._conn = _LockedConnection(
             sqlite3.connect(str(path), check_same_thread=False), self._lock,
             path=str(path),
@@ -324,6 +373,27 @@ class PopulationStore:
                 "workspace_kind TEXT NOT NULL DEFAULT 'file'"
             )
         self._conn.commit()
+
+    @classmethod
+    def open_readonly(
+        cls, path: Path | str, cfg: PopulationConfig | None = None
+    ) -> "PopulationStore":
+        """The viewer entry point.
+
+        Every display surface used to instantiate the WRITABLE store, whose
+        constructor runs schema DDL and creates the file when missing -- so
+        merely LOOKING at a run could write to it, and a typo'd path
+        manufactured an empty database where the viewer then reported an
+        empty run instead of an error.
+        """
+        return cls(cfg or PopulationConfig(), path, readonly=True)
+
+    def _assert_writable(self) -> None:
+        if self.readonly:
+            raise PermissionError(
+                "this store was opened read-only (a viewer surface); "
+                "mutations belong to the run's own writer"
+            )
 
     # -- (de)serialization ---------------------------------------------------
 
@@ -406,6 +476,7 @@ class PopulationStore:
         discourage a parent is attempts spent on it, not children that
         happened to survive.
         """
+        self._assert_writable()
         self._conn.execute(
             "UPDATE candidates SET children_count = children_count + 1 "
             "WHERE id = ?",
@@ -416,6 +487,7 @@ class PopulationStore:
     def insert(self, cand: Candidate) -> None:
         """Insert a candidate; assigns an island if island_idx < 0. The
         parent's children_count is charged at plan time, by note_attempt."""
+        self._assert_writable()
         if cand.island_idx < 0:
             cand.island_idx = self._assign_island(cand)
         self._conn.execute(
@@ -453,6 +525,7 @@ class PopulationStore:
         heterogeneous seeding whenever the primary outscores the natives,
         so SearchLoop uses it only to backfill islands that would otherwise
         have no parent."""
+        self._assert_writable()
         inserted = []
         for idx in (
             range(self.cfg.num_islands) if islands is None else islands
@@ -522,6 +595,7 @@ class PopulationStore:
         return self._from_row(rows) if rows else None
 
     def mark_repair_attempted(self, cand_id: str) -> None:
+        self._assert_writable()
         cand = self.get(cand_id)
         if cand is None:
             return
@@ -548,6 +622,7 @@ class PopulationStore:
 
     def update_candidate_flags(self, cand: Candidate) -> None:
         """Persist mutable flags observers may set before/after insertion."""
+        self._assert_writable()
         self._conn.execute(
             "UPDATE candidates SET behavior_signature = ?, behavior_duplicate = ?,"
             " embedding = ?, metadata = ? WHERE id = ?",
@@ -564,6 +639,7 @@ class PopulationStore:
     # -- archive maintenance ([parity]: "fitness" strategy == keep top-N) ----
 
     def refresh_archive(self) -> None:
+        self._assert_writable()
         rows = self._conn.execute(
             f"SELECT {self._COLS} FROM candidates WHERE "
             "json_extract(report, '$.passed') = 1 AND behavior_duplicate = 0"
@@ -589,6 +665,7 @@ class PopulationStore:
         island to a random other island. Excludes generation-0 seeds, failed
         candidates and (with island_elitism) each island's best. Returns the
         number of migrated candidates."""
+        self._assert_writable()
         cfg = self.cfg
         if cfg.migration_rate <= 0 or cfg.num_islands < 2:
             return 0

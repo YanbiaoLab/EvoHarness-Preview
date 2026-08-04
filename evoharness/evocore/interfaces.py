@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -23,6 +23,7 @@ class MutationContext:
     top_k_inspirations: list["Candidate"]
     operator: str
     generation: int
+    inspiration_notes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,21 @@ class OperatorSelector(Protocol):
 
     def sample_operator(self, has_inspirations: bool, rng: object) -> str: ...
 
+
+@runtime_checkable
+class InspirationPolicy(Protocol):
+    """Optional: pick one reference program for WHAT IT KNOWS, not where
+    it ranks.
+
+    Implemented by evoplus (ComplementaryInspiration). Returning None means
+    "no intervention": the selector's fitness-ranked picks stand unchanged.
+    A pick replaces one top-k slot -- never grows the prompt -- and carries
+    a note telling the model why this program is worth reading.
+    """
+
+    def pick(
+        self, parent: "Candidate", pool: list["Candidate"]
+    ) -> "tuple[Candidate, str] | None": ...
 
 @runtime_checkable
 class MergePlanner(Protocol):

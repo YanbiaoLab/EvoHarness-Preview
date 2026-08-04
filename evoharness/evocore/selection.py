@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -166,6 +167,23 @@ def make_parent_selector(
             f"unknown parent_strategy {cfg.parent_strategy!r}; "
             f"expected one of {sorted(_STRATEGIES)}"
         ) from None
+@dataclass
+class InspirationDraw:
+    """One generation's reference programs, plus per-candidate notes.
+
+    `notes` maps a candidate id to one line explaining WHY it was chosen,
+    rendered under its heading in the prompt. Without the note a policy's
+    pick is indistinguishable from an ordinary ranked inspiration, and the
+    whole point -- telling the model what to look for -- is lost.
+    """
+    archive: list[Candidate] = field(default_factory=list)
+    top_k: list[Candidate] = field(default_factory=list)
+    notes: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def all(self) -> list[Candidate]:
+        return self.archive + self.top_k
+
 
 
 class InspirationSelector:
@@ -176,15 +194,16 @@ class InspirationSelector:
     already chosen archive inspirations. Island separation on by default.
     """
 
-    def __init__(self, cfg: PopulationConfig):
+    def __init__(self, cfg: PopulationConfig, policy=None):
         self.cfg = cfg
+        self.policy = policy
 
     def sample(
         self,
         parent: Candidate,
         store: PopulationStore,
         rng: np.random.Generator,
-    ) -> tuple[list[Candidate], list[Candidate]]:
+    ) -> "InspirationDraw":
         cfg = self.cfg
         if cfg.enforce_island_separation:
             view = store.island_view(parent.island_idx)
@@ -228,4 +247,19 @@ class InspirationSelector:
                     top_k.append(c)
                     chosen_ids.add(c.id)
 
-        return chosen, top_k
+        draw = InspirationDraw(archive=chosen, top_k=top_k)
+        if self.policy is None:
+            return draw
+        picked = self.policy.pick(parent, scope)
+        if picked is None:
+            return draw
+        cand, note = picked
+        if cand.id in chosen_ids:
+            # Already among the inspirations (it may well be the archive
+            # best): keep the slots, just say why this one matters.
+            draw.notes[cand.id] = note
+        elif draw.top_k:
+            # Replace, never grow: the prompt budget stays what it was.
+            draw.top_k[-1] = cand
+            draw.notes[cand.id] = note
+        return draw

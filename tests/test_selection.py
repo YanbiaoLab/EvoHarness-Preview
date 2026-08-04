@@ -119,7 +119,8 @@ def test_inspiration_selector_excludes_parent_and_dedups():
         store.insert(c)
     parent = cands[5]  # the best
     rng = np.random.default_rng(1)
-    archive, top_k = InspirationSelector(cfg).sample(parent, store, rng)
+    draw = InspirationSelector(cfg).sample(parent, store, rng)
+    archive, top_k = draw.archive, draw.top_k
     ids = [c.id for c in archive] + [c.id for c in top_k]
     assert parent.id not in ids
     assert len(ids) == len(set(ids))

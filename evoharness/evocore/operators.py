@@ -483,6 +483,7 @@ def _render_candidate(
     *,
     include_code: bool = True,
     max_chars: int = 24_000,
+    note: str | None = None,
 ) -> str:
     """Render one candidate for the prompt.
 
@@ -493,6 +494,12 @@ def _render_candidate(
     a context window as a project grows: bound it.
     """
     parts = [f"### {heading}"]
+
+    if note:
+        # Why THIS program was chosen. Without it a policy's pick reads as
+        # just another ranked reference and the signal is wasted.
+        parts.append(f"Note: {note}")
+
     if c.change_title:
         parts.append(f"Change: {c.change_title} — {c.change_summary}")
     if c.report:
@@ -578,6 +585,7 @@ class PromptBuilder:
                 _render_candidate(
                     c, self.language, f"Reference program (archive) id={c.id}",
                     include_code=code,
+                    note=ctx.inspiration_notes.get(c.id),
                 )
             )
         for c in ctx.top_k_inspirations:
@@ -585,6 +593,7 @@ class PromptBuilder:
                 _render_candidate(
                     c, self.language, f"Reference program (top) id={c.id}",
                     include_code=code,
+                    note=ctx.inspiration_notes.get(c.id),
                 )
             )
         if not sections:

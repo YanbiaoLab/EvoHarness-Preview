@@ -8,7 +8,7 @@ import json
 import time
 from pathlib import Path
 
-from evoharness.evocore import MetricLog, PopulationConfig, PopulationStore
+from evoharness.evocore import MetricLog, PopulationStore
 
 
 def _read_json(path: Path) -> dict:
@@ -16,7 +16,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _best_from_store(run_dir: Path) -> float | None:
-    store = PopulationStore(PopulationConfig(), run_dir / "run.db")
+    store = PopulationStore.open_readonly(run_dir / "run.db")
     best = store.best()
     store.close()
     return best.fitness if best else None
@@ -89,7 +89,7 @@ def _eval_series(run_dir: Path) -> dict[str, list]:
 
 
 def run_detail(run_dir: Path) -> dict:
-    store = PopulationStore(PopulationConfig(), run_dir / "run.db")
+    store = PopulationStore.open_readonly(run_dir / "run.db")
     candidates = store.all_candidates()
     store.close()
     metrics = MetricLog(run_dir / "metrics.jsonl")
@@ -121,7 +121,7 @@ def run_detail(run_dir: Path) -> dict:
 
 
 def candidate_detail(run_dir: Path, cand_id: str) -> dict | None:
-    store = PopulationStore(PopulationConfig(), run_dir / "run.db")
+    store = PopulationStore.open_readonly(run_dir / "run.db")
     cand = store.get(cand_id)
     store.close()
     if cand is None:

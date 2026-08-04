@@ -18,7 +18,7 @@ from pathlib import Path
 
 import recipes
 from evoharness.evocore import LLMClient, make_openai_compat_transport
-from evoharness.evoguard import BudgetMeter, write_manifest
+from evoharness.evoguard import BudgetMeter, finalize_manifest, start_manifest
 from recipes.common import RecipeContext
 from tasks import get_task
 
@@ -135,21 +135,40 @@ def main(argv: list[str] | None = None) -> int:
         runner=task.runner,
     )
     loop = recipe.build(ctx)
+
+    # Identity FIRST, outcome later. A run that dies mid-flight -- storage
+    # stall, sqlite fault, a kill, all three observed on the GPU box -- used
+    # to leave no manifest at all, and every post-mortem began by
+    # reconstructing what the run even was from shell history. The frozen
+    # part is everything a post-mortem needs and nothing the run can change.
+    manifest_path = args.run_dir / "manifest.json"
+    start_manifest(
+        manifest_path,
+        recipe=recipe.NAME,
+        recipe_description=recipe.DESCRIPTION,
+        task=args.task,
+        argv=list(argv) if argv is not None else None,
+        overrides=list(args.overrides),
+        search=search,
+        population=population,
+        plus=plus,
+        proposal=ctx.extras["proposal_manifest"],
+        assembly=ctx.extras["assembly_fingerprint"],
+        capabilities_declared=ctx.extras["capabilities_declared"],
+        models=list(search.llm_models),
+        live=bool(args.live),
+        budget_cap_usd=args.budget_usd,
+        research_brief_sha256=brief_sha,
+    )
+
     report = loop.run(
         task.initial_code,
         extra_seeds=task.extra_seeds or None,
         initial_workspace=task.initial_workspace,
     )
 
-    write_manifest(
-        args.run_dir / "manifest.json",
-        recipe=recipe.NAME,
-        recipe_description=recipe.DESCRIPTION,
-        task=args.task,
-        search=search,
-        population=population,
-        plus=plus,
-        proposal=ctx.extras["proposal_manifest"],
+    finalize_manifest(
+        manifest_path,
         budget={
             "hard_cap_usd": args.budget_usd,
             "spent_usd": (
@@ -161,8 +180,13 @@ def main(argv: list[str] | None = None) -> int:
             "eval_cost_usd": report.total_eval_cost,
         },
         report=report,
-        research_brief_sha256=brief_sha,
         metric_summary=loop.metric_log.summary() if loop.metric_log else {},
+        # Declared next to observed, with the silent channels named: the
+        # explicit-downgrade record. A task that returns bare scalars under
+        # a full-stack recipe is degraded, and now the manifest says so.
+        capabilities_observed=ctx.extras["capability_ledger"].summary(
+            declared=ctx.extras["capabilities_declared"]
+        ),
     )
     print(json.dumps({
         "recipe": recipe.NAME,

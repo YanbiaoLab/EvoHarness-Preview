@@ -9,6 +9,7 @@ from .behavior import (
     SignatureRecorder,
 )
 from .brief import StaticBriefContributor
+from .capability import CapabilityLedger
 from .directives import (
     Directive,
     DirectiveBook,
@@ -29,6 +30,7 @@ from .feedback import (
     ItemResult,
     StructuredFeedback,
 )
+from .inspiration import ComplementaryInspiration
 from .islands import IslandHealth, IslandHealthMonitor, IslandRestart
 from .merge import (
     Complementarity,
@@ -41,8 +43,10 @@ from .reflection import MutationReflector
 __all__ = [
     "BehaviorSignature",
     "BehavioralNoveltyPolicy",
+    "CapabilityLedger",
     "Cheatsheet",
     "Complementarity",
+    "ComplementaryInspiration",
     "CoverageStats",
     "ExperienceContributor",
     "ExperienceEntry",
