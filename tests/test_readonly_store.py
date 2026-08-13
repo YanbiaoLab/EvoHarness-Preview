@@ -8,8 +8,8 @@ database where the viewer then reported an empty run instead of an error.
 
 import pytest
 
-from evoharness.evocore.config import PopulationConfig
-from evoharness.evocore.population import Candidate, EvalReport, PopulationStore
+from evoharness.core.config import PopulationConfig
+from evoharness.core.population import Candidate, EvalReport, PopulationStore
 
 
 def _populate(path):

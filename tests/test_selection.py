@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from conftest import make_candidate
-from evoharness.evocore import (
+from evoharness.core import (
     BeamSelector,
     IslandView,
     InspirationSelector,
@@ -14,7 +14,7 @@ from evoharness.evocore import (
     WeightedSelector,
     make_parent_selector,
 )
-from evoharness.evocore.selection import stable_sigmoid
+from evoharness.core.selection import stable_sigmoid
 
 
 def view(cands):

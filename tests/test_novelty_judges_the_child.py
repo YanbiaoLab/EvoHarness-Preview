@@ -13,7 +13,7 @@ side can regress.
 
 from pathlib import Path
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,
@@ -26,8 +26,8 @@ from evoharness.evocore import (
     StaticRouter,
     make_parent_selector,
 )
-from evoharness.evocore.novelty import NoveltyGate, hashing_embedding, novelty_text
-from evoharness.evocore.workspace import FileWorkspace
+from evoharness.core.novelty import NoveltyGate, hashing_embedding, novelty_text
+from evoharness.core.workspace import FileWorkspace
 
 SINGLE_FILE = """# EDIT-REGION-BEGIN
 x = 0

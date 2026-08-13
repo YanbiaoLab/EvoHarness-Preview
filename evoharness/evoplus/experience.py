@@ -17,9 +17,9 @@ import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from evoharness.evocore.interfaces import MutationContext, RejectionEvent
-from evoharness.evocore.llm import LLMClient
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.interfaces import MutationContext, RejectionEvent
+from evoharness.core.llm import LLMClient
+from evoharness.core.population import Candidate, PopulationStore
 
 
 def _summarize_patch(patch: str, *, max_added: int, max_chars: int) -> str:
@@ -43,10 +43,25 @@ def _summarize_patch(patch: str, *, max_added: int, max_chars: int) -> str:
             per_file.setdefault(current, [0, 0])[1] += 1
     if not per_file:
         return ""
-    desc = "; ".join(f"{p} +{a}/-{d}" for p, (a, d) in per_file.items())
-    if added:
-        desc += " | added: " + " ¶ ".join(added[:max_added])
-    return desc[:max_chars]
+    # Reserve room for the `| added:` tail before spending budget on the file
+    # list. The earlier version concatenated an unbounded file list with the tail
+    # and truncated the whole string, so a patch touching many files pushed the
+    # tail off the cliff — and the tail is the only part that says WHAT changed.
+    # A workspace polluted with stray temp files was enough to consume the entire
+    # budget with filenames, leaving later generations able to see that a change
+    # failed but not what it was. The file list is the low-density part; it is
+    # what should be elided.
+    tail = (" | added: " + " ¶ ".join(added[:max_added])) if added else ""
+    budget = max(40, max_chars - len(tail))
+    parts = [f"{p} +{a}/-{d}" for p, (a, d) in per_file.items()]
+    desc = ""
+    for i, part in enumerate(parts):
+        nxt = f"{desc}; {part}" if desc else part
+        if len(nxt) > budget:
+            desc = (desc or part[:budget]) + f"; +{len(parts) - i} more files"
+            break
+        desc = nxt
+    return (desc + tail)[:max_chars]
 
 
 def describe_change(
@@ -88,6 +103,22 @@ def describe_change(
     return _summarize_patch(
         "\n".join(lines), max_added=max_added, max_chars=max_chars
     )
+
+
+# Substrings that mark an infrastructure failure. The test is whether the reason
+# describes the machine or the candidate: endpoint refusals, protocol errors,
+# timeouts and dropped connections say nothing about the mutation, while
+# "no valid edit produced" or "turn limit reached" are real search signal.
+_INFRA_FAILURE_MARKS = (
+    "backend-error", "backend_error", "protocol_error",
+    "llm query failed", "http error", "connection", "timeout",
+    "insufficient_balance", "forbidden", "overload",
+)
+
+
+def _is_infra_failure(reason: str) -> bool:
+    low = reason.lower()
+    return any(m in low for m in _INFRA_FAILURE_MARKS)
 
 
 def _describe_proposal(
@@ -343,7 +374,7 @@ class ExperienceStore:
             # Diff-derived description first; agent self-report is unreliable.
             change_summary=describe_change(parent, cand) or cand.change_summary,
             fitness_delta=delta,
-            success=cand.report.passed and delta > 0,
+            success=cand.passed and delta > 0,
             generation=cand.generation,
             island_idx=cand.island_idx,
             parent_id=parent.id,
@@ -380,6 +411,15 @@ class ExperienceStore:
                 **common,
             )
         else:
+            # Infrastructure failures are not search signal, so they stay out of
+            # the store. The distinction is load-bearing: "this change did not
+            # help" is about the candidate and later generations should learn it;
+            # "the endpoint did not answer" is about the machine and says nothing.
+            # Mixing them starves the reflector — a run whose store was 70%
+            # endpoint errors distilled to "no measured successful pattern yet"
+            # even though it contained that run's single largest gain.
+            if _is_infra_failure(event.failure_reason or ""):
+                return
             entry = ExperienceEntry(
                 kind="proposal_failed",
                 change_summary=(event.failure_reason or "")[:240],

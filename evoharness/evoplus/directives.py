@@ -13,8 +13,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from evoharness.evocore.interfaces import MutationContext
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.interfaces import MutationContext
+from evoharness.core.population import Candidate, PopulationStore
 
 DIRECTIVE_KINDS = ("guidance", "lineage_veto")
 

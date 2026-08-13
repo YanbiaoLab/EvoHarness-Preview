@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from evoharness.evocore.population import Candidate
+from evoharness.core.population import Candidate
 
 from .feedback import BehaviorSignature
 from .merge import complementarity

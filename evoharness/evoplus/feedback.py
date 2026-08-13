@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from evoharness.evocore.interfaces import MutationContext
+from evoharness.core.interfaces import MutationContext
 
 
 @dataclass(frozen=True)

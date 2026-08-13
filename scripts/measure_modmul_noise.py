@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from evoharness.evoserve import GradeContext  # noqa: E402
+from evoharness.serve import GradeContext  # noqa: E402
 from experiments.modmul.grade import grade_workspace  # noqa: E402
 from experiments.modmul.task import PRIMARY_SEED, _SEEDS  # noqa: E402
 

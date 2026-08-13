@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentSessionLimits,
     AgentSessionProposer,
     AgentSessionResult,
@@ -21,7 +21,7 @@ from evoharness.evocore import (
     ProposalPreflight,
     JsonlEventSinkFactory,
 )
-from evoharness.evocore.workspace import GitWorkspace
+from evoharness.core.workspace import GitWorkspace
 
 
 class MemorySink:

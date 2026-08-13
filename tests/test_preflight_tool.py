@@ -2,7 +2,7 @@
 
 import json
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     LLMToolCall,
     PreflightIssue,
@@ -10,7 +10,7 @@ from evoharness.evocore import (
     PreflightResult,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentToolContext,
     AgentToolRegistry,
     RunPreflightTool,

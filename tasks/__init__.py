@@ -1,4 +1,4 @@
-"""Task registry: name -> TaskBundle factory."""
+"""Task registry: name -> ResolvedTask factory."""
 
 from __future__ import annotations
 
@@ -45,6 +45,14 @@ def _polyglot_py():
     return make_task()
 
 
+def _etp_stage2():
+    _add_experiments_to_path()
+
+    from etp_stage2.task import make_task  # lazy: reads the seed split + datasets
+
+    return make_task()
+
+
 def get_task(name: str):
     from . import demo_counter, s8_multifile
 
@@ -55,6 +63,7 @@ def get_task(name: str):
         "modmul": _modmul,
         "genesis_reward": _genesis_reward,
         "polyglot_py": _polyglot_py,
+        "etp_stage2": _etp_stage2,
     }
     try:
         return registry[name]()

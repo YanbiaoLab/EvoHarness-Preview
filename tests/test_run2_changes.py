@@ -1,7 +1,7 @@
 """Run-2 framework changes: repair throttling + heterogeneous island seeding."""
 
 import recipes
-from evoharness.evocore import LLMClient, PopulationConfig, SearchConfig
+from evoharness.core import LLMClient, PopulationConfig, SearchConfig
 from evoharness.evoplus.config import PlusConfig
 from recipes.common import RecipeContext
 from tasks import get_task
@@ -69,7 +69,7 @@ def test_workspace_extra_seed_keeps_its_kind(tmp_path):
     """Multi-file island seeds: `code` holds a serialized workspace, so
     `workspace_kind` must say so — otherwise the store rebuilds the genome as
     a single file and the seed's side files vanish."""
-    from evoharness.evocore.workspace import GitWorkspace
+    from evoharness.core.workspace import GitWorkspace
 
     task = get_task("s8_multifile")
     loop = recipes.get_recipe("e0").build(
@@ -214,9 +214,9 @@ def test_children_of_a_seed_copy_inherit_from_the_original(tmp_path):
 
 def test_grade_context_redirects_lineage_parent_to_the_original(tmp_path):
     """The redirect has to survive all the way to the grader's context."""
-    from evoharness.evocore.population import Candidate, EvalReport
-    from evoharness.evoserve.grading import GradeContext
-    from evoharness.task import WorkspaceGradeFnGrader
+    from evoharness.core.population import Candidate, EvalReport
+    from evoharness.serve.grading import GradeContext
+    from evoharness.runtime import WorkspaceGradeFnGrader
 
     seen: dict = {}
 

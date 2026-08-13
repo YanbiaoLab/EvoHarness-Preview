@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from evoharness.evoserve import GradeContext
+from evoharness.serve import GradeContext
 
 torch = pytest.importorskip("torch")
 

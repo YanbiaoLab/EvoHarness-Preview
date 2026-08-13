@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.pop("MODMUL_QUICK", None)          # full rungs, not the 20s probe
 os.environ["MODMUL_FORCE_ALL_RUNGS"] = "1"    # score every tier, no early exit
 
-from evoharness.evoserve import GradeContext  # noqa: E402
+from evoharness.serve import GradeContext  # noqa: E402
 from experiments.modmul.grade import SCORED_TIERS, grade_workspace  # noqa: E402
 from experiments.modmul.task import PRIMARY_SEED, _SEEDS  # noqa: E402
 

@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-from evoharness.evocore import MetricLog, PopulationStore
+from evoharness.core import MetricLog, PopulationStore
 
 OPERATOR_COLORS = {
     "seed": "#888780",

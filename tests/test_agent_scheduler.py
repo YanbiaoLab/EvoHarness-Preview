@@ -3,19 +3,19 @@
 import json
 import threading
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     LLMToolCall,
     LLMToolDefinition,
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentToolContext,
     AgentToolRegistry,
     make_tool_result,
 )
-from evoharness.evocore.agent.runtime import _ToolScheduler
+from evoharness.core.agent.runtime import _ToolScheduler
 
 
 class TrackingTool:

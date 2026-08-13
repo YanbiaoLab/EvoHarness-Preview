@@ -4,7 +4,7 @@ Diff vs E1: BehavioralNoveltyPolicy marks behavior duplicates (excluded from
 the archive) and down-weights them in parent selection.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import BehavioralNoveltyPolicy, FeedbackContributor
 
 from .behavior_stack import SignatureRecorder

@@ -6,7 +6,7 @@ import pytest
 
 import recipes
 from conftest import make_candidate
-from evoharness.evocore import LLMClient, MutationContext, PopulationConfig, PopulationStore
+from evoharness.core import LLMClient, MutationContext, PopulationConfig, PopulationStore
 from evoharness.evoplus import (
     DirectiveBook,
     HumanDirectiveContributor,

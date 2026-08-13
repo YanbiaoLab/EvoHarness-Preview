@@ -24,7 +24,7 @@ a separate recipe rather than a flag on E5s: the paired experiment needs an
 untouched baseline to sit beside.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
     ComplementaryInspiration,

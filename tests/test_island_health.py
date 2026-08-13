@@ -3,8 +3,8 @@ deliberately soft intervention that follows."""
 
 import pytest
 
-from evoharness.evocore.config import PopulationConfig
-from evoharness.evocore.population import Candidate, EvalReport, PopulationStore
+from evoharness.core.config import PopulationConfig
+from evoharness.core.population import Candidate, EvalReport, PopulationStore
 from evoharness.evoplus.islands import IslandHealthMonitor
 
 
@@ -193,7 +193,7 @@ def test_the_loop_actually_revives_a_dead_island(tmp_path):
     test while never being reached in a live run -- a day of auditing once
     turned up eight such defects behind a green suite.
     """
-    from evoharness.evocore import (
+    from evoharness.core import (
         InspirationSelector,
         LLMClient,
         LLMResponse,

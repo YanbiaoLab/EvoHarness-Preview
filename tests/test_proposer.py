@@ -2,7 +2,7 @@
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     LLMClient,
     LLMResponse,
@@ -162,7 +162,7 @@ def test_loop_accepts_custom_proposer(tmp_path):
 
 # -- M2.5 multi-file lane --------------------------------------------------------
 
-from evoharness.evocore.workspace import GitWorkspace
+from evoharness.core.workspace import GitWorkspace
 
 GIT_FILE_BLOCKS = (
     "TITLE: add helper\nSUMMARY: split logic\n"

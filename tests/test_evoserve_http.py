@@ -6,8 +6,8 @@ import urllib.request
 
 import pytest
 
-from evoharness.evoserve import EvalService
-from evoharness.evoserve.http import serve
+from evoharness.serve import EvalService
+from evoharness.serve.http import serve
 
 
 def toy_grade(code, ctx):

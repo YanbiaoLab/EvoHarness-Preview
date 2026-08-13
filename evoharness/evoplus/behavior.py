@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.population import Candidate, PopulationStore
 
 from .feedback import BehaviorSignature, StructuredFeedback
 
@@ -112,7 +112,7 @@ class RegressionSoftPenalty:
         parent = store.get(cand.parent_id)
         if parent is None or parent.report is None:
             return
-        improved = cand.report.passed and cand.report.fitness > parent.report.fitness
+        improved = cand.passed and cand.report.fitness > parent.report.fitness
         if improved:
             self.streaks.pop(cand.parent_id, None)
         else:

@@ -7,7 +7,7 @@ sys.path.insert(0, str(_ROOT))
 # (`modmul.grade`), matching pyproject's `include = [..., "modmul*"]`.
 sys.path.insert(1, str(_ROOT / "experiments"))
 
-from evoharness.evocore import Candidate, EvalReport  # noqa: E402
+from evoharness.core import Candidate, EvalReport  # noqa: E402
 
 
 def make_candidate(

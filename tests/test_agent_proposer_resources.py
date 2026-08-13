@@ -2,12 +2,12 @@
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     EventSinkFactory,
     ManagedEventSink,
 )
-from evoharness.evocore.agent.session_proposer import (
+from evoharness.core.agent.session_proposer import (
     _ProposalResourceError,
     _ProposalResources,
 )

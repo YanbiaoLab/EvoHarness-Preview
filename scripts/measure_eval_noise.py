@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from evoharness.evocore.workspace import load_workspace  # noqa: E402
+from evoharness.core.workspace import load_workspace  # noqa: E402
 from experiments.imo_proof.evaluation.engine import (  # noqa: E402
     make_live_evaluator,
 )

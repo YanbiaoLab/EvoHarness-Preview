@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from evoharness.evocore.population import Candidate, IslandView
+from evoharness.core.population import Candidate, IslandView
 
 from .feedback import BehaviorSignature
 

@@ -2,7 +2,7 @@
 # components, each experiment group is a thin assembly file. This module is
 # the shared assembly core; recipes stay ~20 lines and their mutual diffs
 # ARE the ablation definitions.
-"""Shared recipe machinery: RecipeContext, ScorableTask, assemble()."""
+"""Shared recipe machinery: RecipeContext and assemble()."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from evoharness import ScorableTask
-from evoharness.evocore import (
+from evoharness.core import (
     AgentSessionLimits,
     AgentSessionProposer,
     ConversationalAgentBackend,
@@ -36,23 +35,18 @@ from evoharness.evocore import (
     StaticRouter,
     make_parent_selector,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentToolRegistry,
     InspectCandidateTool,
     Runner,
     TokenEstimator,
     make_default_agent_tools,
 )
-from evoharness.evocore.interfaces import BudgetLike, Grader
-from evoharness.evocore.novelty import NoveltyGate, hashing_embedding
-from evoharness.evocore.preflight import PreflightValidator
-from evoharness.evoguard import Sandbox
+from evoharness.core.interfaces import BudgetLike, Grader
+from evoharness.core.novelty import NoveltyGate, hashing_embedding
+from evoharness.core.preflight import PreflightValidator
+from evoharness.guard import Sandbox
 from evoharness.evoplus.config import PlusConfig
-
-
-# Compatibility name for existing task modules.  New tasks should import
-# ScorableTask from evoharness directly.
-TaskBundle = ScorableTask
 
 
 @dataclass
@@ -71,6 +65,7 @@ class RecipeContext:
     token_estimator: TokenEstimator | None = None
     extra_agent_tools: tuple = ()  # task-injected agent tools (appended to defaults)
     extras: dict = field(default_factory=dict)  # recipes may stash handles here
+    frozen_spec_hashes: dict[str, str] = field(default_factory=dict)
 
 
 def _estimate_agent_tokens(messages, tools) -> int:
@@ -265,10 +260,37 @@ def assemble(
     # HITL channel (hitl_design.md): always mounted in every group, inert
     # until a human writes control/directives.json (via the console or by
     # hand). Human guidance is injected ahead of all machine sections.
-    from evoharness.evoplus import DirectiveBook, HumanDirectiveContributor, LineageVetoPolicy
+    from evoharness.evoplus import (
+        DirectiveBook,
+        HumanDirectiveContributor,
+        IslandBriefContributor,
+        LineageVetoPolicy,
+    )
 
     book = DirectiveBook(ctx.run_dir / "control" / "directives.json")
     contributors.insert(0, HumanDirectiveContributor(book))
+    # Per-island directives, mounted the same way: control/island_briefs.json
+    # is absent by default, in which case this is inert and no other task is
+    # affected. When present, islands are separated by task as well as by genome,
+    # so the fitness gradient cannot pull them all onto one slope.
+    contributors.insert(
+        1, IslandBriefContributor(ctx.run_dir / "control" / "island_briefs.json")
+    )
+    # Cost axis, mounted only when the population declares one. The archive
+    # reserves slots per bucket along this axis; without the ledger the model
+    # never learns those cheaper elites exist, so the diversity the archive
+    # preserves stays unreachable from the prompt.
+    if ctx.population.archive_feature_metric:
+        from evoharness.evoplus import ResourceLedgerContributor
+
+        contributors.append(
+            ResourceLedgerContributor(
+                ctx.population.archive_feature_metric,
+                cap=ctx.population.archive_feature_cap,
+                quality_metric=ctx.population.archive_feature_quality,
+                unit=ctx.population.archive_feature_unit,
+            )
+        )
     weight_policies = list(weight_policies or [])
     weight_policies.append(LineageVetoPolicy(book, store))
     ctx.extras["directive_book"] = book
@@ -391,8 +413,10 @@ def assemble(
             ctx.plus,
             ctx.proposal,
             assembly_fingerprint,
+            ctx.frozen_spec_hashes,
         ),
         operator_selector=operator_selector,
         merge_planner=merge_planner,
         island_health=island_health,
+        preflight_pipeline=PreflightPipeline(ctx.preflight_validators),
     )

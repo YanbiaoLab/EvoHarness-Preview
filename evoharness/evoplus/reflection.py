@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import logging
 
-from evoharness.evocore.interfaces import BudgetLike
-from evoharness.evocore.llm import LLMClient
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.interfaces import BudgetLike
+from evoharness.core.llm import LLMClient
+from evoharness.core.population import Candidate, PopulationStore
 
 from .experience import ExperienceEntry, ExperienceStore
 from .feedback import StructuredFeedback

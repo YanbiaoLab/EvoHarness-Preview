@@ -1,5 +1,5 @@
 # EvoHarness original: fully offline demo task (no API key, no network).
-# Referenced by recipes/common.py TaskBundle; used by CI, the recipe smoke
+# Used by CI, the recipe smoke
 # tests and `python -m experiments.run_evolution --task demo_counter`.
 """demo_counter: solve items q0..q4 by naming them in the SOLVED list.
 
@@ -9,19 +9,25 @@ the program every other call, giving visible fitness curves offline."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
-from evoharness.evocore import (
+from evoharness.contracts import MeasurementSpec
+from evoharness.core import (
     EvalReport,
     LLMResponse,
     LLMStopReason,
     LLMToolCall,
 )
+from evoharness.core.workspace import FileWorkspace
 from evoharness.evoplus import ItemResult, StructuredFeedback
-
-from recipes.common import TaskBundle
+from evoharness.runtime import ResolvedTask
 
 ITEMS = ["q0", "q1", "q2", "q3", "q4"]
+ITEM_UNIVERSE_HASH = hashlib.sha256(
+    json.dumps(ITEMS, separators=(",", ":")).encode("utf-8")
+).hexdigest()
 
 INITIAL = """# EDIT-REGION-BEGIN
 SOLVED = ["q0"]
@@ -53,6 +59,8 @@ class DemoCounterGrader:
             visible_metrics={"solved": solved},
             structured_feedback=StructuredFeedback(items=items).to_json(),
             eval_cost_usd=0.001,
+            n_units=len(ITEMS),
+            trustworthy_units=len(ITEMS),
         )
 
 
@@ -102,10 +110,18 @@ def _fake_transport_factory():
     return transport
 
 
-def make_task() -> TaskBundle:
-    return TaskBundle(
+def make_task() -> ResolvedTask:
+    return ResolvedTask.create(
+        task_id="demo_counter",
+        version="v1",
         grader=DemoCounterGrader(),
-        initial_code=INITIAL,
-        task_sys_msg=TASK_SYS_MSG,
-        transport=_fake_transport_factory(),
+        initial_workspace=FileWorkspace(INITIAL),
+        domain_prompt=TASK_SYS_MSG,
+        measurement=MeasurementSpec(
+            name="demo-counter-items",
+            version="v1",
+            universe_hash=ITEM_UNIVERSE_HASH,
+            planned_units=len(ITEMS),
+        ),
+        default_transport=_fake_transport_factory(),
     )

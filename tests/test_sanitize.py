@@ -1,4 +1,4 @@
-from evoharness.evocore.sanitize import AllowlistSanitizer
+from evoharness.core.sanitize import AllowlistSanitizer
 
 
 def _san():

@@ -4,7 +4,7 @@ knows, and the note that tells the model why it is there."""
 import numpy as np
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,
@@ -17,8 +17,8 @@ from evoharness.evocore import (
     StaticRouter,
     make_parent_selector,
 )
-from evoharness.evocore.interfaces import MutationContext
-from evoharness.evocore.population import Candidate
+from evoharness.core.interfaces import MutationContext
+from evoharness.core.population import Candidate
 from evoharness.evoplus.feedback import BehaviorSignature
 from evoharness.evoplus.inspiration import ComplementaryInspiration
 

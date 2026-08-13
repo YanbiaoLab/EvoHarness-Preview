@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from evoharness.evoserve import GradeContext
+from evoharness.serve import GradeContext
 from modmul import grade as grade_module
 from modmul.grade import grade_workspace
 
@@ -350,7 +350,7 @@ def test_weights_are_inherited_when_the_architecture_is_unchanged(tmp_path):
     """The genome is three text files, so without a lineage channel every
     candidate trains from random init and a 120-generation run discards its
     whole compute budget, each generation throwing away the last."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     lineage = tmp_path / "lineage"
     parent = lineage / "p1"
@@ -379,7 +379,7 @@ def test_a_changed_architecture_still_inherits_what_fits(tmp_path):
     mutation the most expensive one to try, and it had to compete against
     siblings carrying ninety minutes of inherited training. The loader decides
     per tensor; the harness just supplies the file."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     lineage = tmp_path / "lineage"
     parent = lineage / "p1"
@@ -401,7 +401,7 @@ def test_a_changed_architecture_still_inherits_what_fits(tmp_path):
 
 def test_no_lineage_channel_means_todays_behaviour(tmp_path):
     """Every task that has not opted in must keep cold-starting."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     child = tmp_path / "child"
     child.mkdir()
@@ -419,7 +419,7 @@ def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_p
     """Seeds have no parent, so without a content-addressed store every run
     re-derives weights already measured — ninety minutes to reproduce a file
     on disk. Keyed by what produced the weights, not by who."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     lineage = tmp_path / "lineage"
     seed = tmp_path / "seed"
@@ -449,7 +449,7 @@ def test_a_parentless_candidate_reuses_weights_trained_for_the_same_recipe(tmp_p
 def test_changing_the_recipe_does_not_skip_training(tmp_path):
     """The fast path is only sound while training would be byte-identical.
     train.py decides the data distribution, so touching it must retrain."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     lineage = tmp_path / "lineage"
     seed = tmp_path / "seed"
@@ -473,7 +473,7 @@ def test_an_inference_only_mutation_skips_training(tmp_path):
     """train.py imports from arch.py and never from model.py, so a mutation
     confined to the inference contract trains to byte-identical weights.
     This is the axis the largest known win in this domain sits on."""
-    from evoharness.evoserve import GradeContext
+    from evoharness.serve import GradeContext
 
     lineage = tmp_path / "lineage"
     seed = tmp_path / "seed"
@@ -998,9 +998,9 @@ def test_infrastructure_errors_reach_the_frameworks_own_path(tmp_path):
     That is the contract the breaker is built on: dropped, counted, and the
     run stopped -- not scored zero and inserted.
     """
-    from evoharness.evocore.population import Candidate
-    from evoharness.evocore.remote import EvalInfraError
-    from evoharness.task import WorkspaceGradeFnGrader
+    from evoharness.core.population import Candidate
+    from evoharness.core.remote import EvalInfraError
+    from evoharness.runtime import WorkspaceGradeFnGrader
 
     def grade_that_hits_a_bad_disk(candidate_dir, ctx):
         raise grade_module.InfraError("cannot read the benchmark")

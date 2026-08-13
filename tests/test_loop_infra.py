@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,
@@ -21,7 +21,7 @@ from evoharness.evocore import (
     StaticRouter,
     make_parent_selector,
 )
-from evoharness.evocore.remote import EvalInfraError
+from evoharness.core.remote import EvalInfraError
 
 INITIAL = """# EDIT-REGION-BEGIN
 x = 0
@@ -236,8 +236,8 @@ def test_a_proposal_cannot_outlive_its_deadline(tmp_path):
     generation. This is the eval-side 2h04m hang wearing different clothes:
     each attempt got a fresh budget and nothing bounded the total.
     """
-    from evoharness.evocore.proposer import SingleShotProposer
-    from evoharness.evocore.routing import StaticRouter
+    from evoharness.core.proposer import SingleShotProposer
+    from evoharness.core.routing import StaticRouter
 
     calls = {"n": 0}
 
@@ -252,7 +252,7 @@ def test_a_proposal_cannot_outlive_its_deadline(tmp_path):
         max_resamples=10,
         deadline_s=0.12,
     )
-    from evoharness.evocore import Candidate
+    from evoharness.core import Candidate
     parent = Candidate(
         id="p", code=INITIAL, generation=0, parent_id=None,
         island_idx=0, operator="seed",
@@ -280,7 +280,7 @@ def test_a_batch_spreads_across_islands_and_parents(tmp_path):
     15 offspring from a single parent, which ended the generation with
     children_count=15 that had never influenced a single choice.
     """
-    from evoharness.evocore import PopulationConfig, PopulationStore
+    from evoharness.core import PopulationConfig, PopulationStore
 
     cfg = SearchConfig(
         num_generations=1, operators=["rewrite"], operator_probs=[1.0],

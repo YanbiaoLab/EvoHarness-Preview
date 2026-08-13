@@ -1,7 +1,7 @@
 """Stable default agent tool set."""
 
-from evoharness.evocore.agent import make_default_agent_tools
-from evoharness.evoguard import Sandbox
+from evoharness.core.agent import make_default_agent_tools
+from evoharness.guard import Sandbox
 
 
 def test_default_tool_set_has_stable_provider_order():

@@ -1,8 +1,8 @@
 # Computational Discovery 产品设计（底层公式与 CD-0..CD-5）
 
-> 状态：设计稿 v1.1（2026-07-20）。当前 `GitWorkspace` 与
-> `AgentSessionProposer` 已落地，下一阶段的产品瓶颈从“候选如何修改”转为
-> **“用户如何只提供 `grade_func + seed_agent` 就启动一次可信进化”**。
+> 状态：设计与实施跟踪 v1.2（2026-08-12）。`GitWorkspace`、
+> `AgentSessionProposer` 和三公共契约已落地；下一阶段的产品瓶颈从“候选如何修改”转为
+> **“如何把运行结果升级为覆盖范围明确、可比较的证据”**。
 > 定位：**产品设计轨**，与 [EvoHarness.md](../docs/EvoHarness.md)（证据驱动优先级）配对——
 > 本文由产品公式（愿景）驱动，**不按"测到的痛 × ROI ÷ 依赖深度"排序**；
 > 各阶段进入执行的门槛见 §3 执行序。
@@ -39,7 +39,7 @@ flowchart LR
 
 | 能力 | 必须成为的一等对象 | 当前基础 | 主要缺口 |
 |---|---|---|---|
-| **可评分任务定义** | `ScorableTask + ScoreContract + EvalProtocol` | `TaskBundle`、`GradeFn`、`Grader`、`GitWorkspace`、远程评估协议 | 缺 `ScorableTask.from_directory()`、面向工作区的 grade 契约和框架内置 adapter；任务作者仍需理解内部 `Grader` |
+| **可评分任务定义** | `TaskSpec + ResolvedTask + Evaluation Protocol` | 三公共契约、`WorkspaceGradeFnGrader`、`GitWorkspace`、远程评估协议 | 缺 I-2 的 EvidenceEnvelope、FaultKind 和 ScoreNamespace |
 | **研究想法注入** | `ResearchIdea`（来源、前提、父 idea、适用条件） | `task_sys_msg`、`research_msg`、inspiration、C3、人工 directives | idea 仍是 prompt 文本，无法独立统计"想法质量"和"实现质量"，概念重组不可审计 |
 | **可回溯程序搜索** | 不可变 Candidate DAG + 可插拔搜索策略 | Population、island、archive、五种 ParentSelector、checkpoint、Git 多文件候选、Agentic 修改循环 | 缺显式 visit/acquisition 账本和 Flat-UCB 消融；还需用多个任务验证同一运行时 |
 | **真实执行验证** | 带 provenance 的 `EvalReport` 分布 | sandbox、anti-hack、StagedGrader、RemoteGrader、structured feedback | P0.1 重采样/LCB 未落地；held-out 晋升门、跨版本精英重评仍待完成 |
@@ -71,22 +71,24 @@ flowchart LR
 EvoHarness 负责复制候选、让 Agent 修改、执行、评分、选择、归档与恢复。
 
 ```python
-task = ScorableTask.from_directory(
+task = ResolvedTask.from_directory(
     seed_dir=HERE / "seed_agent",
     grade_func=grade_func,
+    task_id="my-task",
+    version="v1",
     main_file="solver.py",
-    task_sys_msg=(HERE / "sys_msg.md").read_text(),
+    domain_prompt=(HERE / "sys_msg.md").read_text(),
 )
 ```
 
-#### CD-0A `ScorableTask v0` 与工作区评分
+#### CD-0A `TaskSpec + ResolvedTask` 与工作区评分
 
 - [x] 新增 `WorkspaceGradeFn`：输入候选工作区路径和 `GradeContext`，返回现有
   `GradeValue`（`Grade | dict | float | int`）；不再把单文件源码字符串作为通用任务边界。
 - [x] 框架内置 `WorkspaceGradeFnGrader`，统一完成异常归类、结果归一化与
   `Grade/GradeValue → EvalReport` 转换。任务作者不再手写 `Grader` adapter。
-- [x] 新增 `ScorableTask.from_directory(seed_dir, grade_func, ...)`：自动把种子目录物化为
-  `GitWorkspace`，生成内部 `TaskBundle`、Grader 与初始 Candidate。
+- [x] 新增 `ResolvedTask.from_directory(seed_dir, grade_func, ...)`：自动把种子目录物化为
+  `GitWorkspace`，同时产生冻结 `TaskSpec` 与进程内 Grader。
 - [x] 保留现有单文件 `GradeFn` 作为便捷入口；它是 `WorkspaceGradeFn` 的 adapter，
   不是另一套执行管线。
 - [x] 核心包不得反向 import `experiments/*`；任务专有 solver、prompt、judge 和依赖全部
@@ -96,7 +98,7 @@ task = ScorableTask.from_directory(
 
 - [ ] 最小字段：优化方向、失败分、主指标、随机性/重采样来源、最低有效样本数、
   task/grader/dataset 版本或哈希。
-- [ ] `ScorableTask` 为确定性任务提供安全默认值；只有非默认语义才要求用户显式填写。
+- [x] `ResolvedTask` 为确定性任务提供安全默认值；任务身份与版本必须显式填写。
 - [ ] `ScoreContract` 只描述裁决规则，是只读 IR；不负责渲染 prompt，也不允许候选修改。
 
 #### CD-0C dry-run 与可重建性
@@ -108,7 +110,7 @@ task = ScorableTask.from_directory(
 
 验收：
 
-1. IMO Proof 已删除 adapter 内的任务专有 `IMOProofGrader`，改用通用 ScorableTask 和任务 `grade_func`。
+1. IMO Proof 已删除 adapter 内的任务专有 `IMOProofGrader`，改用通用 `ResolvedTask` 和任务 `grade_func`。
 2. IMO Proof 的候选面已收敛为 `grade.py + seed_agent/ + 薄组装`，
    不复制 transport、tool loop、workspace、executor 或 RPC 代码。
 3. 同一 API 同时运行单文件与多文件候选；失败统一进入结构化 `EvalReport`。
@@ -136,8 +138,8 @@ task = ScorableTask.from_directory(
 验收：同一候选重复评估能产出稳定置信区间；"新冠军"必须跨过噪声地板并通过 held-out
 或任务声明的替代确认门；改变 fitness 后旧冠军不会静默保留。
 
-触及：`evocore/population.py`、`interfaces.py`、`loop.py`、`evoserve/grading.py`、
-`evoguard/report.py`。
+触及：`core/population.py`、`interfaces.py`、`loop.py`、`serve/grading.py`、
+`guard/report.py`。
 
 ### CD-2 ResearchIdea 一等化与概念重组（建议 P1 之后启动——先修已测浪费，非结构依赖）
 
@@ -182,7 +184,7 @@ task = ScorableTask.from_directory(
 实现注意：现有 `children_count` 折扣已经提供弱探索压力，Flat-UCB 的新增价值必须通过
 "停滞后回到历史 stepping stone 的效率"证明；若只是换一种排名公式，不值得增加状态。
 
-触及：`evocore/selection.py`、`population.py`、checkpoint schema、evoweb lineage/
+触及：`core/selection.py`、`population.py`、checkpoint schema、evoweb lineage/
 breakthrough plot。
 
 ### CD-4 Breakthrough Ledger 与解释产品面（可与 CD-2 并行）
@@ -226,7 +228,7 @@ breakthrough plot。
 ## 3. 推荐执行序与依赖
 
 ```text
-CD-0A ScorableTask + WorkspaceGradeFn ✅
+CD-0A TaskSpec + ResolvedTask + WorkspaceGradeFn ✅
 → IMO Proof v1 适配 ✅
 → CD-0B ScoreContract + CD-0C dry-run/版本指纹
 → CD-1 重采样、LCB、held-out、版本冻结（= 优先级文档 P0）
@@ -239,7 +241,7 @@ CD-0A ScorableTask + WorkspaceGradeFn ✅
 
 ```mermaid
 flowchart LR
-    E0["CD-0A ScorableTask"] --> X["IMO Proof v1 适配"]
+    E0["CD-0A TaskSpec + ResolvedTask"] --> X["IMO Proof v1 适配"]
     X --> E1["CD-0B/C 契约+dry-run"]
     E1 --> P0["CD-1 = 优先级文档 P0"]
     P0 --> E2[CD-2 ResearchIdea]

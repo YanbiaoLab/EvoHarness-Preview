@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentBackend,
     AgentEvent,
     AgentEventKind,

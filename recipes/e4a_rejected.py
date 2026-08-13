@@ -13,7 +13,7 @@ mutations were re-purchases of two already-bought lessons. The negative
 section is where those lessons reach the next proposal.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
     ExperienceContributor,

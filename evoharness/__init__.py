@@ -1,24 +1,47 @@
-"""EvoHarness: evolutionary search framework.
-
-Framework layers live under this single top-level package:
-evocore (engine), evoguard (guardrails), evoplus (research extensions),
-evoserve (eval-side SDK), evoviz / evoweb (reporting & console).
-Consumer packages (modmul, tasks, recipes, experiments) sit OUTSIDE and
-import downward; the reverse direction is forbidden (tests/test_layering.py).
-"""
+"""EvoHarness public contracts and runtime entry objects."""
 
 __version__ = "0.1.0"
 
-from .task import (
-    ScorableTask,
+from .contracts import (
+    BasicSearchProfile,
+    ComponentSpec,
+    CriterionSpec,
+    EvolutionSearchProfile,
+    FeedbackSpec,
+    MeasurementSpec,
+    ProposalLimits,
+    RunSpec,
+    SearchProfile,
+    TaskSpec,
+    WorkspaceSpec,
+)
+from .runtime import (
+    ResolvedTask,
     WorkspaceGradeFn,
     WorkspaceGradeFnGrader,
     adapt_source_grade_fn,
+    compile_specs,
+    spec_hashes,
 )
+from .api import run
 
 __all__ = [
-    "ScorableTask",
+    "BasicSearchProfile",
+    "ComponentSpec",
+    "CriterionSpec",
+    "EvolutionSearchProfile",
+    "FeedbackSpec",
+    "MeasurementSpec",
+    "ProposalLimits",
+    "ResolvedTask",
+    "RunSpec",
+    "SearchProfile",
+    "TaskSpec",
     "WorkspaceGradeFn",
     "WorkspaceGradeFnGrader",
+    "WorkspaceSpec",
     "adapt_source_grade_fn",
+    "compile_specs",
+    "spec_hashes",
+    "run",
 ]

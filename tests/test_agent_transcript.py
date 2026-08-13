@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentEvent,
     AgentEventKind,
     AgentSessionLimits,
@@ -31,8 +31,8 @@ from evoharness.evocore import (
     TRANSCRIPT_SCHEMA_VERSION,
     render_workspace_patch,
 )
-from evoharness.evocore.agent import AgentToolRegistry, make_tool_result
-from evoharness.evocore.workspace import FileWorkspace
+from evoharness.core.agent import AgentToolRegistry, make_tool_result
+from evoharness.core.workspace import FileWorkspace
 
 
 class QueueTransport:

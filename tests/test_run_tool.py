@@ -5,13 +5,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     LLMToolCall,
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentToolContext,
     AgentToolRegistry,
     RunTool,

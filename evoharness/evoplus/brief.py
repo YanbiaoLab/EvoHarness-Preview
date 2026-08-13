@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from evoharness.evocore.interfaces import MutationContext
+from evoharness.core.interfaces import MutationContext
 
 DEFAULT_MAX_BYTES = 4096
 

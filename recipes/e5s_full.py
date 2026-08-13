@@ -17,7 +17,7 @@ that reads its output, and the store must record a graded entry before
 the reflector counts pending work.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
     ExperienceContributor,

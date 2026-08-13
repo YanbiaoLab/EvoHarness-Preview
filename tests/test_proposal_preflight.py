@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     PreflightContext,
     PreflightIssue,

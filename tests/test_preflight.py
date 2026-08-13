@@ -2,7 +2,7 @@
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     PreflightContext,
     PreflightIssue,

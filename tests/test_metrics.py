@@ -1,5 +1,5 @@
-from evoharness.evocore import MetricLog, flatten
-from evoharness.evocore.metrics import MetricPoint
+from evoharness.core import MetricLog, flatten
+from evoharness.core.metrics import MetricPoint
 
 
 def test_flatten_nested_dicts():

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,
@@ -18,9 +18,9 @@ from evoharness.evocore import (
     StaticRouter,
     make_parent_selector,
 )
-from evoharness.evocore.workspace import GitWorkspace
-from evoharness.evocore.loop import RunReport
-from evoharness.evocore.population import Candidate
+from evoharness.core.workspace import GitWorkspace
+from evoharness.core.loop import RunReport
+from evoharness.core.population import Candidate
 
 INITIAL = """# EDIT-REGION-BEGIN
 x = 0
@@ -206,7 +206,7 @@ def test_loop_repair_flow(tmp_path):
 
 def test_loop_novelty_rejection_path(tmp_path):
     """With a constant embedding every follow-up proposal is rejected."""
-    from evoharness.evocore import NoveltyGate
+    from evoharness.core import NoveltyGate
 
     loop, store = build_loop(
         make_rewrite_transport(), ["rewrite"], [1.0], tmp_path, generations=4
@@ -224,9 +224,9 @@ def test_loop_novelty_rejection_path(tmp_path):
 
 
 # 在文件顶部 imports 区补:
-#   from evoharness.evocore import Candidate
-#   from evoharness.evocore.loop import RunReport
-#   from evoharness.evocore.workspace import GitWorkspace
+#   from evoharness.core import Candidate
+#   from evoharness.core.loop import RunReport
+#   from evoharness.core.workspace import GitWorkspace
 
 
 def test_git_parent_child_inherits_workspace(tmp_path):
@@ -262,7 +262,7 @@ def test_proposal_workspace_lane_bypasses_lens(tmp_path):
     """Lane-2 vaccine: when a proposer delivers a complete workspace (the M3
     agent path), the loop must adopt it verbatim — kind, genome bytes and
     metadata all come from the proposal, and the single-file lens stays out."""
-    from evoharness.evocore.proposer import Proposal, ProposeResult
+    from evoharness.core.proposer import Proposal, ProposeResult
 
     delivered = GitWorkspace(
         base_files={"main.py": "x = 1\n", "helper.py": "H = 2\n"}
@@ -318,7 +318,7 @@ def test_proposal_workspace_lane_bypasses_lens(tmp_path):
 
 
 def test_failed_proposal_trace_is_preserved_in_run_history(tmp_path):
-    from evoharness.evocore.proposer import ProposeResult
+    from evoharness.core.proposer import ProposeResult
 
     seen = {}
 
@@ -372,7 +372,7 @@ def test_multi_file_evolution_smoke(tmp_path):
     """M2.5 maiden voyage: git seed -> real PromptBuilder renders the whole
     workspace as FILE blocks -> fake LLM answers in the same format -> the
     child genome gains an LLM-created file, siblings intact."""
-    from evoharness.evocore import LLMResponse
+    from evoharness.core import LLMResponse
 
     seen = {}
 

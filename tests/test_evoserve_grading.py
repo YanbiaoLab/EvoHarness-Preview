@@ -1,7 +1,7 @@
 import pytest
 
-from evoharness.evocore import EvalReport
-from evoharness.evoserve import Grade, coerce_grade
+from evoharness.core import EvalReport
+from evoharness.serve import Grade, coerce_grade
 
 
 def test_float_shortcut_fills_defaults():
@@ -34,7 +34,7 @@ def test_bool_rejected():
 
 
 def test_wire_round_trip_into_framework_report():
-    """The fuse: evoserve output must parse as an evocore EvalReport."""
+    """The fuse: serve output must parse as an core EvalReport."""
     wire = coerce_grade(
         Grade(
             fitness=0.42,
@@ -48,6 +48,22 @@ def test_wire_round_trip_into_framework_report():
     assert report.fitness == 0.42
     assert report.passed is False
     assert report.structured_feedback == wire["structured_feedback"]
+
+
+def test_trustworthy_units_round_trip_and_cannot_exceed_execution():
+    wire = coerce_grade(
+        Grade(
+            fitness=0.5,
+            n_units=4,
+            trustworthy_units=3,
+        )
+    )
+    report = EvalReport.from_json(wire)
+    assert (report.n_units, report.trustworthy_units) == (4, 3)
+    with pytest.raises(ValueError, match="trustworthy_units"):
+        coerce_grade(
+            Grade(fitness=0.5, n_units=2, trustworthy_units=3)
+        )
 
 
 def test_grade_fields_mirror_eval_report():

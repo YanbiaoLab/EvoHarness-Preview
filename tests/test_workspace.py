@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from evoharness.evocore.workspace import (
+from evoharness.core.workspace import (
     FileWorkspace,
     GitWorkspace,
     Workspace,

@@ -32,7 +32,7 @@ evaluate = pytest.importorskip("torch") and _load_adapter()
 
 
 class _Grade:
-    """Minimal stand-in for evoserve.Grade — only the fields build_metrics reads."""
+    """Minimal stand-in for serve.Grade — only the fields build_metrics reads."""
 
     def __init__(self, *, visible, passed=True, fault=None, fitness=0.0):
         self.visible_metrics = visible

@@ -6,7 +6,7 @@ grading path, metric log and manifest as every other group.
 
 import dataclasses
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 
 from .behavior_stack import SignatureRecorder
 from .common import RecipeContext, assemble

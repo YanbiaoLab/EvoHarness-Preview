@@ -1,6 +1,6 @@
 """Tier-1 frozen research brief: contributor + all-groups injection."""
 
-from evoharness.evocore import LLMClient, MutationContext
+from evoharness.core import LLMClient, MutationContext
 from evoharness.evoplus import StaticBriefContributor
 
 import recipes

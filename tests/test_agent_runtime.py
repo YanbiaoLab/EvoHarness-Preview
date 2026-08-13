@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentEventKind,
     AgentSessionLimits,
     AgentSessionRequest,
@@ -14,11 +14,11 @@ from evoharness.evocore import (
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent.feedback import (
+from evoharness.core.agent.feedback import (
     preflight_issue_to_payload,
     render_preflight_feedback,
 )
-from evoharness.evocore.agent.runtime import _SessionStore
+from evoharness.core.agent.runtime import _SessionStore
 
 
 def make_parent(parent_id="parent"):

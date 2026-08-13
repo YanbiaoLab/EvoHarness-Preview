@@ -2,10 +2,11 @@
 and declared-versus-observed feedback capability."""
 
 import json
+import sqlite3
 import subprocess
 
-from evoharness.evocore.population import Candidate, EvalReport
-from evoharness.evoguard import (
+from evoharness.core.population import Candidate, EvalReport
+from evoharness.guard import (
     code_provenance,
     finalize_manifest,
     start_manifest,
@@ -149,3 +150,18 @@ def test_driver_freezes_identity_and_reports_capability(tmp_path):
     assert observed["observed"]["scalar"] >= 2
     assert observed["observed"]["structured_feedback"] >= 2
     assert "structured_feedback" not in observed["silent"]
+    # The production CLI, not only the public Python API, must pass every
+    # evaluation through the evidence chokepoint.
+    evidence_lines = (run_dir / "evidence.jsonl").read_text().splitlines()
+    assert len(evidence_lines) >= 2
+    evidence = [json.loads(line) for line in evidence_lines]
+    assert all(item["coverage"]["planned_units"] == 5 for item in evidence)
+    assert all(item["coverage"]["trustworthy_units"] == 5 for item in evidence)
+    assert manifest["evidence"]["path"] == "evidence.jsonl"
+
+    with sqlite3.connect(run_dir / "run.db") as conn:
+        metadata_rows = conn.execute(
+            "SELECT metadata FROM candidates WHERE report IS NOT NULL"
+        ).fetchall()
+    assert metadata_rows
+    assert all(json.loads(row[0]).get("evidence_refs") for row in metadata_rows)

@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from evoharness.evocore import Candidate, EvalReport
-from evoharness.evocore.agent.tools import InspectParentEvalTool
-from evoharness.evocore.agent.tools import AgentToolContext, AgentToolError
-from evoharness.evocore.artifacts import FileArtifactStore
-from evoharness.evocore.llm import LLMToolCall
-from evoharness.evocore.preflight import PreflightPipeline, ProposalPreflight
-from evoharness.evocore.sanitize import AllowlistSanitizer
+from evoharness.core import Candidate, EvalReport
+from evoharness.core.agent.tools import InspectParentEvalTool
+from evoharness.core.agent.tools import AgentToolContext, AgentToolError
+from evoharness.core.artifacts import FileArtifactStore
+from evoharness.core.llm import LLMToolCall
+from evoharness.core.preflight import PreflightPipeline, ProposalPreflight
+from evoharness.core.sanitize import AllowlistSanitizer
 
 
 def _sanitizer():

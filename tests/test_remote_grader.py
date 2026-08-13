@@ -1,7 +1,7 @@
 import pytest
 
-from evoharness.evocore.population import Candidate, EvalReport
-from evoharness.evocore.remote import (
+from evoharness.core.population import Candidate, EvalReport
+from evoharness.core.remote import (
     EvalInfraError,
     EvalProtocolError,
     HttpReply,

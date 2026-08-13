@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from conftest import make_candidate
-from evoharness.evocore import (
+from evoharness.core import (
     LLMClient,
     LLMResponse,
     MutationContext,
@@ -204,7 +204,7 @@ def test_experience_redemption(tmp_path):
 
 
 def test_experience_store_records_rejections(tmp_path):
-    from evoharness.evocore import RejectionEvent
+    from evoharness.core import RejectionEvent
 
     xs = ExperienceStore(tmp_path / "exp.jsonl")
     parent = make_candidate(
@@ -262,7 +262,7 @@ def test_experience_contributor_retrieval(tmp_path):
 
 
 def test_experience_contributor_rejected_section(tmp_path):
-    from evoharness.evocore import RejectionEvent
+    from evoharness.core import RejectionEvent
 
     pop, xs = _store_with_lineage(tmp_path)
     parent = pop.get("p")
@@ -863,3 +863,88 @@ def _ctx_for(pop):
         operator="revise",
         generation=3,
     )
+
+
+def test_summarize_patch_keeps_added_when_many_files():
+    """A long file list must not evict `| added:` — the only part saying WHAT changed.
+
+    Seen in practice when stray temp directories landed in a workspace: the
+    filename list consumed the whole budget, so later generations could see that
+    a change failed but not what it was, and repeated it.
+    """
+    from evoharness.evoplus.experience import _summarize_patch
+
+    patch = "\n".join(
+        ["+++ b/real_change.py", "+set_option maxRecDepth 100000 in"]
+        + [line
+           for i in range(6)
+           for line in (f"+++ b/sub_junk{i}aaaaaaaa/solver.py",
+                        *[f"+junk line {j} padding padding" for j in range(20)])]
+    )
+    out = _summarize_patch(patch, max_added=3, max_chars=240)
+    assert len(out) <= 240
+    assert "| added:" in out, out
+    assert "set_option maxRecDepth 100000 in" in out, out
+    assert "more files" in out, out
+
+
+def test_island_brief_contributor(tmp_path):
+    """Per-island directives; inert when the file is absent.
+
+    Island isolation separates genomes, not tasks: with one prompt and one
+    feedback signal, every island climbs the same slope and the least-explored
+    direction is never attempted. Separating the task restores that diversity.
+    """
+    import json
+    from types import SimpleNamespace
+
+    from evoharness.evoplus import IslandBriefContributor
+
+    p = tmp_path / "island_briefs.json"
+    c = IslandBriefContributor(p)
+
+    def ctx(idx):
+        return SimpleNamespace(parent=SimpleNamespace(island_idx=idx))
+
+    assert c.contribute(ctx(0)) is None          # 文件不存在 → 静默
+
+    p.write_text(json.dumps({"1": "只攻反例侧"}), encoding="utf-8")
+    assert c.contribute(ctx(0)) is None          # 岛 0 没有条目 → 静默
+    assert "只攻反例侧" in c.contribute(ctx(1))  # 岛 1 拿到方向
+    assert c.contribute(SimpleNamespace(parent=SimpleNamespace(island_idx=-1))) is None
+
+    # 每次都重读 —— 跑到一半可以换方向，不必重起
+    p.write_text(json.dumps({"1": "改成攻证明侧"}), encoding="utf-8")
+    assert "改成攻证明侧" in c.contribute(ctx(1))
+
+
+def test_infra_failures_stay_out_of_experience(tmp_path):
+    """Infrastructure failures stay out of the store; proposal failures go in.
+
+    The test is whether the reason describes the machine or the candidate.
+    Mixing them starves the reflector: a store dominated by endpoint errors
+    distils to "no measured successful pattern yet" even when it contains the
+    run's largest gain.
+    """
+    from evoharness.core.interfaces import RejectionEvent
+    from evoharness.evoplus.experience import ExperienceStore, _is_infra_failure
+
+    for reason in ("backend-error", "protocol_error",
+                   "RuntimeError: LLM query failed after 10 transient",
+                   "HTTP Error 403: Forbidden", "INSUFFICIENT_BALANCE",
+                   "Our servers are currently overloaded"):
+        assert _is_infra_failure(reason), reason
+    for reason in ("no valid edit produced", "turn limit reached", ""):
+        assert not _is_infra_failure(reason), reason
+
+    store = ExperienceStore(tmp_path / "experience.jsonl")
+    parent = make_candidate("p1", 1.0)
+    store.on_proposal_rejected(RejectionEvent(
+        kind="failed", generation=1, operator="revise", parent=parent,
+        failure_reason="backend-error"))
+    assert store.entries == [], "基础设施故障不该留下经验条目"
+
+    store.on_proposal_rejected(RejectionEvent(
+        kind="failed", generation=2, operator="revise", parent=parent,
+        failure_reason="no valid edit produced"))
+    assert [e.kind for e in store.entries] == ["proposal_failed"]

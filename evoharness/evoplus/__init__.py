@@ -1,5 +1,5 @@
 """evoplus: EvoHarness research extensions (C1 feedback, C2 behavior, C3
-experience), plugged into evocore via its extension interfaces."""
+experience), plugged into core via its extension interfaces."""
 
 from .bandit import OperatorBandit
 from .behavior import (
@@ -9,6 +9,8 @@ from .behavior import (
     SignatureRecorder,
 )
 from .brief import StaticBriefContributor
+from .island_brief import IslandBriefContributor
+from .resource_ledger import ResourceLedgerContributor
 from .capability import CapabilityLedger
 from .directives import (
     Directive,
@@ -69,6 +71,8 @@ __all__ = [
     "complementarity",
     "ItemResult",
     "SignatureRecorder",
+    "IslandBriefContributor",
+    "ResourceLedgerContributor",
     "StaticBriefContributor",
     "StructuredFeedback",
 ]

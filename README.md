@@ -87,13 +87,14 @@ before starting a live run.
 
 ## Defining a task
 
-The public entry point is `ScorableTask`. A task supplies a seed workspace and
-a grading function; EvoHarness adapts them to the search engine:
+The public task entry is `ResolvedTask`. It binds process-local services to an
+immutable, serializable `TaskSpec`; runtime resources and search behavior live
+in separate `RunSpec` and `SearchProfile` contracts:
 
 ```python
 from pathlib import Path
 
-from evoharness import ScorableTask
+from evoharness import ResolvedTask
 
 
 def grade(candidate_dir: Path, context):
@@ -106,25 +107,29 @@ def grade(candidate_dir: Path, context):
     }
 
 
-task = ScorableTask.from_directory(
-    Path("path/to/seed"),
-    grade,
-    task_sys_msg="Make solve() return 42.",
+task = ResolvedTask.from_directory(
+    Path("path/to/seed"), grade,
+    task_id="return-42",
+    version="v1",
+    domain_prompt="Make solve() return 42.",
 )
 ```
 
-See [`evoharness/task.py`](evoharness/task.py) for the complete task contract and
-[`tasks/demo_counter.py`](tasks/demo_counter.py) for an offline example. More
-specialized examples live under [`experiments/`](experiments/).
+See [`evoharness/contracts/`](evoharness/contracts/) for the frozen public
+contracts, [`evoharness/runtime/`](evoharness/runtime/) for runtime resolution,
+and [`tasks/demo_counter.py`](tasks/demo_counter.py) for an offline example.
+More specialized examples live under [`experiments/`](experiments/).
 
 ## Repository layout
 
 ```text
 evoharness/
-  evocore/    search loop, candidates, workspaces, proposals, selection
-  evoguard/   budgets, subprocess limits, and anti-hack checks
+  contracts/ frozen TaskSpec, RunSpec, and SearchProfile identities
+  runtime/ resolved services, graders, and contract compilation
+  core/    search loop, candidates, workspaces, proposals, selection
+  guard/   budgets, subprocess limits, and anti-hack checks
   evoplus/    feedback, behavior, experience, and research extensions
-  evoserve/   local/remote evaluation protocol and service
+  serve/   local/remote evaluation protocol and service
   evoviz/     static run reports
   evoweb/     local run console
 experiments/  runnable research domains and experiment drivers

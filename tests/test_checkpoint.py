@@ -3,7 +3,7 @@ checkpoint.json carries loop counters, RNG and component states)."""
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     BanditRouter,
     BeamSelector,
     InspirationSelector,

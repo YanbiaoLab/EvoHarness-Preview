@@ -35,3 +35,6 @@ docs/
 # pointed at; a training run inside a seed dir got one committed (0366c56).
 experiments/modmul/seeds/*/tmp*/
 experiments/modmul/shinka/smoke.log
+
+# Experiment workspaces stay local (datasets, seeds, certification bundles)
+experiments/

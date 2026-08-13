@@ -2,7 +2,7 @@
 
 evoharness/ is the framework main package; modmul/tasks/recipes/experiments
 are consumer packages that import DOWNWARD only. Within the framework:
-evoguard = generic sandbox infra; evoserve = protocol-standalone (§8).
+guard = generic sandbox infra; serve = protocol-standalone (§8).
 """
 
 import ast
@@ -10,16 +10,16 @@ from pathlib import Path
 
 # scan-dir (repo-relative) -> import roots it must never mention
 FORBIDDEN = {
-    "evoharness/evoguard": (
-        "evoharness.evocore", "evoharness.evoplus", "evoharness.evoserve",
+    "evoharness/guard": (
+        "evoharness.core", "evoharness.evoplus", "evoharness.serve",
         "tasks", "recipes", "modmul",
     ),
-    "evoharness/evoserve": (
-        "evoharness.evocore", "evoharness.evoplus", "evoharness.evoguard",
+    "evoharness/serve": (
+        "evoharness.core", "evoharness.evoplus", "evoharness.guard",
         "tasks", "recipes", "modmul",
     ),
     # 引擎永不 import 任务/装配层(依赖方向只准从消费者指向框架)
-    "evoharness/evocore": ("modmul", "tasks", "recipes", "evoharness.evoplus"),
+    "evoharness/core": ("modmul", "tasks", "recipes", "evoharness.evoplus"),
 }
 
 # Comparison adapters may build directly on the domain they compare against.

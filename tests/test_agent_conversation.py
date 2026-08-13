@@ -6,7 +6,7 @@ from threading import get_ident
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentBackend,
     AgentEventKind,
     AgentSessionLimits,
@@ -25,7 +25,7 @@ from evoharness.evocore import (
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     RETENTION_EPHEMERAL,
     AgentToolRegistry,
     make_tool_result,

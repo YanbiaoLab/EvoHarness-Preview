@@ -6,7 +6,7 @@ import json
 import pytest
 
 import recipes
-from evoharness.evocore import (
+from evoharness.core import (
     AgentSessionProposer,
     HybridProposalSelector,
     LLMClient,
@@ -15,7 +15,7 @@ from evoharness.evocore import (
     SearchConfig,
     SingleShotProposer,
 )
-from evoharness.evocore.agent import ConversationalAgentBackend
+from evoharness.core.agent import ConversationalAgentBackend
 from evoharness.evoplus.config import PlusConfig
 from recipes import load_experiment_config
 from recipes.common import RecipeContext, assemble
@@ -371,7 +371,7 @@ def test_assemble_mounts_the_novelty_gate(tmp_path):
     the rejected_novelty experience channel could never fire."""
     import numpy as np
 
-    from evoharness.evocore.novelty import (
+    from evoharness.core.novelty import (
         NoveltyGate,
         cosine_similarity,
         hashing_embedding,
@@ -400,8 +400,8 @@ def test_novelty_gate_identity_mode_accepts_small_edits(tmp_path):
     parent, and the parent sits in the same island — so a fuzzy gate at 0.99
     rejected 40% of good small edits live. Identity mode rejects only a
     proposal that adds nothing at all."""
-    from evoharness.evocore import Candidate, EvalReport, IslandView
-    from evoharness.evocore.novelty import NoveltyGate, hashing_embedding
+    from evoharness.core import Candidate, EvalReport, IslandView
+    from evoharness.core.novelty import NoveltyGate, hashing_embedding
 
     base = "def solve(x):\n    return x + 1\n" + "# filler\n" * 200
     existing = Candidate(
@@ -411,7 +411,7 @@ def test_novelty_gate_identity_mode_accepts_small_edits(tmp_path):
     island = IslandView(island_idx=0, candidates=[existing])
     gate = NoveltyGate(hashing_embedding)   # identity is the default
 
-    from evoharness.evocore.novelty import novelty_text
+    from evoharness.core.novelty import novelty_text
     same = novelty_text(existing.workspace, existing.code)
     assert gate.check(same, island).accepted is False        # nothing new
     assert gate.check(same + "\n\n\n", island).accepted is False  # whitespace
@@ -432,9 +432,9 @@ def test_workspace_agent_prompt_drops_dead_sections(tmp_path):
     ONLY thing that differed between operators, which is why three
     operators once produced byte-identical edits from one parent. The
     parent's own files are equally redundant: they are on disk already."""
-    from evoharness.evocore import Candidate, EvalReport, MutationContext
-    from evoharness.evocore.operators import PromptBuilder
-    from evoharness.evocore.workspace import GitWorkspace
+    from evoharness.core import Candidate, EvalReport, MutationContext
+    from evoharness.core.operators import PromptBuilder
+    from evoharness.core.workspace import GitWorkspace
 
     def _cand(cid, title):
         return Candidate(

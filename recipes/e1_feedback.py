@@ -4,7 +4,7 @@ Diff vs E0: FeedbackContributor injects the parent's failure summary
 (top-k error categories + examples) into every mutation prompt.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import FeedbackContributor
 
 from .behavior_stack import SignatureRecorder

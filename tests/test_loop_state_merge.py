@@ -3,7 +3,7 @@ carries a genome identical to its base, and reaches the domain as donors."""
 
 from pathlib import Path
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,
@@ -157,7 +157,7 @@ def test_merges_are_free(tmp_path):
 def test_the_novelty_gate_does_not_reject_merges(tmp_path):
     """A merge is a duplicate by construction; judging it on program text
     would reject every one the planner ever produced."""
-    from evoharness.evocore.novelty import NoveltyGate, hashing_embedding
+    from evoharness.core.novelty import NoveltyGate, hashing_embedding
 
     grader, transport = _SignedGrader(), _CountingTransport()
     loop, store = _build(
@@ -190,9 +190,9 @@ def test_donors_survive_the_trip_to_a_real_grade_context(tmp_path):
     even if the adapter that builds the domain's context dropped the channel
     entirely.
     """
-    from evoharness.evocore.population import Candidate
-    from evoharness.evoserve import GradeContext
-    from evoharness.task import WorkspaceGradeFnGrader
+    from evoharness.core.population import Candidate
+    from evoharness.serve import GradeContext
+    from evoharness.runtime import WorkspaceGradeFnGrader
 
     seen: dict[str, GradeContext] = {}
 
@@ -223,9 +223,9 @@ def test_donors_survive_the_trip_to_a_real_grade_context(tmp_path):
 
 
 def test_an_ordinary_candidate_reaches_the_domain_with_no_donors(tmp_path):
-    from evoharness.evocore.population import Candidate
-    from evoharness.evoserve import GradeContext
-    from evoharness.task import WorkspaceGradeFnGrader
+    from evoharness.core.population import Candidate
+    from evoharness.serve import GradeContext
+    from evoharness.runtime import WorkspaceGradeFnGrader
 
     seen: dict[str, GradeContext] = {}
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.population import Candidate, PopulationStore
 
 
 @dataclass

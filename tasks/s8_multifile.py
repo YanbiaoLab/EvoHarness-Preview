@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
-from evoharness.evocore import (
+from evoharness.contracts import MeasurementSpec
+from evoharness.core import (
     EvalReport,
     LLMResponse,
     LLMStopReason,
@@ -13,11 +15,10 @@ from evoharness.evocore import (
     PreflightIssue,
     PreflightResult,
 )
-from evoharness.evocore.preflight import PreflightContext
-from evoharness.evocore.workspace import GitWorkspace
-from evoharness.evoguard import Sandbox
-
-from recipes.common import TaskBundle
+from evoharness.core.preflight import PreflightContext
+from evoharness.core.workspace import GitWorkspace
+from evoharness.guard import Sandbox
+from evoharness.runtime import ResolvedTask
 
 
 TASK_SYS_MSG = """Improve the small Python project so all project tests pass.
@@ -125,6 +126,8 @@ class MultiFileSmokeGrader:
             fault=None if solved else result.issues[0].code,
             visible_metrics={"project_tests_passed": solved},
             stderr_log="" if solved else result.issues[0].stderr,
+            n_units=1,
+            trustworthy_units=1,
         )
 
 
@@ -177,16 +180,25 @@ def _offline_transport_factory():
     return transport
 
 
-def make_task() -> TaskBundle:
+def make_task() -> ResolvedTask:
     runner = Sandbox(allow_network=False)
     validator = ProjectTestsValidator(runner)
     workspace = GitWorkspace(base_files=dict(BASE_FILES))
-    return TaskBundle(
+    return ResolvedTask.create(
+        task_id="s8_multifile",
+        version="v1",
         grader=MultiFileSmokeGrader(validator),
-        initial_code=workspace.main_text(),
         initial_workspace=workspace,
-        task_sys_msg=TASK_SYS_MSG,
-        transport=_offline_transport_factory(),
+        domain_prompt=TASK_SYS_MSG,
+        measurement=MeasurementSpec(
+            name="project-test-suite",
+            version="v1",
+            universe_hash=hashlib.sha256(
+                BASE_FILES["tests/test_solution.py"].encode("utf-8")
+            ).hexdigest(),
+            planned_units=1,
+        ),
+        default_transport=_offline_transport_factory(),
         preflight_validators=(validator,),
         runner=runner,
     )

@@ -93,6 +93,26 @@ def audit(run_dir):
            + (" — uncommitted edits: this run is not reproducible"
               if version.endswith("+dirty") else ""))
 
+    # Evidence production (research layer): every verdict and every infra
+    # drop must leave an envelope. Zero lines = producer unmounted — dead
+    # code wearing a green test suite. Legacy runs (no spec_hashes in the
+    # manifest, no evidence file) predate the mechanism and are skipped.
+    if manifest.get("spec_hashes") or os.path.exists(f"{run_dir}/evidence.jsonl"):
+        evidence = _jsonl(f"{run_dir}/evidence.jsonl")
+        infra_drops = sum(
+            1 for h in rr.get("history", []) if h.get("status") == "infra_error"
+        )
+        expected = n + infra_drops
+        if not evidence:
+            report(DEAD, "evidence", "no envelopes (producer unmounted?)")
+        elif len(evidence) < expected:
+            report(WARN, "evidence",
+                   f"{len(evidence)} envelopes < {expected} expected "
+                   f"({n} candidates + {infra_drops} infra drops)")
+        else:
+            report(OK, "evidence",
+                   f"{len(evidence)} envelopes ({infra_drops} infra)")
+
     # Seeds never pass the gate, never enter the buffer and cannot fill a
     # reflection batch, so any verdict before the first offspring is noise.
     offspring = sum(1 for r in rows if r[1] > 0)

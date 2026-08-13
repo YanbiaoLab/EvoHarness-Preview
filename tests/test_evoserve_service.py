@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from evoharness.evoserve import EvalService
+from evoharness.serve import EvalService
 
 
 def make_payload(code="print(1)", key="k1", **hints):
@@ -91,7 +91,7 @@ def test_unknown_job_raises(tmp_path):
 
 
 def test_infra_error_does_not_satisfy_replay(tmp_path):
-    from evoharness.evoserve import InfraError
+    from evoharness.serve import InfraError
 
     state = {"first": True}
 
@@ -110,7 +110,7 @@ def test_infra_error_does_not_satisfy_replay(tmp_path):
 
 
 def test_infra_error_is_not_a_verdict(tmp_path):
-    from evoharness.evoserve import InfraError
+    from evoharness.serve import InfraError
 
     def flaky_dependency(code, ctx):
         raise InfraError("sandbox fusion unreachable")

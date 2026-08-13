@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from conftest import make_candidate
-from evoharness.evocore import Candidate, EvalReport, PopulationConfig, PopulationStore
-from evoharness.evocore.workspace import GitWorkspace
+from evoharness.core import Candidate, EvalReport, PopulationConfig, PopulationStore
+from evoharness.core.workspace import GitWorkspace
 
 
 def test_insert_get_roundtrip_and_lineage():
@@ -249,3 +249,96 @@ def test_precision_fields_survive_a_json_round_trip():
     assert (back.n_units, back.sem) == (12, 0.14)
     # Reports written before the fields existed must still load.
     assert EvalReport.from_json({"fitness": 1.0, "passed": True}).sem == 0.0
+
+
+def _with_metrics(cand: Candidate, **metrics) -> Candidate:
+    cand.report.visible_metrics = dict(metrics)
+    return cand
+
+
+def _archived(store: PopulationStore) -> set[str]:
+    store.refresh_archive()
+    return {c.id for c in store.all_candidates() if c.in_archive}
+
+
+def test_archive_ignores_feature_axis_when_no_metric_declared():
+    store = PopulationStore(PopulationConfig(archive_size=2))
+    for cid, fit in (("a", 0.9), ("b", 0.8), ("c", 0.7)):
+        store.insert(make_candidate(cid, fit))
+    assert _archived(store) == {"a", "b"}
+
+
+def test_archive_tiebreak_keeps_the_cheaper_of_two_equal_scores():
+    """A refactor that frees bytes without moving the score is progress.
+
+    Ranking on fitness alone cannot express that: the two candidates tie and
+    whichever the sort happens to emit first survives.
+    """
+    cfg = PopulationConfig(archive_size=1, archive_feature_metric="bytes")
+    store = PopulationStore(cfg)
+    store.insert(_with_metrics(make_candidate("fat", 0.8), bytes=499_000))
+    store.insert(_with_metrics(make_candidate("lean", 0.8), bytes=470_000))
+    assert _archived(store) == {"lean"}
+
+
+def test_feature_buckets_keep_an_elite_away_from_the_ceiling():
+    """The failure this exists for: every leader pinned at the cap.
+
+    Top-N-by-fitness then fills the archive with programs that have no
+    resource left to give, so nothing cheap is available to breed from and
+    reclaiming the resource has to start from something that has none.
+    """
+    cfg = PopulationConfig(
+        archive_size=3,
+        archive_update_strategy="feature_buckets",
+        archive_feature_metric="bytes",
+        archive_feature_bucket=10_000.0,
+        archive_feature_reserve=2,
+    )
+    store = PopulationStore(cfg)
+    for cid, fit in (("ceil1", 0.90), ("ceil2", 0.89), ("ceil3", 0.88)):
+        store.insert(_with_metrics(make_candidate(cid, fit), bytes=499_000))
+    store.insert(_with_metrics(make_candidate("compact", 0.40), bytes=470_000))
+
+    keep = _archived(store)
+    assert "compact" in keep, "cheap lineage must survive to be bred from"
+    assert "ceil1" in keep, "the leader is never displaced"
+    assert len(keep) == 3
+
+    plain = PopulationConfig(archive_size=3, archive_feature_metric="bytes")
+    baseline = PopulationStore(plain)
+    for cid, fit in (("ceil1", 0.90), ("ceil2", 0.89), ("ceil3", 0.88)):
+        baseline.insert(_with_metrics(make_candidate(cid, fit), bytes=499_000))
+    baseline.insert(
+        _with_metrics(make_candidate("compact", 0.40), bytes=470_000))
+    assert "compact" not in _archived(baseline)
+
+
+def test_bucket_elite_ranks_on_pre_gate_quality_not_zeroed_fitness():
+    """Gated candidates all tie at fitness 0, which erases their ordering.
+
+    Both of these lost rows and were zeroed, but one lost far fewer. Ranking
+    the bucket on fitness picks between them arbitrarily.
+    """
+    cfg = PopulationConfig(
+        archive_size=1,
+        archive_update_strategy="feature_buckets",
+        archive_feature_metric="bytes",
+        archive_feature_bucket=10_000.0,
+        archive_feature_quality="raw_fitness",
+        archive_feature_reserve=1,
+    )
+    store = PopulationStore(cfg)
+    store.insert(_with_metrics(
+        make_candidate("lost_a_lot", 0.0), bytes=471_000, raw_fitness=0.31))
+    store.insert(_with_metrics(
+        make_candidate("lost_one_row", 0.0), bytes=472_000, raw_fitness=0.84))
+    assert _archived(store) == {"lost_one_row"}
+
+
+def test_missing_feature_value_never_wins_a_tiebreak():
+    cfg = PopulationConfig(archive_size=1, archive_feature_metric="bytes")
+    store = PopulationStore(cfg)
+    store.insert(make_candidate("unmeasured", 0.8))
+    store.insert(_with_metrics(make_candidate("measured", 0.8), bytes=480_000))
+    assert _archived(store) == {"measured"}

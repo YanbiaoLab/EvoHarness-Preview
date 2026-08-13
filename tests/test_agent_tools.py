@@ -4,14 +4,14 @@ import json
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     LLMToolCall,
     LLMToolDefinition,
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentTool,
     AgentToolContext,
     AgentToolError,

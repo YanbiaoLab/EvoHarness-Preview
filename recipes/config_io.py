@@ -10,7 +10,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from evoharness.evocore import PopulationConfig, ProposalConfig, SearchConfig
+from evoharness.core import PopulationConfig, ProposalConfig, SearchConfig
 from evoharness.evoplus.config import PlusConfig
 
 _SECTIONS = {

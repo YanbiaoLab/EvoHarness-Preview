@@ -2,12 +2,12 @@
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     AgentSessionLimits,
     AgentSessionResult,
     AgentTermination,
 )
-from evoharness.evocore.agent.session_proposer import (
+from evoharness.core.agent.session_proposer import (
     _ProposalLoopError,
     _ProposalUsage,
 )

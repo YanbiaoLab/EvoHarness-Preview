@@ -13,7 +13,7 @@ from . import (
     e5s_full,
     e6p_population,
 )
-from .common import RecipeContext, TaskBundle, assemble
+from .common import RecipeContext, assemble
 from .config_io import load_experiment_config
 
 _MODULES = [
@@ -47,7 +47,6 @@ def list_recipes() -> dict[str, str]:
 __all__ = [
     "REGISTRY",
     "RecipeContext",
-    "TaskBundle",
     "assemble",
     "get_recipe",
     "list_recipes",

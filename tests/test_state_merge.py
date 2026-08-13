@@ -4,7 +4,7 @@ with the plan."""
 import numpy as np
 import pytest
 
-from evoharness.evocore.population import Candidate, EvalReport, IslandView
+from evoharness.core.population import Candidate, EvalReport, IslandView
 from evoharness.evoplus.feedback import BehaviorSignature
 from evoharness.evoplus.merge import (
     Complementarity,

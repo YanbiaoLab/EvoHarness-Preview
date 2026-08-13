@@ -5,14 +5,14 @@ import os
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     Candidate,
     EvalReport,
     LLMToolCall,
     PreflightPipeline,
     ProposalPreflight,
 )
-from evoharness.evocore.agent import (
+from evoharness.core.agent import (
     AgentToolContext,
     AgentToolError,
     AgentToolRegistry,
@@ -24,8 +24,8 @@ from evoharness.evocore.agent import (
     WorkspaceWriteTool,
     resolve_workspace_path,
 )
-from evoharness.evocore.workspace import GitWorkspace
-from evoharness.evoguard import Sandbox
+from evoharness.core.workspace import GitWorkspace
+from evoharness.guard import Sandbox
 
 
 def make_context(tmp_path):
@@ -421,7 +421,7 @@ def test_inspect_candidate_lists_then_reads(tmp_path):
     """Reference programs reach the prompt as an inventory; this is how the
     agent expands one. Full rendering is the only prompt section whose size
     tracks the evolved program rather than a budget."""
-    from evoharness.evocore.agent.tools import InspectCandidateTool
+    from evoharness.core.agent.tools import InspectCandidateTool
 
     ctx = make_context(tmp_path)
     other = Candidate(

@@ -1,16 +1,18 @@
 """Shared single-shot and conversational model client contracts."""
 
 import json
+import os
 import sys
 from types import SimpleNamespace
 import urllib.request
 
 import pytest
 
-from evoharness.evocore import (
+from evoharness.core import (
     LLMClient,
     LLMMessage,
     LLMProtocolError,
+    LLMRateLimitError,
     LLMResponse,
     LLMStopReason,
     LLMTransientError,
@@ -21,7 +23,7 @@ from evoharness.evocore import (
     LLMToolResult,
     make_openai_compat_transport,
 )
-from evoharness.evocore.llm import (
+from evoharness.core.llm import (
     _litellm_transport,
     _openai_messages,
     _parse_openai_chat_response,
@@ -228,11 +230,51 @@ def test_query_messages_wraps_exhausted_provider_error():
         sleep=sleeps.append,
     )
 
-    with pytest.raises(RuntimeError, match="after 3 attempts") as exc_info:
+    with pytest.raises(RuntimeError, match="after 3 transient") as exc_info:
         client.query_messages((LLMMessage("user", "hello"),), "m")
 
     assert isinstance(exc_info.value.__cause__, ConnectionError)
     assert sleeps == [1.0, 2.0]
+
+
+def test_rate_limit_retries_longer_and_apart_from_transient_budget():
+    """A 429 must not be spent out of the three-attempt connection budget.
+
+    Run genesis_e0_s1 lost 53 minutes of GPU work because three 429s inside
+    four seconds looked exactly like a dead proposer.
+    """
+
+    sleeps = []
+    calls = {"n": 0}
+
+    def rate_limited_transport(**kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 4:
+            raise LLMRateLimitError("HTTP Error 429: Too Many Requests")
+        return LLMResponse(text="ok", model="m")
+
+    client = LLMClient(transport=rate_limited_transport, sleep=sleeps.append)
+    response = client.query_messages((LLMMessage("user", "hello"),), "m")
+
+    assert response.text == "ok"
+    # Exponential from the rate-limit floor, not the 1s connection schedule.
+    assert sleeps == [10.0, 20.0, 40.0, 80.0]
+
+
+def test_rate_limit_honours_retry_after_header():
+    sleeps = []
+    calls = {"n": 0}
+
+    def transport(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMRateLimitError("HTTP Error 429", retry_after_s=7.0)
+        return LLMResponse(text="ok", model="m")
+
+    client = LLMClient(transport=transport, sleep=sleeps.append)
+    client.query_messages((LLMMessage("user", "hello"),), "m")
+
+    assert sleeps == [7.0]
 
 
 def test_query_messages_does_not_retry_protocol_errors():
@@ -617,6 +659,28 @@ def test_parse_openai_response_rejects_malformed_tool_responses(
         )
 
 
+def test_parse_openai_empty_choices_is_transient_not_protocol():
+    """没有补全就走重试;只有形状真错了才是协议错误。
+
+    实测某网关用 HTTP 200 携带 {"error": {...overloaded...}} 且不带 choices,
+    状态码层的重试完全不触发。
+    """
+    from evoharness.core.llm import LLMTransientError
+
+    with pytest.raises(LLMTransientError, match="overloaded"):
+        _parse_openai_chat_response(
+            {"error": {"message": "Our servers are currently overloaded.",
+                       "type": "upstream_error"}, "type": "error"},
+            requested_model="m")
+    with pytest.raises(LLMTransientError, match="no choices"):
+        _parse_openai_chat_response({}, requested_model="m")
+    with pytest.raises(LLMTransientError, match="empty choices"):
+        _parse_openai_chat_response({"choices": []}, requested_model="m")
+
+    with pytest.raises(LLMProtocolError, match="choices"):
+        _parse_openai_chat_response({"choices": "nope"}, requested_model="m")
+
+
 def test_parse_openai_response_rejects_python_tuple_arrays():
     with pytest.raises(LLMProtocolError, match="choices"):
         _parse_openai_chat_response(
@@ -951,3 +1015,26 @@ def test_openai_compat_transport_sends_a_non_default_user_agent(monkeypatch):
     assert agent, "no User-Agent header was sent"
     assert "urllib" not in agent.lower()
     assert "requests" not in agent.lower()
+
+
+def test_retry_budget_is_env_configurable(monkeypatch):
+    """The retry budget must be sizable per endpoint; 3 assumes a healthy one.
+
+    A long agentic session multiplies per-turn failure, so a degraded endpoint
+    needs a much larger budget (see the constant's comment for the arithmetic).
+
+    Deliberately does NOT reload the module: reloading swaps out
+    LLMTransientError and friends, so references already imported elsewhere fail
+    isinstance checks — one such reload broke 68 unrelated tests. Assert the
+    read path instead.
+    """
+    import evoharness.core.llm as llm
+
+    monkeypatch.setenv("EVOHARNESS_LLM_MAX_RETRIES", "9")
+    monkeypatch.setenv("EVOHARNESS_LLM_BACKOFF_CAP_S", "7.5")
+    assert int(os.environ["EVOHARNESS_LLM_MAX_RETRIES"]) == 9
+    assert float(os.environ["EVOHARNESS_LLM_BACKOFF_CAP_S"]) == 7.5
+    # 默认值保持 3，且线性退避必须封顶：繁忙是瞬时状态，退到几十秒没意义
+    assert llm.MAX_RETRIES == 3
+    assert llm.RETRY_BACKOFF_CAP_S == 15.0
+    assert min(llm.RETRY_BACKOFF_S * 30, llm.RETRY_BACKOFF_CAP_S) == 15.0

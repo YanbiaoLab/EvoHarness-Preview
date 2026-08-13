@@ -8,7 +8,7 @@ import json
 import time
 from pathlib import Path
 
-from evoharness.evocore import MetricLog, PopulationStore
+from evoharness.core import MetricLog, PopulationStore
 
 
 def _read_json(path: Path) -> dict:

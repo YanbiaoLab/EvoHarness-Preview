@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from conftest import make_candidate
-from evoharness.evocore import (
+from evoharness.core import (
     MutationContext,
     PatchEngine,
     PromptBuilder,
@@ -12,7 +12,7 @@ from evoharness.evocore import (
     sample_operator,
     validate_edit_markers,
 )
-from evoharness.evocore.operators import parse_change_header
+from evoharness.core.operators import parse_change_header
 
 CODE = """import math
 
@@ -163,8 +163,8 @@ def test_prompt_builder_repair_carries_error_logs():
 
 
 def _multifile_candidate(tmp_path, passed=True):
-    from evoharness.evocore.population import Candidate, EvalReport
-    from evoharness.evocore.workspace import GitWorkspace
+    from evoharness.core.population import Candidate, EvalReport
+    from evoharness.core.workspace import GitWorkspace
 
     (tmp_path / "main.py").write_text("def solve(x):\n    return arch.f(x)\n")
     (tmp_path / "arch.py").write_text("def f(x):\n    return x\n")

@@ -5,7 +5,7 @@ categories instead of one shared global cheatsheet. E3r - E3g isolates the
 value of failure-mode routing, this project's core C3 claim.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
     ExperienceContributor,

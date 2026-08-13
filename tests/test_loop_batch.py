@@ -4,7 +4,7 @@ bookkeeping parity, on the offline demo task."""
 import threading
 
 import recipes
-from evoharness.evocore import LLMClient, PopulationConfig, SearchConfig
+from evoharness.core import LLMClient, PopulationConfig, SearchConfig
 from evoharness.evoplus.config import PlusConfig
 from recipes.common import RecipeContext
 from tasks import get_task

@@ -1,6 +1,6 @@
 import pytest
 
-from evoharness.evocore.artifacts import ArtifactRef, FileArtifactStore
+from evoharness.core.artifacts import ArtifactRef, FileArtifactStore
 
 
 def test_put_open_layered_access(tmp_path):

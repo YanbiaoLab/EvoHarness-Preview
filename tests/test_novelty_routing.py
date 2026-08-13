@@ -1,14 +1,14 @@
 import numpy as np
 
 from conftest import make_candidate
-from evoharness.evocore import (
+from evoharness.core import (
     BanditRouter,
     IslandView,
     NoveltyGate,
     StaticRouter,
     cosine_similarity,
 )
-from evoharness.evocore.novelty import parse_judge_verdict
+from evoharness.core.novelty import parse_judge_verdict
 
 
 def test_cosine_similarity():

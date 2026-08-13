@@ -5,7 +5,7 @@ every plus.experience_interval generations — reproducing the upstream
 meta-recommendation flow as the comparison arm for E3r.
 """
 
-from evoharness.evocore import SearchLoop
+from evoharness.core import SearchLoop
 from evoharness.evoplus import (
     BehavioralNoveltyPolicy,
     ExperienceContributor,

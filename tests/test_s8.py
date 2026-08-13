@@ -7,7 +7,7 @@ import json
 import pytest
 
 import recipes
-from evoharness.evocore import (
+from evoharness.core import (
     LLMClient,
     LLMResponse,
     LLMStopReason,

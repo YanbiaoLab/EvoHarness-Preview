@@ -1,7 +1,7 @@
 """End-to-end: SearchLoop with C1+C2+C3 plugged in (experiment group E3r
 assembly), mock grader producing structured feedback, mock LLM."""
 
-from evoharness.evocore import (
+from evoharness.core import (
     EvalReport,
     InspirationSelector,
     LLMClient,

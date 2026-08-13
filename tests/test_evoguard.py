@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from evoharness.evoguard import (
+from evoharness.guard import (
     AntiHackScanner,
     BudgetExhausted,
     BudgetMeter,
@@ -91,7 +91,7 @@ def test_antihack_passes_clean_code_and_flags_syntax_error():
 
 
 def test_manifest_roundtrip(tmp_path):
-    from evoharness.evocore import SearchConfig
+    from evoharness.core import SearchConfig
 
     data = tmp_path / "train.jsonl"
     data.write_text('{"x": 1}\n')
@@ -109,7 +109,7 @@ def test_manifest_roundtrip(tmp_path):
 def test_scan_files_flags_filename_and_tags_path():
     """M2.5: the FILENAME itself is attack surface — a file named after the
     holdout matches even with clean content; findings carry the culprit path."""
-    from evoharness.evoguard import AntiHackScanner
+    from evoharness.guard import AntiHackScanner
 
     scanner = AntiHackScanner()
     findings = scanner.scan_files({

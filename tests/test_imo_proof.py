@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from evoharness import ScorableTask, WorkspaceGradeFnGrader
-from evoharness.evocore.workspace import GitWorkspace
-from evoharness.evoserve import GradeContext, InfraError
-from evoharness.evocore import (
+from evoharness import ResolvedTask, WorkspaceGradeFnGrader
+from evoharness.core.workspace import GitWorkspace
+from evoharness.serve import GradeContext, InfraError
+from evoharness.core import (
     Candidate,
     LLMClient,
     LLMProtocolError,
@@ -611,7 +611,7 @@ def test_frozen_grader_prompt_is_loaded_from_experiment_asset():
     assert "{student_answer}" in prompt
 
 
-def test_imo_task_uses_generic_scorable_task_entry():
+def test_imo_task_uses_resolved_task_spec_entry():
     spec = load_default_spec()
     evaluator = IMOEvaluator(
         project_root=PROJECT_ROOT,
@@ -622,7 +622,8 @@ def test_imo_task_uses_generic_scorable_task_entry():
 
     task = make_task(spec, evaluator)
 
-    assert isinstance(task, ScorableTask)
+    assert isinstance(task, ResolvedTask)
+    assert task.spec.task_id == "imo_proof"
     assert isinstance(task.grader, WorkspaceGradeFnGrader)
     assert set(task.initial_workspace.texts()) == set(spec.candidate.mutable_files)
     assert task.initial_workspace.main_file == "solver.py"

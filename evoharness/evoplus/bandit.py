@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from evoharness.evocore.population import Candidate, PopulationStore
+from evoharness.core.population import Candidate, PopulationStore
 
 
 class OperatorBandit:

@@ -1,4 +1,4 @@
-"""End-to-end: real evoserve over real HTTP, real RemoteGrader, recipe
+"""End-to-end: real serve over real HTTP, real RemoteGrader, recipe
 assembly. The only fake left is the LLM transport (the demo task is offline
 by design). This is the two sides of docs/eval_protocol.md talking for real.
 """
@@ -8,14 +8,14 @@ import threading
 import pytest
 
 import recipes
-from evoharness.evocore import EvalReport, LLMClient, PopulationConfig, SearchConfig
-from evoharness.evocore.population import Candidate
-from evoharness.evocore.remote import RemoteEvalConfig, RemoteGrader
-from evoharness.evoguard import AntiHackScanner
+from evoharness.core import EvalReport, LLMClient, PopulationConfig, SearchConfig
+from evoharness.core.population import Candidate
+from evoharness.core.remote import RemoteEvalConfig, RemoteGrader
+from evoharness.guard import AntiHackScanner
 from evoharness.evoplus import StructuredFeedback
 from evoharness.evoplus.config import PlusConfig
-from evoharness.evoserve import EvalService
-from evoharness.evoserve.http import serve
+from evoharness.serve import EvalService
+from evoharness.serve.http import serve
 from recipes.common import RecipeContext
 from tasks import get_task
 from tasks.demo_counter_remote import grade_fn
@@ -132,7 +132,7 @@ def test_l0_pregate_scans_side_files(remote, tmp_path):
     """M2.5 vaccine: a git candidate with a CLEAN main file and the banned
     import hidden in a side file must still be blocked locally — pre-upgrade,
     the scanner only ever saw main_text() and this cheat sailed through."""
-    from evoharness.evocore.workspace import GitWorkspace
+    from evoharness.core.workspace import GitWorkspace
 
     svc, grader = remote
     ws = GitWorkspace(base_files={
