@@ -41,16 +41,35 @@ class ResourceLedgerContributor:
         self,
         metric: str,
         *,
+        store=None,
         cap: float | None = None,
         quality_metric: str = "",
         unit: str = "",
         max_rows: int = 8,
     ):
         self.metric = metric
+        self.store = store
         self.cap = cap
         self.quality_metric = quality_metric
         self.unit = unit
         self.max_rows = max_rows
+
+    def _from_store(self) -> list:
+        """Bucket elites straight from the population.
+
+        Reading only the sampled inspirations would show nothing: inspiration
+        selection ranks on `fitness`, so when a gate zeroes every cheap
+        candidate the draw is all ceiling-pinned programs and the table has one
+        distinct cost. The whole point is to surface what selection cannot.
+        """
+        if self.store is None:
+            return []
+        try:
+            return self.store._bucket_elites(
+                [c for c in self.store.all_candidates() if c.passed]
+            )
+        except (AttributeError, TypeError):
+            return []
 
     def _quality(self, cand) -> float | None:
         value = _metric(cand, self.quality_metric)
@@ -64,7 +83,8 @@ class ResourceLedgerContributor:
         if own is None:
             return None
         pool = {ctx.parent.id: ctx.parent}
-        for cand in list(ctx.archive_inspirations) + list(ctx.top_k_inspirations):
+        for cand in (list(ctx.archive_inspirations) + list(ctx.top_k_inspirations)
+                     + self._from_store()):
             if _metric(cand, self.metric) is not None:
                 pool.setdefault(cand.id, cand)
         rows = sorted(pool.values(), key=lambda c: (_metric(c, self.metric), c.id))

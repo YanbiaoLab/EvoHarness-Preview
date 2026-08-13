@@ -286,6 +286,7 @@ def assemble(
         contributors.append(
             ResourceLedgerContributor(
                 ctx.population.archive_feature_metric,
+                store=store,
                 cap=ctx.population.archive_feature_cap,
                 quality_metric=ctx.population.archive_feature_quality,
                 unit=ctx.population.archive_feature_unit,
