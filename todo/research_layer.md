@@ -734,17 +734,17 @@ evoharness/research/
   references.py
 ```
 
-- [ ] 第一版实现 CandidateValid、ObjectiveMet、HasAnyGain、BetterThanReference、
+- [x] 第一版实现 CandidateValid、ObjectiveMet、HasAnyGain、BetterThanReference、
   NoRegression 五类 Claim；
-- [ ] AssessmentGuard 只输出 `supported / contradicted / unknown`；
-- [ ] 自动化决策对 unknown fail closed；
-- [ ] 分离 Grader、AssessmentGuard、PromotionPolicy 和 ReferenceStore；
-- [ ] PromotionPolicy 只比较同一 score namespace 的 Evidence；
-- [ ] ReferenceStore 采用 compare-and-swap，并记录完整晋升依据；
-- [ ] 建立 Measurement Migration Panel；
-- [ ] 报告 rank correlation、champion identity、top-k overlap、decision flips、关键 pairwise
+- [x] AssessmentGuard 只输出 `supported / contradicted / unknown`（规则摘要版本化,assessor_hash 记入每条 Assessment）；
+- [x] 自动化决策对 unknown fail closed（require_supported / PromotionPolicy hold）；
+- [x] 分离 Grader、AssessmentGuard、PromotionPolicy 和 ReferenceStore；
+- [x] PromotionPolicy 只比较同一 score namespace 的 Evidence（跨 namespace 在 Guard 层即抛类型错误）；
+- [x] ReferenceStore 采用 compare-and-swap，并记录完整晋升依据（candidate/evidence/policy/assessor hash + reasons）；
+- [x] 建立 Measurement Migration Panel（research/migration.py,面板只用带 namespace 的证据构建）；
+- [x] 报告 rank correlation、champion identity、top-k overlap、decision flips、关键 pairwise
   inversions 和成本，而不是只报告相关系数；
-- [ ] Measurement 或 Evaluator 变更强制形成新版本并进入人工审批。
+- [x] Measurement 或 Evaluator 变更强制形成新版本并进入人工审批（establish_baseline 要求 approve-protocol-change 决定;assessor 规则变更同样翻版本,已实测 v1→v2）。
 
 验收：局部成功只支持存在性 Claim；覆盖不足时 NoRegression 为 unknown；Grader 不能直接
 推进 reference；会改变晋升决策的协议迁移必须被识别和拦截。
