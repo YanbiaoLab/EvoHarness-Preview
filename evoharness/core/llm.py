@@ -35,6 +35,28 @@ RETRY_BACKOFF_S = float(os.environ.get("EVOHARNESS_LLM_BACKOFF_S", "1.0"))
 # transient busy state clears in about one. Waiting longer buys nothing.
 RETRY_BACKOFF_CAP_S = float(os.environ.get("EVOHARNESS_LLM_BACKOFF_CAP_S", "15.0"))
 
+# 4xx bodies that describe a gateway's own routing state rather than anything
+# wrong with the request. These clear on their own, so they belong on the
+# retry path even though the status code says "your fault".
+_ROUTING_FAULT_MARKS = (
+    "unknown provider",
+    "no healthy upstream",
+    "no deployments available",
+    "model not available",
+)
+
+
+def _is_routing_fault(code: int, detail: str) -> bool:
+    """A 4xx whose body blames routing, not the request.
+
+    Deliberately narrow: matching on status alone would swallow real client
+    errors (a bad key, a malformed payload) into an endless retry.
+    """
+    if not 400 <= code < 500 or code in (401, 403, 429):
+        return False
+    low = detail.lower()
+    return any(mark in low for mark in _ROUTING_FAULT_MARKS)
+
 # A rate limit is not the same kind of failure as a dropped connection, and
 # retrying it on the connection schedule does not work: three attempts at
 # 1s and 2s spans four seconds, while a provider's rate-limit window is tens
@@ -799,6 +821,17 @@ class _OpenAICompatTransport:
                 "LLM endpoint refused the request: HTTP %d %s",
                 exc.code, detail.replace("\n", " "),
             )
+            # A gateway that answers "unknown provider" for a model it served
+            # ten minutes ago is reporting a ROUTING fault, and routing faults
+            # clear. Measured on ETP run 10: five of nine proposals died this
+            # way on one model name while the same name succeeded in between,
+            # so half the run's proposal budget went to a 400 nobody retried.
+            # A genuine model-name typo lands here too and now costs a bounded
+            # retry sequence before failing with the same body already logged.
+            if _is_routing_fault(exc.code, detail):
+                raise LLMTransientError(
+                    f"provider routing fault (HTTP {exc.code}): {detail}"
+                ) from exc
             raise
         except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             raise LLMTransientError(str(exc)) from exc

@@ -1038,3 +1038,31 @@ def test_retry_budget_is_env_configurable(monkeypatch):
     assert llm.MAX_RETRIES == 3
     assert llm.RETRY_BACKOFF_CAP_S == 15.0
     assert min(llm.RETRY_BACKOFF_S * 30, llm.RETRY_BACKOFF_CAP_S) == 15.0
+
+
+def test_routing_fault_400_is_retryable():
+    """A gateway saying "unknown provider" for a model it just served.
+
+    Measured on ETP run 10: five of nine proposals died on an HTTP 400 whose
+    body read `unknown provider for model ...`, while the same model name
+    succeeded between the failures. Status code says client error; the body
+    says the gateway lost track of its own upstream.
+    """
+    from evoharness.core.llm import _is_routing_fault
+
+    body = ('{"error":{"message":"unknown provider for model gpt-5.6-sol",'
+            '"type":"invalid_request_error"}}')
+    assert _is_routing_fault(400, body)
+
+
+def test_real_client_errors_stay_permanent():
+    from evoharness.core.llm import _is_routing_fault
+
+    assert not _is_routing_fault(400, '{"error":{"message":"invalid tool schema"}}')
+    assert not _is_routing_fault(404, "Not Found")
+    # Auth and quota are decisions, not routing: retrying them is a busy loop.
+    assert not _is_routing_fault(401, "unknown provider")
+    assert not _is_routing_fault(403, "no healthy upstream")
+    assert not _is_routing_fault(429, "no deployments available")
+    # 5xx already has its own retry path; this predicate must not widen it.
+    assert not _is_routing_fault(503, "no healthy upstream")
