@@ -12,11 +12,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from evoharness.core.interfaces import MutationContext
 
-DEFAULT_MAX_BYTES = 4096
+logger = logging.getLogger(__name__)
+
+# A brief is the one prompt section carrying measured evidence a human decided the
+# island needs. Truncating it silently drops whichever fact was written last, and
+# the loss is invisible from both ends -- the file on disk still reads complete.
+# Budget generously and say so when the cap bites.
+DEFAULT_MAX_BYTES = 8192
 
 _HEADER = "# This island's assignment\n"
 
@@ -52,6 +59,12 @@ class IslandBriefContributor:
         text = (self._briefs().get(str(idx)) or "").strip()
         if not text:
             return None
-        if len(text.encode()) > self.max_bytes:
-            text = text.encode()[: self.max_bytes].decode(errors="ignore")
+        raw = text.encode()
+        if len(raw) > self.max_bytes:
+            logger.warning(
+                "island %s brief truncated: %d bytes over the %d cap; "
+                "the tail of %s was dropped",
+                idx, len(raw) - self.max_bytes, self.max_bytes, self.path,
+            )
+            text = raw[: self.max_bytes].decode(errors="ignore")
         return _HEADER + text

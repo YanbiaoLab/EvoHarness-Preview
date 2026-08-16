@@ -1,3 +1,4 @@
+import json
 """Tier-1 frozen research brief: contributor + all-groups injection."""
 
 from evoharness.core import LLMClient, MutationContext
@@ -58,3 +59,31 @@ def test_brief_shared_by_all_groups_and_ordered_first(tmp_path):
             assert system.index("BRIEF-MARKER") < system.index(
                 "Parent failure analysis"
             )
+
+
+def test_oversized_brief_warns_instead_of_dropping_silently(tmp_path, caplog):
+    """A brief is the one prompt section carrying human-chosen evidence.
+
+    Truncating it silently drops whichever fact was written last, and the loss is
+    invisible from both ends: the file on disk still reads complete, and the model
+    never sees that anything is missing.
+    """
+    import logging
+
+    from conftest import make_candidate
+    from evoharness.core.interfaces import MutationContext
+    from evoharness.evoplus import IslandBriefContributor
+
+    path = tmp_path / "island_briefs.json"
+    tail = "THE-LAST-FACT"
+    path.write_text(json.dumps({"0": "x" * 400 + tail}), encoding="utf-8")
+
+    led = IslandBriefContributor(path, max_bytes=200)
+    ctx = MutationContext(parent=make_candidate("p", 1.0, island=0),
+                          archive_inspirations=[], top_k_inspirations=[],
+                          operator="revise", generation=1)
+    with caplog.at_level(logging.WARNING):
+        out = led.contribute(ctx)
+    assert tail not in out, "precondition: the cap must actually bite here"
+    assert any("truncated" in r.message for r in caplog.records), \
+        "a dropped brief tail must not be silent"
