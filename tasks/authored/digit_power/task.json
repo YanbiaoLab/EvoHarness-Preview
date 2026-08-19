@@ -1,0 +1,38 @@
+{
+  "task_id": "authored_digit_power",
+  "version": "v1",
+  "prompt": "prompt.md",
+  "knowledge": [
+    "knowledge"
+  ],
+  "criterion": {
+    "name": "probe_accuracy",
+    "direction": "maximize",
+    "description": "Fraction of probes 1..500 whose returned value equals the digit sum of n squared."
+  },
+  "measurement": {
+    "name": "digit-power-probes",
+    "version": "v1",
+    "universe_hash": "range-1-500",
+    "planned_units": 500
+  },
+  "seed": {
+    "dir": "seed",
+    "main_file": "main.py"
+  },
+  "grade": {
+    "module": "grade.py",
+    "entry": "grade"
+  },
+  "preflight": [
+    {
+      "name": "imports",
+      "argv": [
+        "python",
+        "-c",
+        "import main; main.solve(1)"
+      ],
+      "timeout_s": 20
+    }
+  ]
+}
