@@ -64,6 +64,11 @@ class RecipeContext:
     runner: Runner | None = None
     token_estimator: TokenEstimator | None = None
     extra_agent_tools: tuple = ()  # task-injected agent tools (appended to defaults)
+    # Replaces the in-process agent runtime for agent proposal modes. The
+    # driver owns the substitution because the backend decides what a
+    # candidate can reach, which is a property of the run rather than of the
+    # recipe's plugin list.
+    agent_backend: object | None = None
     extras: dict = field(default_factory=dict)  # recipes may stash handles here
     frozen_spec_hashes: dict[str, str] = field(default_factory=dict)
 
@@ -112,6 +117,12 @@ def _build_proposer(
             "models": list(ctx.search.llm_models),
             "max_resamples": ctx.search.max_op_resamples,
             "tools": [],
+            # Recorded on this branch too: the admission checks run for every
+            # lane, so a manifest that names them only under agent modes makes
+            # a single-shot run look like it had none.
+            "preflight_validators": [
+                validator.name for validator in ctx.preflight_validators
+            ],
             "transcript": False,
         }
         return SingleShotProposer(
@@ -135,18 +146,27 @@ def _build_proposer(
         )
     )
     registry = AgentToolRegistry(tools)
-    backend = NativeToolAgentBackend(
-        client=ctx.llm,
-        model=model,
-        registry=registry,
-        max_input_tokens=ctx.proposal.max_input_tokens,
-        token_estimator=ctx.token_estimator or _estimate_agent_tokens,
-        max_parallel_tools=ctx.proposal.max_parallel_tools,
-        recent_tool_results_to_keep=(
-            ctx.proposal.recent_tool_results_to_keep
-        ),
-        compact_trigger_ratio=ctx.proposal.compact_trigger_ratio,
-    )
+    if ctx.agent_backend is not None:
+        # An external runtime brings its own tools, its own context policy and
+        # its own confinement, so none of the in-process knobs above apply to
+        # it. Substituting here rather than wrapping keeps that explicit: the
+        # manifest must not list tools the candidate never saw.
+        backend = ctx.agent_backend
+        tools = ()
+        registry = AgentToolRegistry(())
+    else:
+        backend = NativeToolAgentBackend(
+            client=ctx.llm,
+            model=model,
+            registry=registry,
+            max_input_tokens=ctx.proposal.max_input_tokens,
+            token_estimator=ctx.token_estimator or _estimate_agent_tokens,
+            max_parallel_tools=ctx.proposal.max_parallel_tools,
+            recent_tool_results_to_keep=(
+                ctx.proposal.recent_tool_results_to_keep
+            ),
+            compact_trigger_ratio=ctx.proposal.compact_trigger_ratio,
+        )
     if mode == "conversational":
         backend = ConversationalAgentBackend(
             backend,
@@ -169,6 +189,26 @@ def _build_proposer(
     ctx.extras["proposal_manifest"] = {
         "mode": mode,
         "model": model,
+        # Which runtime actually ran the sessions, and what it says about
+        # itself. Two runs whose candidates could reach different capabilities
+        # are not comparable, and this is the only place that difference is
+        # recorded.
+        "agent_backend": (
+            None
+            if ctx.agent_backend is None
+            else {
+                "class": (
+                    f"{ctx.agent_backend.__class__.__module__}."
+                    f"{ctx.agent_backend.__class__.__qualname__}"
+                ),
+                **(
+                    {"identity": ctx.agent_backend.spec.identity()}
+                    if hasattr(ctx.agent_backend, "spec")
+                    and hasattr(ctx.agent_backend.spec, "identity")
+                    else {}
+                ),
+            }
+        ),
         "limits": dataclasses.asdict(limits),
         "max_repair_rounds": ctx.proposal.max_repair_rounds,
         "max_input_tokens": ctx.proposal.max_input_tokens,

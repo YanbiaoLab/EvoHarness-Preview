@@ -15,6 +15,12 @@ from .contracts import (
     ProposalTraceSummary,
 )
 from .conversation import ConversationalAgentBackend
+from .dsh_backend import (
+    UNSUPPORTED_LIMITS,
+    DshAgentBackend,
+    DshBackendError,
+    DshRuntimeSpec,
+)  # noqa: F401 - re-exported backend seam
 from .session_proposer import AgentSessionProposer
 from .transcript import (
     JsonlEventSink,
@@ -76,6 +82,10 @@ __all__ = [
     "AgentSessionResult",
     "AgentTermination",
     "ConversationalAgentBackend",
+    "DshAgentBackend",
+    "DshBackendError",
+    "DshRuntimeSpec",
+    "UNSUPPORTED_LIMITS",
     "EventSink",
     "EventSinkFactory",
     "ManagedEventSink",
