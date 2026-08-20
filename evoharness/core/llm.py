@@ -22,28 +22,41 @@ from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Three attempts assumes a healthy endpoint. Against a degraded one the budget
-# has to be sized from its measured success rate, because a long agentic session
-# multiplies the per-turn failure: at a 54% success rate, four attempts still fail
-# 4.5% of the time, and a 50-turn session then survives only 0.955^50 ~ 10%.
-# Holding a 60-turn session at 90% needs the per-turn failure below 0.17%, i.e.
-# about nine attempts. Raising it is cheap when the endpoint rejects fast
-# (a "busy" reply, not a timeout), so this is an env knob rather than a new default.
+
 MAX_RETRIES = int(os.environ.get("EVOHARNESS_LLM_MAX_RETRIES", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("EVOHARNESS_LLM_BACKOFF_S", "1.0"))
 # Cap the linear backoff: past ~10 attempts it reaches tens of seconds, while a
 # transient busy state clears in about one. Waiting longer buys nothing.
 RETRY_BACKOFF_CAP_S = float(os.environ.get("EVOHARNESS_LLM_BACKOFF_CAP_S", "15.0"))
 
-# 4xx bodies that describe a gateway's own routing state rather than anything
-# wrong with the request. These clear on their own, so they belong on the
-# retry path even though the status code says "your fault".
+
 _ROUTING_FAULT_MARKS = (
     "unknown provider",
     "no healthy upstream",
     "no deployments available",
     "model not available",
 )
+
+
+# Bodies that mean "the account cannot pay", across the phrasings providers use.
+# Not every provider follows the OpenAI error envelope: the one used for ETP
+# answers HTTP 403 with a bare {"code": "INSUFFICIENT_BALANCE", ...}.
+_BILLING_MARKS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "insufficient quota",
+    "insufficient_quota",
+    "billing_error",
+    "exceeded your current quota",
+    "payment required",
+)
+
+
+def _is_billing_failure(code: int, detail: str) -> bool:
+    if code not in (400, 402, 403, 429):
+        return False
+    low = detail.lower()
+    return any(mark in low for mark in _BILLING_MARKS)
 
 
 def _is_routing_fault(code: int, detail: str) -> bool:
@@ -57,14 +70,7 @@ def _is_routing_fault(code: int, detail: str) -> bool:
     low = detail.lower()
     return any(mark in low for mark in _ROUTING_FAULT_MARKS)
 
-# A rate limit is not the same kind of failure as a dropped connection, and
-# retrying it on the connection schedule does not work: three attempts at
-# 1s and 2s spans four seconds, while a provider's rate-limit window is tens
-# of seconds. Run genesis_e0_s1 (2026-08-04) died exactly this way — six
-# concurrent runs against one endpoint, HTTP 429 on all three attempts inside
-# four seconds, five consecutive proposals lost, and the loop correctly
-# concluded the proposer was dead after 53 minutes of GPU work. The retry
-# budget, not the endpoint, was the defect.
+
 RATE_LIMIT_RETRIES = int(os.environ.get("EVOHARNESS_RATE_LIMIT_RETRIES", "6"))
 RATE_LIMIT_BACKOFF_S = float(
     os.environ.get("EVOHARNESS_RATE_LIMIT_BACKOFF_S", "10.0")
@@ -82,6 +88,16 @@ class LLMProtocolError(RuntimeError):
 
 class LLMTransientError(RuntimeError):
     """A transport failure that may succeed when retried."""
+
+
+class LLMBillingError(RuntimeError):
+    """The account cannot pay for the call.
+
+    Deliberately NOT an LLMTransientError: a rate limit clears on its own, an
+    empty balance does not. Retrying it burns the schedule and reports the
+    wrong cause -- a run that stops on "the proposer is dead" sends someone to
+    debug the proposer instead of topping up the account.
+    """
 
 
 class LLMRateLimitError(LLMTransientError):
@@ -828,6 +844,10 @@ class _OpenAICompatTransport:
             # so half the run's proposal budget went to a 400 nobody retried.
             # A genuine model-name typo lands here too and now costs a bounded
             # retry sequence before failing with the same body already logged.
+            if _is_billing_failure(exc.code, detail):
+                raise LLMBillingError(
+                    f"account cannot pay for the call (HTTP {exc.code}): {detail}"
+                ) from exc
             if _is_routing_fault(exc.code, detail):
                 raise LLMTransientError(
                     f"provider routing fault (HTTP {exc.code}): {detail}"

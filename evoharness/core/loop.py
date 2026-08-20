@@ -37,7 +37,7 @@ from .interfaces import (
     OperatorSelector,
     RejectionEvent,
 )
-from .llm import LLMClient
+from .llm import LLMBillingError, LLMClient
 from .metrics import MetricLog
 from .novelty import NoveltyGate, novelty_text
 from .operators import PromptBuilder, sample_operator
@@ -805,6 +805,9 @@ class SearchLoop:
             plan = self._plan_proposal(generation, slot)
             if plan is None:
                 return None
+            # An empty balance does not clear, so neither novelty resampling
+            # nor the next generation can help. Let it out to the main loop,
+            # which stops the run and names the cause.
             result = self._execute_plan(plan)
             cand, retry = self._absorb_proposal(
                 generation, report, plan, result
@@ -1038,9 +1041,18 @@ class SearchLoop:
                 break
 
             if self.cfg.eval_batch_size > 1:
-                infra_streak, produced = self._run_batch_generation(
-                    generation, report, infra_streak
-                )
+                try:
+                    infra_streak, produced = self._run_batch_generation(
+                        generation, report, infra_streak
+                    )
+                except LLMBillingError as exc:
+                    # Not "the proposer is dead": that reading sends someone to
+                    # debug the proposer while the account simply needs topping
+                    # up. Stop on the first one -- five more generations of
+                    # retrying an empty balance produce nothing.
+                    logger.error("stopping: %s", exc)
+                    report.stopped_reason = "llm_billing"
+                    break
                 propose_streak = 0 if produced else propose_streak + 1
                 report.generations_completed = generation
                 self._save_checkpoint(generation, report)
@@ -1052,7 +1064,12 @@ class SearchLoop:
                     break
                 continue
 
-            cand = self._propose(generation, report)
+            try:
+                cand = self._propose(generation, report)
+            except LLMBillingError as exc:
+                logger.error("stopping: %s", exc)
+                report.stopped_reason = "llm_billing"
+                break
             if cand is None:
                 report.history.append(
                     {"generation": generation, "status": "skipped"}

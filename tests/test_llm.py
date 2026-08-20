@@ -1066,3 +1066,35 @@ def test_real_client_errors_stay_permanent():
     assert not _is_routing_fault(429, "no deployments available")
     # 5xx already has its own retry path; this predicate must not widen it.
     assert not _is_routing_fault(503, "no healthy upstream")
+
+
+def test_empty_balance_is_not_a_transient_failure():
+    """A rate limit clears on its own; an empty balance does not.
+
+    Measured on ETP run 11: the account emptied between generations 11 and 12
+    and the provider answered HTTP 403 with a bare
+    `{"code":"INSUFFICIENT_BALANCE"}` -- no OpenAI error envelope. Retrying it
+    burns the remaining schedule and reports the wrong cause: a run that stops
+    on "the proposer is dead" sends someone to debug the proposer.
+    """
+    from evoharness.core.llm import LLMBillingError, LLMTransientError, _is_billing_failure
+
+    assert not issubclass(LLMBillingError, LLMTransientError), \
+        "billing failures must never land on the retry path"
+    assert _is_billing_failure(
+        403, '{"code":"INSUFFICIENT_BALANCE","message":"Insufficient account balance"}')
+    assert _is_billing_failure(429, "You exceeded your current quota")
+    assert _is_billing_failure(402, "Payment Required")
+
+
+def test_rate_limits_and_routing_faults_are_not_billing():
+    from evoharness.core.llm import _is_billing_failure, _is_routing_fault
+
+    # A plain 429 still has to retry -- it clears.
+    assert not _is_billing_failure(429, "Rate limit reached, retry in 20s")
+    # Routing faults keep their own path.
+    assert not _is_billing_failure(400, "unknown provider for model gpt-5.6-sol")
+    assert not _is_routing_fault(403, "insufficient balance")
+    # Status codes that cannot mean billing.
+    assert not _is_billing_failure(404, "insufficient balance")
+    assert not _is_billing_failure(500, "insufficient balance")
