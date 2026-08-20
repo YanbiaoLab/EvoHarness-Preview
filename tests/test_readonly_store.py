@@ -71,21 +71,27 @@ def test_readonly_open_of_a_missing_db_is_an_error_not_an_empty_run(tmp_path):
 
 
 def test_viewer_surfaces_leave_no_write_behind(tmp_path):
-    """End to end through the actual display code paths."""
-    from evoharness.evoweb.data import candidate_detail, run_detail
-    from evoharness.evoviz.report import load_run
+    """End to end through the actual display code paths.
+
+    Reads through `evoharness.readout`, which replaced the deleted evoweb and
+    evoviz surfaces. The property being defended belongs to the surface, not
+    to any one of them: whichever code displays a run has to be unable to
+    change it.
+    """
+    from evoharness.readout import candidate_detail, population, trajectory
 
     run_dir = tmp_path / "run1"
     run_dir.mkdir()
     _populate(run_dir / "run.db")
     before = (run_dir / "run.db").read_bytes()
 
-    detail = run_detail(run_dir)
+    rows = population(run_dir)
     cand = candidate_detail(run_dir, "c1")
-    loaded = load_run(run_dir)
+    generations = trajectory(run_dir)
 
     assert cand is not None
-    assert detail["candidates"] or loaded["candidates"]
+    assert [row.id for row in rows] == ["c1"]
+    assert [gen.generation for gen in generations] == [1]
     assert (run_dir / "run.db").read_bytes() == before, (
         "a viewer mutated the database it was displaying"
     )

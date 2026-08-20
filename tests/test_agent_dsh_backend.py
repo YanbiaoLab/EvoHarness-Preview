@@ -435,6 +435,68 @@ def test_identity_covers_the_deployment_the_candidate_runs_under(spec):
     assert before["unsupported_limits"] == list(UNSUPPORTED_LIMITS)
 
 
+def test_the_fingerprint_tracks_the_deployment_and_not_where_it_lives(
+    spec, tmp_path
+):
+    """What goes into the run hash must move with the experiment, not the disk.
+
+    Hashing the absolute path refuses a legitimate resume after the checkout
+    moves; hashing only the path misses an edit to the file. Content does both.
+    """
+
+    body = spec.config_path.read_bytes()
+    elsewhere = tmp_path / "moved"
+    elsewhere.mkdir()
+    moved_config = elsewhere / "candidate.cordis.yml"
+    moved_config.write_bytes(body)
+    moved = DshRuntimeSpec(
+        config_path=moved_config,
+        runtime_argv=spec.runtime_argv,
+        model=spec.model,
+    )
+    assert moved.fingerprint() == spec.fingerprint()
+    # ...and the path IS still recorded, just not in the part that decides
+    # sameness — otherwise a run could not say which file it read.
+    assert moved.identity()["config_path"] != spec.identity()["config_path"]
+
+    spec.config_path.write_text("- id: stub\n- id: extra\n", encoding="utf-8")
+    assert spec.fingerprint() != moved.fingerprint()
+
+
+def test_the_fingerprint_follows_the_runtime_entry_by_content(tmp_path):
+    """Two checkouts of one runtime are the same experiment; two different
+    runtime entries are not, even at the same path."""
+
+    config = tmp_path / "c.yml"
+    config.write_text("- id: stub\n", encoding="utf-8")
+
+    def spec_for(entry):
+        return DshRuntimeSpec(
+            config_path=config, runtime_argv=("node", str(entry))
+        )
+
+    first = tmp_path / "a" / "bin.ts"
+    first.parent.mkdir()
+    first.write_text("run()\n", encoding="utf-8")
+    second = tmp_path / "b" / "bin.ts"
+    second.parent.mkdir()
+    second.write_text("run()\n", encoding="utf-8")
+
+    assert spec_for(first).fingerprint() == spec_for(second).fingerprint()
+
+    second.write_text("run(); also()\n", encoding="utf-8")
+    assert spec_for(first).fingerprint() != spec_for(second).fingerprint()
+
+
+def test_an_argv_element_that_is_not_a_file_passes_through(tmp_path):
+    config = tmp_path / "c.yml"
+    config.write_text("- id: stub\n", encoding="utf-8")
+    spec = DshRuntimeSpec(
+        config_path=config, runtime_argv=("node", "--import", "tsx/esm")
+    )
+    assert spec.fingerprint()["runtime_argv"] == ["node", "--import", "tsx/esm"]
+
+
 def test_any_model_id_is_accepted(tmp_path):
     config = tmp_path / "c.yml"
     config.write_text("- id: stub\n", encoding="utf-8")

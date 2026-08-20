@@ -136,11 +136,41 @@ def build(cfg: LaunchConfig) -> BuiltRun:
             timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 400)),
         )
 
-    backend_spec = ComponentSpec.for_object(
-        "proposer_backend",
-        transport if transport is not None else type(None),
-        version="live-v1" if cfg.live else "task-default-v1",
-    )
+    # Built before RunSpec, not after: when a dsh runtime drives the proposals
+    # it IS the proposer backend, and describing the transport instead would
+    # leave the deployment out of every hash that decides whether a resume is
+    # the same experiment. The pair is validated in LaunchConfig, which every
+    # caller goes through — including the ones with no command line.
+    agent_backend = None
+    if cfg.dsh_config is not None:
+        from evoharness.core.agent import DshAgentBackend, DshRuntimeSpec
+
+        agent_backend = DshAgentBackend(
+            DshRuntimeSpec(
+                config_path=cfg.dsh_config.resolve(),
+                runtime_argv=(
+                    "node", "--import", "tsx/esm",
+                    str(cfg.dsh_runtime.resolve()),
+                ),
+                runtime_cwd=cfg.dsh_runtime.resolve().parents[3],
+                session_root=cfg.run_dir / "dsh_sessions",
+                model=proposal.model or search.llm_models[0],
+            )
+        )
+
+    if agent_backend is not None:
+        backend_spec = ComponentSpec.for_object(
+            "proposer_backend",
+            agent_backend,
+            version="dsh-v1",
+            config=agent_backend.spec.fingerprint(),
+        )
+    else:
+        backend_spec = ComponentSpec.for_object(
+            "proposer_backend",
+            transport if transport is not None else type(None),
+            version="live-v1" if cfg.live else "task-default-v1",
+        )
     run_spec = RunSpec(
         models=tuple(search.llm_models),
         proposer_backend=backend_spec,
@@ -199,26 +229,6 @@ def build(cfg: LaunchConfig) -> BuiltRun:
         task_spec=task.spec,
         run_dir=cfg.run_dir,
     )
-
-    agent_backend = None
-    # The pair is validated in LaunchConfig, which every caller goes through —
-    # including the ones with no command line. Checking again here would only
-    # cover the one caller that already cannot get this wrong.
-    if cfg.dsh_config is not None:
-        from evoharness.core.agent import DshAgentBackend, DshRuntimeSpec
-
-        agent_backend = DshAgentBackend(
-            DshRuntimeSpec(
-                config_path=cfg.dsh_config.resolve(),
-                runtime_argv=(
-                    "node", "--import", "tsx/esm",
-                    str(cfg.dsh_runtime.resolve()),
-                ),
-                runtime_cwd=cfg.dsh_runtime.resolve().parents[3],
-                session_root=cfg.run_dir / "dsh_sessions",
-                model=proposal.model or search.llm_models[0],
-            )
-        )
 
     ctx = RecipeContext(
         search=search,

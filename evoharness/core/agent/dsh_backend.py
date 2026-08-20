@@ -73,6 +73,25 @@ UNSUPPORTED_LIMITS: tuple[str, ...] = (
 
 
 
+def _content_id(part: str) -> str:
+    """An argv element reduced to something location-independent.
+
+    An element naming a readable file becomes `name@sha256:<12>`; anything
+    else passes through. This is what lets two checkouts of the same runtime
+    compare equal while a changed runtime entry does not — matching on the
+    path instead would get both cases backwards.
+    """
+
+    try:
+        candidate = Path(part)
+        if not candidate.is_file():
+            return part
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    except OSError:
+        return part
+    return f"{candidate.name}@sha256:{digest[:12]}"
+
+
 class DshBackendError(RuntimeError):
     """The dsh runtime could not be launched or driven."""
 
@@ -154,6 +173,31 @@ class DshRuntimeSpec:
             "config_path": str(self.config_path),
             "config_hash": self.config_hash(),
             "runtime_argv": list(self.runtime_argv),
+            "provider": self.provider,
+            "model": self.model,
+            "unsupported_limits": list(UNSUPPORTED_LIMITS),
+        }
+
+    def fingerprint(self) -> dict[str, Any]:
+        """The subset of `identity()` that decides whether two runs match.
+
+        Everything here goes into `RunSpec.proposer_backend`'s config and
+        therefore into the checkpoint fingerprint, so a resume against a
+        changed deployment is refused rather than quietly comparing two
+        different experiments.
+
+        Absolute paths are deliberately excluded and replaced by content: the
+        same checkout at a different location is the same experiment, and
+        hashing its path would refuse a legitimate resume after a move. What
+        remains is what actually decides behaviour — the cordis file's
+        content, the runtime entry's content, the endpoint, and the limits
+        this backend cannot enforce.
+        """
+
+        return {
+            "kind": "dsh-sdk",
+            "config_hash": self.config_hash(),
+            "runtime_argv": [_content_id(part) for part in self.runtime_argv],
             "provider": self.provider,
             "model": self.model,
             "unsupported_limits": list(UNSUPPORTED_LIMITS),

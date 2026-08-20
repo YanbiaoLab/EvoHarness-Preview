@@ -2,7 +2,7 @@
 
 > 状态:**v5(2026-08-18 晚)—— DH-1 已落地并跑通一次真实进化**。相对 v4 的三处改判都由实测或用户决定驱动:①`cost_usd` 的价目表方案**作废**(用户决定:成本统计是次要信号,不得写死在代码里、不得变成阻断项);②`finish_reason` 的词表 v4 猜错了,真实取值是 dsh 的 `TurnEndReasonMap` 六个成员;③三个不可强制的 limit 的风险被**下调**——`_ProposalUsage.absorb` 在调用方一侧 fail-closed。架构与接缝不变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证)。v3.1 的两层架构图与决定六原样保留。整篇取代 v4、v3.2、v3.1、v2.1 与 v1。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview,rc.5)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)。
 >
-> **当前进度一句话**:DH-0 与 DH-1 完成,DH-2 与 DH-3 各完成一半;**最大的未清项是身份没进 `spec_hashes`**(换 cordis 配置能 resume 旧 run 目录),其次是 DH-0.5 的守卫判据仍是错的。**另有一个新发现的阻塞:`evoharness/evoweb/` 已删,治理层当前没有任何人类入口**——DH-5 因此从"要不要让 dsh 参与"改写成"dsh 参与到哪一层"的三层切分。
+> **当前进度一句话(v6,2026-08-20)**:DH-0、DH-1 完成;**身份已进 `spec_hashes`,决定四成立**——换 cordis 配置或换 runtime 入口再 resume 旧 run 目录会被现有指纹不符路径拒掉,换机器路径不会被误拒。DH-2 只剩对拍与断路器语义,DH-3 只剩真实链路的四项验证。**当前最大的未清项回到 DH-0.5:守卫判据仍是错的**(候选是根 agent,按深度写的判据对它不生效)。治理层人类入口的空缺已部分补上:`evoharness/readout/` 提供只读读出,`evoharness/launch/` 提供不阻塞的起跑,DH-5 第一、二层因此有了可调用的 Python 面。
 >
 > 一句话定位:**dsh 执行一次 Agent 循环,Python 驱动搜索与裁决**。dsh 出运行时——模型、工具、沙箱、会话日志;EvoHarness 出算法与裁决——种群搜索、修复策略、证据契约、研究治理。二者之间是 `AgentBackend` 这一个方法,不是嵌套控制流。
 
@@ -123,7 +123,14 @@ flowchart TD
 
 该哈希进 checkpoint 指纹。换配置后对同一 run 目录 resume,Python 按现有指纹不符语义直接拒绝。dsh 升级即换身份,没有热升级。
 
-**⚠️ v5 实测缺口:这一条只做了一半。** `DshRuntimeSpec.identity()` 已经产出上述内容,并写进了 run manifest 的 `proposal.agent_backend.identity`;但 `RunSpec.proposer_backend` 里记的**仍是单发模式的 `_OpenAICompatTransport`**,身份因此**没有进 `spec_hashes`**。具体后果:换掉 `candidate.cordis.yml` 再 resume 同一个 run 目录,**不会被拒**。见 DH-2。
+**v6 已闭合。** `DshRuntimeSpec.fingerprint()` 现在进 `RunSpec.proposer_backend` 的 `ComponentSpec.config`,顺着 `frozen_spec_hashes` → `checkpoint_configs` → `SearchLoop._config_fingerprint()` 走到已有的"指纹不符即拒"路径,不需要改 `RunSpec` 的字段语义。装配顺序也跟着改了:dsh backend 必须在 `RunSpec` **之前**构造,否则被哈希的仍是 transport。
+
+`identity()` 与 `fingerprint()` 分成两个方法是刻意的,**因为它们回答的不是同一个问题**:
+
+- `identity()` 回答"这次跑用的是哪份文件",带绝对路径,进 manifest 给人看;
+- `fingerprint()` 回答"两次跑算不算同一个实验",**不含任何绝对路径**——cordis 与 runtime 入口都换成内容哈希。
+
+按路径判同一性两个方向都会错:同一份 checkout 换台机器会被误拒(和 `source_dir` 那次是同一个 bug),而路径没变、文件内容改了则漏判。内容哈希两边都对。已有变异对照:把绝对路径塞回 `fingerprint()`,三个用例立刻红;把 dsh 分支短路掉,四个用例立刻红。
 
 **决定五:治理留在 EvoHarness,不迁进 dsh 的审批 seam。** dsh 的审批是会话内操作级、同步、以秒计;Research Inbox 的决策是跨天治理级、异步、要证据引用与署名。两者粒度不匹配,合并会让其中一个变形。决定仍只认 `InboxStore` 的 actor 鉴权路径。
 
@@ -238,7 +245,7 @@ Python SearchLoop
 
 - [x] 接线 —— 没有新建 lane,而是给 `RecipeContext` 加了 `agent_backend` 覆盖位,由 `_build_proposer` 在 agent 模式下**替换**进程内运行时;`experiments/run_evolution.py` 加 `--dsh-config` / `--dsh-runtime`(必须成对)。替换而非包装是刻意的:外部运行时自带工具集、上下文策略与沙箱,`max_input_tokens` / `max_parallel_tools` / 压缩阈值对它一个都不适用,同时把 `tools` 清空——**manifest 不得列出候选从未见过的工具**。
 - [x] 冷 trace —— `JsonlEventSinkFactory` 原样可用;SDK 的 `session_root` 指到 `<run>/dsh_sessions/`,dsh 原始会话日志与翻译后的 `AgentEvent` 并存(决定二要求的"两份都留")。
-- [ ] **身份进 `spec_hashes`(承重,未做)** —— `identity()` 目前只写进 manifest 的 `proposal.agent_backend`,`RunSpec.proposer_backend` 里仍是 `_OpenAICompatTransport`。**换 cordis 配置能 resume 旧 run 目录**,决定四不成立。牵扯 `RunSpec` 字段语义,不是顺手能改的。
+- [x] **身份进 `spec_hashes`** —— 2026-08-20 落地。`fingerprint()` 进 `ComponentSpec.config`,`build()` 把 dsh backend 挪到 `RunSpec` 之前构造。没有改 `RunSpec` 的字段语义:`ComponentSpec.config` 本来就是自由 dict 且整体进哈希。测试在 `tests/test_launch_build.py`(装配这一跳)与 `tests/test_agent_dsh_backend.py`(指纹本身),两个方向都有变异对照。
 - [ ] backend 对拍(fake 与 dsh 返回结构等价)—— 未做。
 - [ ] 断路器语义测试(`proposer_dead` 路径)—— 未做;真实跑 `proposals_failed: 0`,失败路径一次没走到。
 
@@ -313,7 +320,7 @@ Python SearchLoop
 | 守卫判据按深度写,候选是根 agent 因而被放过 | **已实测发生**;DH-0.5 改为无条件拒绝并反转两个用例 |
 | 会话日志被当证据 | 决定二;audit 断言候选必须带 EvidenceEnvelope 而非 session id |
 | 候选改写运行环境 | 决定三:`tools.guard()` 承重、`restrict()` 兜底;DH-0 已验含嵌套穿透 |
-| 换 cordis 配置还能 resume | 决定四:配置内容哈希进 checkpoint 指纹,不符即拒。**⚠️ v5 实测:目前正在发生**——身份只进了 manifest,没进 `spec_hashes`(DH-2 未清项) |
+| 换 cordis 配置还能 resume | 决定四:配置内容哈希进 checkpoint 指纹,不符即拒。**v6 已闭合**,cordis 与 runtime 入口都按内容进 `run_hash`;换机器路径不误拒 |
 | ~~`cost_usd` 静默归零 → 预算门永不触发~~ | **v5 重述**:归零是明文设计,`cost_priced: false` 使"没定价"与"免费"可区分。真风险改为:**`--budget-usd` 对提案侧失效**,预算停机只剩评测侧 |
 | 三个 limit 被当成硬上限 | DH-1:`UNSUPPORTED_LIMITS` 进 identity 与 SESSION_START 事件。**v5 下调**:`_ProposalUsage.absorb` 在调用方 fail-closed,超限代价是浪费一次会话而非无上限 |
 | 同 session 无法恢复修复上下文 | DH-1 已实现,**但只有单元测试**;真实跑 `repair_rounds: 0` 没走到该路径。停止线保留 |
@@ -356,20 +363,20 @@ Python SearchLoop
 ## 8. 停止线
 
 ```text
-DH-0(done) → DH-0.5(未做) → DH-1(done) → DH-2(半) → DH-3(半) → [DH-4 已跳过] → DH-5 → DH-6
+DH-0(done) → DH-0.5(未做) → DH-1(done) → DH-2(承重项已闭合,余对拍) → DH-3(半) → [DH-4 已跳过] → DH-5 → DH-6
 ```
 
 - ~~DH-0 守卫拦不住插件挂载能力~~ —— **已通过**,含嵌套穿透与抗翻案;
 - **DH-0.5 守卫判据仍未改为无条件拒绝**:后续所有基于守卫的结论都不成立,**不得据此声称候选被隔离**。已跑过的真实进化里守卫对候选未生效——这是明文状态,不是推测;
 - DH-1 同 `session_id` 无法恢复 Agent 上下文:不得替换现有可修复 agentic lane。**当前状态:实现了但只有单元测试背书**,真实链路未走到,该停止线保留;
 - ~~DH-1 `cost_usd` 无法换算即构造失败~~ —— **v5 撤销**。改为:未配价必须标 `cost_priced: false`,且**不得声称提案侧受 `--budget-usd` 约束**;
-- **DH-2 身份未进 `spec_hashes` 期间**:不得对同一 run 目录换配置后 resume,也不得把两次 run 当作同一实验比较——运行环境的差异当前不会被任何机制拦住;
+- ~~DH-2 身份未进 `spec_hashes`~~ —— **v6 解除**。仍存的边界:`fingerprint()` 只哈希 cordis 文件本身与 runtime 入口文件本身,**插件包内部按版本区间升级不会被发现**(`identity()` 的 v1 近似,原样继承)。锁文件或 `dsh --dump-config` 才能补上,尚未做;
 - DH-2 对拍不过:不得进入**用于产生结论的**真实进化(demo_counter 这种验证性跑不受此限,已跑);
 - DH-3 候选不可回溯:不得用于产生对外结论;
 - DH-4 对抗测试未通过期间:不得无人值守运行(常设);
 - DH-5 反向断言不过(agent 的解读能变成 verdict):copilot 不得接入证据解读环节;
 - **DH-5 第三层未满足四项前提**(签字由人发起、`actor` 进程侧绑定、决定记来源、存在不依赖活会话的答复路径):dsh 会话不得具备任何答复卡片的能力,只做第一、二层;
-- **治理闭环当前是断的**(evoweb 已删):在恢复任一人类入口之前,不得声称实验经过治理审批,也不得让任何自动路径以"卡片已批"为前提继续;
+- **治理闭环当前仍是断的**:`evoharness/readout/` 补的是"看得到跑成什么样",**不是**"人能签字"。在恢复答复入口之前,不得声称实验经过治理审批,也不得让任何自动路径以"卡片已批"为前提继续;
 - 任何阶段:判题不得进 dsh 进程,候选不得触达守卫拒绝清单上的能力,换 cordis 配置不得 resume 旧 run 目录,判定不得由 agent 产出。
 
 ## 9. 一句话主张
