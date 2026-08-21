@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Collection
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
 
 from .runtime import NativeToolAgentBackend
+from ..llm import LLMBillingError
 from ..operators import parse_change_header
 from ..population import Candidate
 from ..preflight import PreflightContext, PreflightIssue, ProposalPreflight
@@ -72,28 +73,37 @@ class _ProposalUsage:
     completion_tokens: int = 0
     last_termination: AgentTermination | None = None
     last_model: str = ""
+    #: Limits the backend went past because it had declared it could not
+    #: enforce them, as `{limit_name: observed}`. Recorded rather than
+    #: refused: see `absorb`.
+    overruns: dict[str, int] = field(default_factory=dict)
 
     def absorb(
         self,
         result: AgentSessionResult,
         run_limits: AgentSessionLimits,
+        unenforceable: Collection[str] = (),
     ) -> None:
+        """Take a backend run onto the books, then judge it.
+
+        Args:
+            run_limits: The limits for the backend run.
+            result: The result of the backend run.
+            unenforceable: limits this backend declared it cannot apply.
+            An overrun of one of those is not misbehaviour — the caller was
+            told in advance — so it is recorded and allowed. Discarding the
+            work would throw away a completed session that really edited
+            files, in exchange for nothing: the backend could not have
+            stopped at the limit, and `timeout_s` is the bound that actually
+            holds. A limit the backend DID promise is still fail-closed,
+            because there the overrun means the backend is lying about what
+            it enforces.
+        """
+
         if not isinstance(result, AgentSessionResult):
             raise _ProposalLoopError(
                 "backend-error",
                 "backend.run() must return AgentSessionResult",
-            )
-
-        if result.turns > run_limits.max_turns:
-            raise _ProposalLoopError(
-                "backend-error",
-                "backend exceeded its turn budget",
-            )
-
-        if result.tool_calls > run_limits.max_tool_calls:
-            raise _ProposalLoopError(
-                "backend-error",
-                "backend exceeded its tool budget",
             )
 
         self.attempts += 1
@@ -104,6 +114,24 @@ class _ProposalUsage:
         self.completion_tokens += result.completion_tokens
         self.last_termination = result.termination
         self.last_model = result.model or ""
+
+        for name, observed, allowed in (
+            ("max_turns", result.turns, run_limits.max_turns),
+            ("max_tool_calls", result.tool_calls, run_limits.max_tool_calls),
+        ):
+            if observed <= allowed:
+                continue
+            if name in unenforceable:
+                # Visible, not silent. A run whose candidates all overran is
+                # one whose turn limit is decoration, and a reader has to be
+                # able to see that rather than infer it from session lengths.
+                self.overruns[name] = max(self.overruns.get(name, 0), observed)
+                continue
+            raise _ProposalLoopError(
+                "backend-error",
+                f"backend exceeded its {name} budget "
+                f"({observed} > {allowed}) while claiming to enforce it",
+            )
 
     def remaining_limits(
         self,
@@ -126,9 +154,14 @@ class _ProposalUsage:
 
         remaining_tools = total.max_tool_calls - self.tool_calls
         if remaining_tools < 0:
+            # Reachable without anyone misbehaving now that a backend which
+            # cannot enforce a tool budget is allowed to pass it. Refusing the
+            # NEXT session is enforceable even when stopping the last one was
+            # not, so this ends the repair loop rather than blaming the
+            # backend for accounting it was told it could not do.
             raise _ProposalLoopError(
-                "backend-error",
-                "tool accounting exceeded the total budget",
+                "tool-limit",
+                "proposal tool budget was exhausted",
             )
 
         remaining_cost: float | None = None
@@ -439,7 +472,7 @@ class AgentSessionProposer(Proposer):
     def __init__(
         self,
         *,
-        backend: AgentBackend | NativeToolAgentBackend ,
+        backend: AgentBackend | NativeToolAgentBackend | object ,
         preflight: ProposalPreflight,
         limits: AgentSessionLimits,
         event_sink_factory: EventSinkFactory,
@@ -481,6 +514,14 @@ class AgentSessionProposer(Proposer):
         )
         self.clock = clock
         self.proposal_id_factory = proposal_id_factory
+        # Which limits this backend says it cannot apply. Asked once, here,
+        # rather than per proposal: a backend that changed its answer midway
+        # would make two proposals of one run incomparable. Absent means the
+        # backend claims all of them, which is the strict reading and the
+        # right default for one that never thought about it.
+        self._unenforceable_limits = frozenset(
+            getattr(backend, "unsupported_limits", ()) or ()
+        )
 
     def propose(
         self,
@@ -544,6 +585,14 @@ class AgentSessionProposer(Proposer):
                     operator=operator,
                     started_at=started_at,
                 )
+        except LLMBillingError:
+            # An empty account is not a proposal failure, and reporting it as
+            # one is actively misleading: ETP run 12 spent five generations
+            # planning slots that could never run, then stopped on
+            # "proposer_dead" -- which sends someone to debug the proposer
+            # while the only problem was an unpaid balance. Let it reach the
+            # SearchLoop, which stops the run and names the real cause.
+            raise
         except _ProposalResourceError as exc:
             logger.warning("agent proposal resource failure: %s", exc)
             return self._failure(
@@ -610,6 +659,14 @@ class AgentSessionProposer(Proposer):
                 system=system,
                 user=user,
             )
+        except LLMBillingError:
+            # An empty account is not a proposal failure, and reporting it as
+            # one is actively misleading: ETP run 12 spent five generations
+            # planning slots that could never run, then stopped on
+            # "proposer_dead" -- which sends someone to debug the proposer
+            # while the only problem was an unpaid balance. Let it reach the
+            # SearchLoop, which stops the run and names the real cause.
+            raise
         except _ProposalResourceError as exc:
             logger.warning("agent proposal resource failure: %s", exc)
             return self._failure(
@@ -674,13 +731,15 @@ class AgentSessionProposer(Proposer):
 
             try:
                 result = self.backend.run(request)
+            except LLMBillingError:
+                raise
             except Exception as exc:
                 raise _ProposalLoopError(
                     "backend-error",
                     f"{type(exc).__name__}: {exc}",
                 ) from exc
 
-            usage.absorb(result, run_limits)
+            usage.absorb(result, run_limits, self._unenforceable_limits)
             resources.bind_session(result.session_id)
 
             if result.termination is AgentTermination.BACKEND_ERROR:
@@ -855,6 +914,11 @@ class AgentSessionProposer(Proposer):
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
             "cost_usd": usage.cost_usd,
+            # Present only when a limit was passed, so its absence is the
+            # ordinary case rather than a field nobody reads. A candidate
+            # carrying this ran longer than the configuration asked for, and
+            # a reader comparing two runs needs that in front of them.
+            **({"limit_overruns": dict(usage.overruns)} if usage.overruns else {}),
             "termination": result.termination.value,
             "agent_elapsed_s": max(
                 0.0,

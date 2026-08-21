@@ -497,6 +497,60 @@ def test_an_argv_element_that_is_not_a_file_passes_through(tmp_path):
     assert spec.fingerprint()["runtime_argv"] == ["node", "--import", "tsx/esm"]
 
 
+class _NullSinkFactory:
+    """Satisfies EventSinkFactory for cases that never open a session."""
+
+    def open(self, *, proposal_id, parent_id, operator):
+        raise AssertionError("this case does not run a proposal")
+
+
+def test_the_backend_declares_its_unenforceable_limits_to_the_proposer(spec):
+    """The proposer reads this off the backend to decide whether an overrun is
+    misbehaviour or an outcome it was warned about. Reached through the
+    backend rather than the spec because that is what the proposer holds."""
+
+    backend = DshAgentBackend(spec)
+    assert backend.unsupported_limits == UNSUPPORTED_LIMITS
+    assert "max_turns" in backend.unsupported_limits
+
+
+def test_a_session_that_outruns_its_turn_budget_is_kept(spec, tmp_path):
+    """Five live proposals were discarded this way. Each had terminated
+    `completed`, run five to ten turns against a limit of three, and really
+    edited files; dsh has no turn ceiling to have stopped them at. The whole
+    generation was thrown away and the run stopped as `proposer_dead`.
+
+    End to end from the backend, because the declaration and the decision sit
+    in different classes and the wire between them is the part that was
+    missing.
+    """
+
+    from evoharness.core import AgentSessionResult
+    from evoharness.core.agent.session_proposer import (
+        AgentSessionProposer,
+        _ProposalUsage,
+    )
+
+    proposer = AgentSessionProposer(
+        backend=DshAgentBackend(spec),
+        preflight=ProposalPreflight(PreflightPipeline(())),
+        limits=AgentSessionLimits(max_turns=2, timeout_s=30),
+        event_sink_factory=_NullSinkFactory(),
+        work_root=tmp_path / "work",
+    )
+
+    accounting = _ProposalUsage()
+    accounting.absorb(
+        AgentSessionResult(
+            termination=AgentTermination.COMPLETED, turns=7, tool_calls=4
+        ),
+        AgentSessionLimits(max_turns=2, max_tool_calls=120),
+        proposer._unenforceable_limits,  # noqa: SLF001
+    )
+    assert accounting.turns == 7
+    assert accounting.overruns == {"max_turns": 7}
+
+
 def test_the_trace_records_what_the_candidate_was_told(spec, tmp_path):
     """The cold trace has to answer what was ASKED, not only what was done.
 

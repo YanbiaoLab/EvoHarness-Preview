@@ -278,7 +278,13 @@ Python SearchLoop
 - [ ] **可回溯四跳** —— 前三跳通(候选 → `session_id` → 冷 trace → `dsh_sessions/*/session.jsonl`),未系统验证。
 - [ ] 杀掉进程再 resume —— 未做。
 - [ ] `scripts/audit.py` 活性检查(dsh 后端的 run,agentic 候选必须带 session 引用,全零即 DEAD)—— 未做。
-- [ ] **turn 预算的洞未被逼出来** —— 预测的 `absorb` 硬失败没发生,因为默认上限是 48/120 而实测只用到 10/15。**这不是"问题不存在",是任务太小**。把 `proposal.max_turns=3` 再跑一次即可复现。
+- [x] **turn 预算的洞已逼出并处理(2026-08-21)** —— `proposal.max_turns=3` + `deepseek-v4-pro` 复现:五个会话**全部 `completed`**、跑了 5–10 轮、真的改了文件(`final_patch_present: true`),然后被 `absorb` 全部丢弃 → 断路器 → `proposer_dead`、`evaluations: 1`。
+
+  查的时候顺带发现一个更要紧的:**`absorb` 的检查在累加之前**,所以被拒会话的花费一分没记上。实测那次真花了 16,836 输入 / 6,776 输出 token,而五份 summary 全是 `turns: 0, prompt_tokens: 0, cost_usd: 0.0`。「返回 BACKEND_ERROR 而不是 raise,是为了把失败会话的花费记上账」这条理由**对这个分支恰好是反的**。
+
+  两处一起改:①**先记账,后判定**;②超限的判定改成**看后端有没有承诺过这个上限**——`AgentSessionProposer` 从 `backend.unsupported_limits` 读,承诺过还超就是后端撒谎,**仍然 fail-closed**;没承诺过(dsh 的三项)就**记录并放行**,写进候选的 `limit_overruns`。丢掉一个已完成、真改了代码的会话换不来任何东西:后端本来就停不住,真正能强制的是 `timeout_s`。
+
+  同配置复跑:`completed`、6/6 代、`best_fitness: 1.0`、`evaluations: 5`,四个候选带 `limit_overruns`,其中三个 fitness 1.0——**全是原来会被丢掉的工作**。审计的 `turn budget` 也跟着改了:只数 `termination == turn_limit` 在这种后端下永远是 0,现在读候选身上的 `limit_overruns`。
 
 **v5 观测到的翻译损耗**(未译事件按类计数):`assistant/chunk` 586、`step/start`/`step/end` 各 16、`turn/start`/`turn/end` 各 2、`user/message` 2、`session/title` 2、`request/header` 2、`request/context` 2、`agent/inbox/spliced` 4。chunk 是流式碎片,不进冷 trace 是对的;但 **turn/step 边界丢了**,后果是从冷 trace 里重建不出"哪几次模型调用属于同一轮",下钻只能看到平铺事件。要不要补映射取决于下钻时想不想要轮次结构。
 
@@ -341,7 +347,7 @@ Python SearchLoop
 | 候选改写运行环境 | 决定三:`tools.guard()` 承重、`restrict()` 兜底;DH-0 已验含嵌套穿透 |
 | 换 cordis 配置还能 resume | 决定四:配置内容哈希进 checkpoint 指纹,不符即拒。**v6 已闭合**,cordis 与 runtime 入口都按内容进 `run_hash`;换机器路径不误拒 |
 | ~~`cost_usd` 静默归零 → 预算门永不触发~~ | **v5 重述**:归零是明文设计,`cost_priced: false` 使"没定价"与"免费"可区分。真风险改为:**`--budget-usd` 对提案侧失效**,预算停机只剩评测侧 |
-| 三个 limit 被当成硬上限 | DH-1:`UNSUPPORTED_LIMITS` 进 identity 与 SESSION_START 事件。**v5 下调**:`_ProposalUsage.absorb` 在调用方 fail-closed,超限代价是浪费一次会话而非无上限 |
+| 三个 limit 被当成硬上限 | **v6 重述(2026-08-21 实测)**:「浪费一次会话」的代价是真的,而且实测把整代都赔进去了(五个 completed 会话全丢 → `proposer_dead`)。现方案:**没承诺的上限记录并放行**(`limit_overruns` 进候选 metadata、进审计),**承诺过的仍 fail-closed**。唯一真硬的是 `timeout_s` |
 | 同 session 无法恢复修复上下文 | DH-1 已实现,**但只有单元测试**;真实跑 `repair_rounds: 0` 没走到该路径。停止线保留 |
 | 冷 trace 丢失轮次结构 | v5 实测:`turn/*` 与 `step/*` 未翻译。下钻只见平铺事件,重建不出轮次归属。补映射与否待定 |
 | **提示词点名候选没有的工具** | **v6 已修**:`PromptBuilder` 收工具名而不是猜模式,`recipes/common.py` 从 registry 推。缺省是不点名 |
@@ -392,6 +398,7 @@ DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍
 - ~~DH-0.5 守卫判据仍未改为无条件拒绝~~ —— **v6 解除**。仍存的边界:守卫管的是**工具调用**,不是文件系统。`workspace-write` 只 confine 改不 confine 读,候选用 bash 照样读得到 run 目录(全代全员、`hidden_metrics`)。**不得声称候选被隔离,只能声称拒绝清单上的工具调用不通**。前者要等 DH-4;
 - DH-1 同 `session_id` 无法恢复 Agent 上下文:不得替换现有可修复 agentic lane。**当前状态:实现了但只有单元测试背书**,真实链路未走到,该停止线保留;
 - ~~DH-1 `cost_usd` 无法换算即构造失败~~ —— **v5 撤销**。改为:未配价必须标 `cost_priced: false`,且**不得声称提案侧受 `--budget-usd` 约束**;
+- **不得声称 `max_turns` / `max_tool_calls` 在 dsh 后端下是硬上限**。它们现在是记录项:超了照过,记进候选的 `limit_overruns` 与审计。要限住一次会话只有 `timeout_s`;
 - ~~DH-2 身份未进 `spec_hashes`~~ —— **v6 解除**。仍存的边界:`fingerprint()` 只哈希 cordis 文件本身与 runtime 入口文件本身,**插件包内部按版本区间升级不会被发现**(`identity()` 的 v1 近似,原样继承)。锁文件或 `dsh --dump-config` 才能补上,尚未做;
 - DH-2 对拍不过:不得进入**用于产生结论的**真实进化(demo_counter 这种验证性跑不受此限,已跑);
 - DH-3 候选不可回溯:不得用于产生对外结论;

@@ -286,6 +286,18 @@ class DshAgentBackend:
         self.clock = clock
         self._sessions: dict[str, _LiveSession] = {}
 
+    @property
+    def unsupported_limits(self) -> tuple[str, ...]:
+        """Limits the caller may set that this backend cannot apply.
+
+        Read by `AgentSessionProposer`, which records an overrun of one of
+        these instead of refusing the proposal: dsh has no turn or tool-call
+        ceiling to hand a session, so discarding a completed session for
+        passing one would throw away real work in exchange for nothing.
+        """
+
+        return self.spec.unsupported_limits
+
     # -- AgentBackend ----------------------------------------------------
 
     def run(self, request: AgentSessionRequest) -> AgentSessionResult:

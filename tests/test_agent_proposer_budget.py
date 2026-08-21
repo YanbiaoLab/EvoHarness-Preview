@@ -139,6 +139,8 @@ def test_remaining_limits_stop_exhausted_runs(
     ],
 )
 def test_usage_rejects_backend_hard_limit_violations(result):
+    """A backend that claims a limit and passes it is misbehaving."""
+
     usage = _ProposalUsage()
     run_limits = AgentSessionLimits(
         max_turns=2,
@@ -148,4 +150,61 @@ def test_usage_rejects_backend_hard_limit_violations(result):
     with pytest.raises(_ProposalLoopError, match="backend-error"):
         usage.absorb(result, run_limits)
 
-    assert usage.attempts == 0
+    # ...but the session still happened, so it is on the books. This used to
+    # assert `attempts == 0`: the run was refused before a single field was
+    # recorded, so the tokens were spent at the provider and counted nowhere.
+    # One live run spent 16,836 input and 6,776 output tokens across five
+    # rejected proposals and reported zero for every one of them.
+    assert usage.attempts == 1
+    assert usage.turns == result.turns
+    assert usage.tool_calls == result.tool_calls
+
+
+@pytest.mark.parametrize(
+    "limit,result",
+    [
+        ("max_turns", make_result(turns=3)),
+        ("max_tool_calls", make_result(tool_calls=3)),
+    ],
+)
+def test_an_overrun_of_an_unenforceable_limit_is_recorded_not_refused(
+    limit, result
+):
+    """dsh has no turn or tool ceiling to hand a session, so a limit the
+    caller sets is a wish. Discarding a completed session for passing one
+    throws away real work and buys nothing — the backend could not have
+    stopped, and `timeout_s` is the bound that actually holds."""
+
+    usage = _ProposalUsage()
+    run_limits = AgentSessionLimits(max_turns=2, max_tool_calls=2)
+
+    usage.absorb(result, run_limits, unenforceable=(limit,))
+
+    assert usage.attempts == 1
+    # Allowed, but never silent: a run whose candidates all overran has a
+    # turn limit that is decoration, and that has to be visible.
+    assert usage.overruns == {limit: 3}
+
+
+def test_declaring_one_limit_unenforceable_does_not_excuse_the_other():
+    usage = _ProposalUsage()
+    result = make_result(turns=3, tool_calls=3)
+
+    with pytest.raises(_ProposalLoopError, match="max_tool_calls"):
+        usage.absorb(
+            result,
+            AgentSessionLimits(max_turns=2, max_tool_calls=2),
+            unenforceable=("max_turns",),
+        )
+    assert usage.overruns == {"max_turns": 3}
+
+
+def test_a_backend_that_says_nothing_is_held_to_every_limit():
+    """The strict reading is the default: a backend that never considered the
+    question has not been excused from anything."""
+
+    usage = _ProposalUsage()
+    with pytest.raises(_ProposalLoopError, match="backend-error"):
+        usage.absorb(
+            make_result(turns=3), AgentSessionLimits(max_turns=2)
+        )

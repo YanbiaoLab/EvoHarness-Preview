@@ -237,6 +237,36 @@ def test_a_dirty_tree_is_warned_about_under_either_spelling(tmp_path):
     assert "not reproducible" in detail
 
 
+def test_a_budget_the_backend_ran_past_is_reported(tmp_path):
+    """A backend that cannot enforce the budget never terminates as
+    `turn_limit` — it runs past and the overrun lands on the candidate.
+    Counting only the termination said "0 hit the limit" for a run where
+    every proposal had gone over."""
+
+    over = _candidate("c1", 1, session_id="s1")
+    metadata = json.loads(over[9]) | {"limit_overruns": {"max_turns": 7}}
+    run_dir = _run(
+        tmp_path,
+        proposal=AGENTIC,
+        candidates=[over[:9] + (json.dumps(metadata),)],
+        sessions=[{"sid": "s1"}],
+    )
+    status, detail = _findings(run_dir)["turn budget"]
+    assert status == "WARN"
+    assert "ran past" in detail
+    assert "advisory" in detail
+
+
+def test_a_run_that_stayed_inside_its_budget_is_not_warned_about(tmp_path):
+    run_dir = _run(
+        tmp_path,
+        proposal=AGENTIC,
+        candidates=[_candidate("c1", 1, session_id="s1")],
+        sessions=[{"sid": "s1"}],
+    )
+    assert _findings(run_dir)["turn budget"][0].strip() == "ok"
+
+
 def test_an_empty_experience_buffer_says_which_emptiness_it_is(tmp_path):
     """The verdict and the words have to agree: DEAD next to "no offspring
     yet" reads as "nothing to report" and gets dismissed."""

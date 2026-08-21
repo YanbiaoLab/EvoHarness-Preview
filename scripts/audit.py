@@ -354,8 +354,19 @@ def audit(run_dir, research_root=None):
         turns = [s.get("turns", 0) for s in sessions]
         pinned = sum(1 for s in sessions
                      if s.get("termination") == "turn_limit")
-        report(WARN if pinned else OK, "turn budget",
-               f"turns {min(turns)}-{max(turns)}, {pinned} hit the limit")
+        # A backend that cannot enforce the budget never terminates as
+        # `turn_limit`; it runs past and the overrun is recorded on the
+        # candidate. Counting only the termination reported "0 hit the limit"
+        # for a run where every proposal had gone over.
+        overran = sum(
+            1 for row in rows
+            if row[9] and json.loads(row[9]).get("limit_overruns")
+        )
+        report(WARN if pinned or overran else OK, "turn budget",
+               f"turns {min(turns)}-{max(turns)}, {pinned} stopped at the "
+               f"limit, {overran} ran past one the backend cannot enforce"
+               + (" — the configured budget is advisory here, and timeout_s "
+                  "is the bound that holds" if overran else ""))
         report(WARN if prompt_tokens / max(1, len(sessions)) > 150_000 else OK,
                "context cost",
                f"{prompt_tokens:,} prompt tokens over {len(sessions)} "
