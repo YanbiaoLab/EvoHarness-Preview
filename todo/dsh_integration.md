@@ -277,7 +277,9 @@ Python SearchLoop
 - [ ] ~~成本对账~~ —— **随价目表一起作废**。`total_llm_cost: 0.0` 是设计结果不是 bug。**但留下一个真问题**:`--budget-usd` 现在对提案侧完全不起作用(BudgetMeter 收到的提案花费恒为 0),评测侧照常。要用预算停机,得先决定是给 backend 传价格,还是明确预算门只管评测侧。
 - [ ] **可回溯四跳** —— 前三跳通(候选 → `session_id` → 冷 trace → `dsh_sessions/*/session.jsonl`),未系统验证。
 - [ ] 杀掉进程再 resume —— 未做。
-- [ ] `scripts/audit.py` 活性检查(dsh 后端的 run,agentic 候选必须带 session 引用,全零即 DEAD)—— 未做。
+- [x] **`scripts/audit.py` 活性检查(2026-08-21)** —— 三个新检查:**traceability**(agentic 候选必须带 session 引用,全零即 DEAD)、**runtime substitution**(外部后端下若会话调了进程内工具名,说明替换没发生)、**peer fetch**(提示词点名的工具到底调没调得动)。每个都配"活着"的对照,不然一个永远返回 DEAD 的实现也能全绿。
+
+  检查本身又挖出四个:①**审计脚本自己是死的**——它读 `experiment_manifest.json`,而主线写的是 `manifest.json`,所以每次主线跑 manifest 都是 `{}`,`code version` 永远 "unknown";②`prompt sections` 对 dsh 跑永远是空,因为 dsh backend 的 `session_start` 没记系统提示词(进程内那个记了)——**"没找到"和"没法看"印出来一模一样**,已给 backend 补上并让检查说清是哪种;③`experience buffer` 的 DEAD 旁边写着"还没有后代",而实际有,读的人会直接跳过;④`turn budget` 只数 `termination == turn_limit`,而**不能强制上限的后端永远不会那样终止**,改成读候选的 `limit_overruns`。
 - [x] **turn 预算的洞已逼出并处理(2026-08-21)** —— `proposal.max_turns=3` + `deepseek-v4-pro` 复现:五个会话**全部 `completed`**、跑了 5–10 轮、真的改了文件(`final_patch_present: true`),然后被 `absorb` 全部丢弃 → 断路器 → `proposer_dead`、`evaluations: 1`。
 
   查的时候顺带发现一个更要紧的:**`absorb` 的检查在累加之前**,所以被拒会话的花费一分没记上。实测那次真花了 16,836 输入 / 6,776 输出 token,而五份 summary 全是 `turns: 0, prompt_tokens: 0, cost_usd: 0.0`。「返回 BACKEND_ERROR 而不是 raise,是为了把失败会话的花费记上账」这条理由**对这个分支恰好是反的**。
