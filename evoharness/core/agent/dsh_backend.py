@@ -112,7 +112,18 @@ class DshRuntimeSpec:
     model: str = "deepseek-v4-flash"
     runtime_cwd: Path | None = None
     session_root: Path | None = None
+    #: The run directory, handed to the runtime as `EVO_RUN_DIR` so a
+    #: peer-reading tool knows where to ask. Not part of `fingerprint()` for
+    #: the same reason `RunSpec` drops `output_dir`: the same experiment moved
+    #: to another directory is still the same experiment.
+    run_dir: Path | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    #: The name the candidate's cordis config gives its peer-reading tool, or
+    #: None when that deployment mounts none. A DECLARATION, not a probe —
+    #: Python cannot see the runtime's tool table, so naming a tool the config
+    #: does not mount makes the prompt lie about it. It enters `fingerprint()`
+    #: so at least two deployments that differ here are not compared as one.
+    peer_fetch_tool: str | None = None
     # Optional USD per million tokens for this spec's model, as
     # `(input, output)`. Left unset the backend reports tokens only: the
     # trusted spend ledger is BudgetMeter's `budget.json`, so a price here is a
@@ -138,6 +149,11 @@ class DshRuntimeSpec:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be non-empty")
+        if self.peer_fetch_tool is not None and (
+            not isinstance(self.peer_fetch_tool, str)
+            or not self.peer_fetch_tool.strip()
+        ):
+            raise ValueError("peer_fetch_tool must be non-empty when set")
         if self.price_usd_per_mtok is not None and (
             not isinstance(self.price_usd_per_mtok, tuple)
             or len(self.price_usd_per_mtok) != 2
@@ -175,6 +191,7 @@ class DshRuntimeSpec:
             "runtime_argv": list(self.runtime_argv),
             "provider": self.provider,
             "model": self.model,
+            "peer_fetch_tool": self.peer_fetch_tool,
             "unsupported_limits": list(UNSUPPORTED_LIMITS),
         }
 
@@ -200,6 +217,9 @@ class DshRuntimeSpec:
             "runtime_argv": [_content_id(part) for part in self.runtime_argv],
             "provider": self.provider,
             "model": self.model,
+            # What the candidate can reach is part of what the experiment IS,
+            # and this also decides what the prompt promises it.
+            "peer_fetch_tool": self.peer_fetch_tool,
             "unsupported_limits": list(UNSUPPORTED_LIMITS),
         }
 
@@ -334,6 +354,22 @@ class DshAgentBackend:
         # deployment reads DSH_SYSTEM_PROMPT, so the runtime carries it for
         # every turn including resumed ones.
         env["DSH_SYSTEM_PROMPT"] = request.system
+        # What a peer-reading tool in the runtime needs to ask Python back.
+        # All three come from this process rather than being discovered on the
+        # other side: the run directory is not derivable from the runtime's
+        # cwd (that is a temporary directory holding one candidate's files),
+        # and an interpreter found on PATH is not necessarily the one this
+        # harness is installed in.
+        if self.spec.run_dir is not None:
+            import sys
+
+            import evoharness
+
+            env["EVO_RUN_DIR"] = str(self.spec.run_dir)
+            env["EVO_PYTHON"] = sys.executable
+            env["EVO_HARNESS_ROOT"] = str(
+                Path(evoharness.__file__).resolve().parent.parent
+            )
 
         harness = DeepSeekHarness(
             provider=self.spec.provider,

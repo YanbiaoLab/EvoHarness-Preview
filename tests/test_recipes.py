@@ -451,7 +451,17 @@ def test_workspace_agent_prompt_drops_dead_sections(tmp_path):
     parent, peer = _cand("p1", "parent change"), _cand("i1", "peer change")
     ctx = MutationContext(parent, [peer], [], "revise", 3)
 
-    agent = PromptBuilder("task", contributors=[], workspace_agent=True)
+    # Configured the way the in-process agentic lane configures it. The tool
+    # names are no longer inferred from the mode: an external runtime runs the
+    # same mode with none of these tools, and the builder cannot tell which it
+    # is talking to unless it is told.
+    agent = PromptBuilder(
+        "task",
+        contributors=[],
+        workspace_agent=True,
+        peer_fetch_tool="inspect_candidate",
+        workspace_read_tool="workspace_read",
+    )
     plain = PromptBuilder("task", contributors=[], workspace_agent=False)
     a_sys, a_user = agent.build(ctx)
     p_sys, p_user = plain.build(ctx)

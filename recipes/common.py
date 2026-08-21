@@ -112,11 +112,20 @@ def _build_proposer(
 ) -> tuple[Proposer, Proposer | None]:
     mode = ctx.proposal.mode
     if mode == "single_shot":
+        # No session, so no tool the prompt could send anyone to. Set on this
+        # branch rather than defaulted at the reader, so every lane leaves the
+        # same key behind and a missing one stays a bug rather than an
+        # assumption.
+        ctx.extras["prompt_tools"] = {
+            "peer_fetch": None,
+            "workspace_read": None,
+        }
         ctx.extras["proposal_manifest"] = {
             "mode": mode,
             "models": list(ctx.search.llm_models),
             "max_resamples": ctx.search.max_op_resamples,
             "tools": [],
+            "prompt_tools": dict(ctx.extras["prompt_tools"]),
             # Recorded on this branch too: the admission checks run for every
             # lane, so a manifest that names them only under agent modes makes
             # a single-shot run look like it had none.
@@ -146,6 +155,9 @@ def _build_proposer(
         )
     )
     registry = AgentToolRegistry(tools)
+    external_peer_fetch = getattr(
+        getattr(ctx.agent_backend, "spec", None), "peer_fetch_tool", None
+    )
     if ctx.agent_backend is not None:
         # An external runtime brings its own tools, its own context policy and
         # its own confinement, so none of the in-process knobs above apply to
@@ -186,6 +198,23 @@ def _build_proposer(
     preflight = ProposalPreflight(
         PreflightPipeline(ctx.preflight_validators)
     )
+    # Which tool names the prompt is allowed to say out loud. Derived from the
+    # registry that was actually built, plus what an external runtime declares
+    # it mounts — never from the proposal mode, because agentic mode stopped
+    # implying the in-process tool set the moment a backend could replace it.
+    # A prompt that names an absent tool sends the agent after nothing, and in
+    # the peer-fetch case it also withholds the source it stood in for.
+    available = {definition.name for definition in registry.definitions}
+    ctx.extras["prompt_tools"] = {
+        "peer_fetch": (
+            "inspect_candidate"
+            if "inspect_candidate" in available
+            else external_peer_fetch
+        ),
+        "workspace_read": (
+            "workspace_read" if "workspace_read" in available else None
+        ),
+    }
     ctx.extras["proposal_manifest"] = {
         "mode": mode,
         "model": model,
@@ -218,6 +247,10 @@ def _build_proposer(
         ),
         "compact_trigger_ratio": ctx.proposal.compact_trigger_ratio,
         "tools": [definition.name for definition in registry.definitions],
+        # Next to `tools` on purpose. A run whose prompt named a tool absent
+        # from that list is misinforming its candidates, and this is the only
+        # place the two can be compared after the fact.
+        "prompt_tools": dict(ctx.extras["prompt_tools"]),
         "preflight_validators": [
             validator.name for validator in ctx.preflight_validators
         ],
@@ -401,11 +434,19 @@ def assemble(
         for item in [*contributors, *(observers or []), *weight_policies]
     }
     ctx.extras["capabilities_declared"] = _declared_capabilities(mounted_names)
+    prompt_tools = ctx.extras["prompt_tools"]
+    agentic = ctx.proposal.mode == "agentic"
     prompt_builder = PromptBuilder(
         ctx.search.task_sys_msg,
         language=ctx.search.language,
         contributors=contributors,
-        workspace_agent=ctx.proposal.mode == "agentic",
+        workspace_agent=agentic,
+        # Only a session with tools can be told to call one. The single-shot
+        # lane answers in one message and has to be handed the source.
+        peer_fetch_tool=prompt_tools["peer_fetch"] if agentic else None,
+        workspace_read_tool=(
+            prompt_tools["workspace_read"] if agentic else None
+        ),
     )
     proposal_selector = None
     if hybrid_agent_proposer is not None:
@@ -414,6 +455,8 @@ def assemble(
             language=ctx.search.language,
             contributors=contributors,
             workspace_agent=True,
+            peer_fetch_tool=prompt_tools["peer_fetch"],
+            workspace_read_tool=prompt_tools["workspace_read"],
         )
         proposal_selector = HybridProposalSelector(
             single_shot=ProposalLane(

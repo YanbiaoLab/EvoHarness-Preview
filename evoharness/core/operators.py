@@ -456,23 +456,39 @@ _OPERATOR_INTENT = {
         "risk of scoring worse — small safe edits are what the REVISE "
         "operator is for."
     ),
+    # Filled in per session: whether the reference program's source is in the
+    # prompt or behind a tool depends on the runtime, and naming the wrong one
+    # sends the agent looking for a tool it does not have.
     "recombine": (
         "# This mutation: RECOMBINE\n"
         "Merge the strongest ideas of a reference program into the current "
-        "one. Read the reference with inspect_candidate first, then combine "
-        "rather than replace."
+        "one. {read} then combine rather than replace."
     ),
 }
 
+#: How to reach a reference program's source when no tool can fetch it — it is
+#: already in the prompt, because a listing the reader cannot open is worse
+#: than no listing at all.
+_PEER_SOURCE_INLINE = "Study the reference programs above,"
 
-def _operator_intent(operator: str) -> str:
+
+def _operator_intent(operator: str, peer_fetch_tool: str | None) -> str:
     """What the operator asks the agent to DO.
 
     Distinct from the operator's response-format spec, which a tool-using
     agent never follows. Without this the operator is invisible to it.
     """
-    return _OPERATOR_INTENT.get(
+    text = _OPERATOR_INTENT.get(
         operator, f"# This mutation: {operator.upper()}"
+    )
+    if "{read}" not in text:
+        return text
+    return text.format(
+        read=(
+            f"Read the reference with {peer_fetch_tool} first,"
+            if peer_fetch_tool
+            else _PEER_SOURCE_INLINE
+        )
     )
 
 
@@ -544,6 +560,8 @@ class PromptBuilder:
         contributors: list[PromptContributor] | None = None,
         rng: np.random.Generator | None = None,
         workspace_agent: bool = False,
+        peer_fetch_tool: str | None = None,
+        workspace_read_tool: str | None = None,
     ):
         self.task_sys_msg = task_sys_msg
         self.language = language
@@ -551,7 +569,25 @@ class PromptBuilder:
         self.rng = rng or np.random.default_rng()
         if not isinstance(workspace_agent, bool):
             raise TypeError("workspace_agent must be bool")
+        for name, value in (
+            ("peer_fetch_tool", peer_fetch_tool),
+            ("workspace_read_tool", workspace_read_tool),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when set")
         self.workspace_agent = workspace_agent
+        #: The tool this reader can call to fetch another candidate's source,
+        #: or None when it has none. None does not mean a shorter prompt — it
+        #: means the source must be rendered inline, because there is no
+        #: second chance to fetch it.
+        self.peer_fetch_tool = peer_fetch_tool
+        #: The tool this reader calls to read its own materialized files, or
+        #: None to describe the workspace without naming a tool. Losing this
+        #: one costs a name, not data: the files are already on disk and any
+        #: file tool reaches them.
+        self.workspace_read_tool = workspace_read_tool
 
     def _system(self, ctx: MutationContext, spec: str) -> str:
         parts = [_BASE_SYS]
@@ -568,17 +604,24 @@ class PromptBuilder:
             # it contradicts _WORKSPACE_AGENT_SPEC — and it was the only
             # thing that differed between operators here, which is why three
             # operators produced byte-identical edits from one parent.
-            parts.append(_operator_intent(ctx.operator))
+            parts.append(_operator_intent(ctx.operator, self.peer_fetch_tool))
             parts.append(_WORKSPACE_AGENT_SPEC)
         else:
             parts.append(spec)
         return "\n\n".join(parts)
 
     def _history(self, ctx: MutationContext) -> str:
-        # A workspace agent can fetch any candidate's text on demand, so
-        # reference programs arrive as an inventory it can expand rather
-        # than as bodies resent on every turn of the session.
-        code = not self.workspace_agent
+        # Reference programs exist only in the population store. A reader that
+        # can fetch them gets an inventory to expand, which keeps them off
+        # every turn of the session; a reader that cannot gets the source,
+        # because an inventory it has no way to open is worse than no
+        # inventory — it names programs and then withholds them.
+        #
+        # This asks about the tool rather than about agentic mode. The two
+        # used to be the same question and stopped being one when an external
+        # runtime became able to drive proposals with its own tools.
+        fetch = self.peer_fetch_tool
+        code = fetch is None
         sections = []
         for c in ctx.archive_inspirations:
             sections.append(
@@ -599,10 +642,8 @@ class PromptBuilder:
         if not sections:
             return ""
         header = "## Previously evaluated programs"
-        if not code:
-            header += (
-                "\nRead any of them with inspect_candidate(candidate_id, path)."
-            )
+        if fetch:
+            header += f"\nRead any of them with {fetch}(candidate_id, path)."
         return header + "\n\n" + "\n\n".join(sections)
 
     def build(self, ctx: MutationContext) -> tuple[str, str]:
@@ -640,7 +681,15 @@ class PromptBuilder:
         if self.workspace_agent:
             user_parts.append(
                 "The current program's files are already in your workspace. "
-                "Read them with workspace_read before editing."
+                + (
+                    f"Read them with {self.workspace_read_tool} before editing."
+                    if self.workspace_read_tool
+                    # An external runtime brings its own file tools under its
+                    # own names. Naming ours sends the candidate after a tool
+                    # it does not have; its own tool list already documents
+                    # what it does have.
+                    else "Read them with your file tools before editing."
+                )
             )
         if multifile:
             user_parts.append(_MULTIFILE_FORMAT)

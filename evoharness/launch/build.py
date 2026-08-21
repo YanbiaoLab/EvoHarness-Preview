@@ -143,6 +143,18 @@ def build(cfg: LaunchConfig) -> BuiltRun:
     # caller goes through — including the ones with no command line.
     agent_backend = None
     if cfg.dsh_config is not None:
+        if proposal.mode == "single_shot":
+            # The single-shot lane answers in one message and never opens a
+            # session, so it returns before it looks at the backend. Accepting
+            # the pair here would put a dsh runtime in the run's identity for
+            # a run that proposed entirely in-process — the manifest would name
+            # a runtime no candidate ever ran inside.
+            raise LaunchConfigError(
+                "proposal.mode=single_shot cannot use an agent runtime; "
+                "pass --set proposal.mode=agentic (or conversational/hybrid) "
+                "or drop --dsh-config"
+            )
+
         from evoharness.core.agent import DshAgentBackend, DshRuntimeSpec
 
         agent_backend = DshAgentBackend(
@@ -152,8 +164,15 @@ def build(cfg: LaunchConfig) -> BuiltRun:
                     "node", "--import", "tsx/esm",
                     str(cfg.dsh_runtime.resolve()),
                 ),
+                provider=cfg.dsh_provider,
                 runtime_cwd=cfg.dsh_runtime.resolve().parents[3],
                 session_root=cfg.run_dir / "dsh_sessions",
+                run_dir=cfg.run_dir,
+                # The tool `candidate.cordis.yml` mounts so a candidate can
+                # read the reference programs its prompt lists. Declared here
+                # because Python cannot see the runtime's tool table; the
+                # prompt names exactly this or nothing.
+                peer_fetch_tool="evo_inspect_candidate",
                 model=proposal.model or search.llm_models[0],
             )
         )

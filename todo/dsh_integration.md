@@ -246,6 +246,20 @@ Python SearchLoop
 - [x] 接线 —— 没有新建 lane,而是给 `RecipeContext` 加了 `agent_backend` 覆盖位,由 `_build_proposer` 在 agent 模式下**替换**进程内运行时;`experiments/run_evolution.py` 加 `--dsh-config` / `--dsh-runtime`(必须成对)。替换而非包装是刻意的:外部运行时自带工具集、上下文策略与沙箱,`max_input_tokens` / `max_parallel_tools` / 压缩阈值对它一个都不适用,同时把 `tools` 清空——**manifest 不得列出候选从未见过的工具**。
 - [x] 冷 trace —— `JsonlEventSinkFactory` 原样可用;SDK 的 `session_root` 指到 `<run>/dsh_sessions/`,dsh 原始会话日志与翻译后的 `AgentEvent` 并存(决定二要求的"两份都留")。
 - [x] **身份进 `spec_hashes`** —— 2026-08-20 落地。`fingerprint()` 进 `ComponentSpec.config`,`build()` 把 dsh backend 挪到 `RunSpec` 之前构造。没有改 `RunSpec` 的字段语义:`ComponentSpec.config` 本来就是自由 dict 且整体进哈希。测试在 `tests/test_launch_build.py`(装配这一跳)与 `tests/test_agent_dsh_backend.py`(指纹本身),两个方向都有变异对照。
+- [x] **提示词不再点名候选没有的工具(2026-08-21)** —— 查 DH-3 的真实工具集时发现的一个真缺陷:`workspace_agent` 一个开关同时在管"这是不是 agentic 会话"和"读的人能不能取别的候选",而这两件事在 dsh 后端下不再一致。后果是 agentic + dsh 时,提示词让候选调 `inspect_candidate` 和 `workspace_read`——**两个都是进程内工具的名字,而 `_build_proposer` 已经把工具表清空了**。其中参考程序那一处还**因为相信工具在**,把源码换成了文件清单,于是候选既没工具也没源码。`recombine` 的算子意图里也写死了这个名字。
+
+  改法:`PromptBuilder` 接受 `peer_fetch_tool` / `workspace_read_tool` 两个工具名,`_history()` 改看前者而不是看模式;`recipes/common.py` **从 registry 推**(外加外部运行时的声明),不从模式推——重复那个条件就是下次再走散的方式。缺省值是"不点名、直接渲染源码":长一点,但点名一个不存在的工具是这次要修的失败本身。进程内两条路径的提示词字节不变。测试 `tests/test_prompt_tool_honesty.py`,变异对照:把判据退回 `workspace_agent`,4 例立刻红。
+
+- [x] **dsh 侧的 `evo_inspect_candidate`(2026-08-21)** —— 候选在 dsh 下终于能按需取参考程序。三个决定:①**TS 不自己读 `run.db`**,起子进程调 Python,表结构只有一处知道;②**不做"过滤",做窄视图**——新增 `evoharness/readout/peer.py`,只构造固定那几个键,`hidden_metrics` / `stdout_log` / `stderr_log` 漏不出去不是因为被删掉,是因为那段代码从来没放进去过(拿 `report.to_json()` 删字段的做法,下次 `EvalReport` 加字段就默认漏);③**可达范围与进程内一致**(按 id 取任意已评测候选),收窄要改 `propose()` 签名,破"四个核心类零修改"。
+
+  `DshRuntimeSpec` 加 `run_dir`(不进 fingerprint,同 `output_dir` 之理)与 `peer_fetch_tool`(**进** fingerprint:候选够得着什么就是实验是什么)。运行时拿到 `EVO_RUN_DIR` / `EVO_PYTHON` / `EVO_HARNESS_ROOT` 三个环境变量,都由 Python 侧给定而非在 TS 那边猜。TS 侧 `packages/examples/evo-harness/src/peer.ts`,argv 传参不过 shell(候选 id 是模型写的),退出码 2 当作可回给模型的拒绝、其他退出码明说是部署坏了——**候选读到"未知候选"却其实是解释器崩了,会把剩下的轮次全花在猜 id 上**。
+
+  ⚠️ **`peer_fetch_tool` 是声明不是探测。** Python 看不到运行时的工具表,指一份没挂这个工具的 cordis 配置又声明了它,提示词还是会撒谎。进 fingerprint 只保证两次声明不同的跑不会被当成同一实验。探测要 SDK 配合,未做。
+
+  ⚠️ **这个工具不减少暴露面。** 候选手里有 bash,而 `workspace-write` 管改不管读,`sqlite3 ../../run.db` 照样能读到全部。它的价值是"提示词承诺的东西真的存在"和"受支持的路径干净",不是安全措施。绕过去的问题属于 DH-4。
+
+- [x] **单发模式配 dsh 直接拒(2026-08-21)** —— 写接线测试时发现:`proposal.mode` 缺省是 `single_shot`,而这条 lane 在 `_build_proposer` 里**提前 return,根本不看 backend**。于是 `--dsh-config` 会被记进 `run_hash` 和 manifest,而每一次提案其实都走进程内 transport——**manifest 指名一个候选从没进去过的运行时**。和"给了 `--dsh-config` 不给 `--dsh-runtime`"是同一个失败,`build()` 现在照样拒。
+
 - [ ] backend 对拍(fake 与 dsh 返回结构等价)—— 未做。
 - [ ] 断路器语义测试(`proposer_dead` 路径)—— 未做;真实跑 `proposals_failed: 0`,失败路径一次没走到。
 
@@ -325,6 +339,9 @@ Python SearchLoop
 | 三个 limit 被当成硬上限 | DH-1:`UNSUPPORTED_LIMITS` 进 identity 与 SESSION_START 事件。**v5 下调**:`_ProposalUsage.absorb` 在调用方 fail-closed,超限代价是浪费一次会话而非无上限 |
 | 同 session 无法恢复修复上下文 | DH-1 已实现,**但只有单元测试**;真实跑 `repair_rounds: 0` 没走到该路径。停止线保留 |
 | 冷 trace 丢失轮次结构 | v5 实测:`turn/*` 与 `step/*` 未翻译。下钻只见平铺事件,重建不出轮次归属。补映射与否待定 |
+| **提示词点名候选没有的工具** | **v6 已修**:`PromptBuilder` 收工具名而不是猜模式,`recipes/common.py` 从 registry 推。缺省是不点名 |
+| **窄视图长出新字段** | `readout/peer.py` 只构造固定键。**任何时候都不要改成"拿完整报告删字段"**——那种写法下 `EvalReport` 新增字段默认外泄 |
+| `peer_fetch_tool` 声明与实际不符 | 只进了 fingerprint,**没有探测**。指错配置提示词仍会撒谎 |
 | 用小任务验证后误判"限制不成问题" | v5 已发生一次:默认 48/120 而实测 10/15,预测的 `absorb` 硬失败没被触发。逼洞要显式压低 `max_turns` |
 | 每候选一个运行时太贵 | 实测约 1 秒,先按这个方案做;真成瓶颈再考虑复用,但复用会牺牲"一个运行时=一个候选沙箱" |
 | dsh preview 破坏性变更 | 身份含 cordis 配置哈希,升级即新实验 |

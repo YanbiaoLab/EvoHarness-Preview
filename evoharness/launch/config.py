@@ -37,6 +37,10 @@ class LaunchConfig:
     live: bool = False
     dsh_config: Path | None = None
     dsh_runtime: Path | None = None
+    #: The provider route the dsh config declares. It has to match, because
+    #: the runtime resolves a request's model against that route's catalog and
+    #: a name it does not know fails the request rather than falling back.
+    dsh_provider: str = "deepseek-official"
     overrides: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -46,6 +50,8 @@ class LaunchConfig:
         object.__setattr__(self, "overrides", tuple(self.overrides))
         if not self.recipe.strip():
             raise LaunchConfigError("recipe must be non-empty")
+        if not self.dsh_provider.strip():
+            raise LaunchConfigError("dsh_provider must be non-empty")
         # Both or neither: a dsh config without its runtime entry silently
         # falls back to the in-process agent, which is a different experiment
         # wearing the same name.

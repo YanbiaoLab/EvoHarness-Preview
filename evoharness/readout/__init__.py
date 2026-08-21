@@ -18,6 +18,7 @@ from .detail import (
     run_detail,
     trajectory,
 )
+from .peer import DEFAULT_MAX_CHARS, UnknownCandidate, peer_view
 from .status import (
     STALL_AFTER_S,
     ReadoutError,
@@ -28,14 +29,17 @@ from .status import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_CHARS",
     "STALL_AFTER_S",
     "CandidateRow",
     "Generation",
     "ReadoutError",
     "RunDirectory",
     "RunStatus",
+    "UnknownCandidate",
     "candidate_detail",
     "list_runs",
+    "peer_view",
     "population",
     "run_detail",
     "run_status",

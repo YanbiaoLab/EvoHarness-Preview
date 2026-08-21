@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from evoharness.core import MetricLog, PopulationStore
 
@@ -113,6 +114,33 @@ class Generation:
     #: reader can see whether the run is still improving without recomputing
     #: the running maximum itself.
     best_so_far: float | None
+
+    def summary(self) -> dict[str, Any]:
+        """The generation without its candidate list.
+
+        A run makes hundreds of candidates and the question being asked is
+        which generation moved, so the default view answers that one. Pouring
+        every row into a caller's context spends tokens to bury the fact it
+        came for.
+        """
+
+        faults: dict[str, int] = {}
+        for row in self.candidates:
+            if row.fault:
+                faults[row.fault] = faults.get(row.fault, 0) + 1
+
+        return {
+            "generation": self.generation,
+            "candidates": len(self.candidates),
+            "passed": sum(1 for row in self.candidates if row.passed),
+            "best_fitness": self.best_fitness,
+            "best_so_far": self.best_so_far,
+            # Named counts, not a total: "three failed to compile" and "three
+            # timed out" call for different next moves, and a total hides
+            # which one happened.
+            "faults": faults,
+        }
+
 
     def to_json(self) -> dict:
         return {
