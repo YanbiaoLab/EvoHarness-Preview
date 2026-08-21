@@ -497,6 +497,27 @@ def test_an_argv_element_that_is_not_a_file_passes_through(tmp_path):
     assert spec.fingerprint()["runtime_argv"] == ["node", "--import", "tsx/esm"]
 
 
+def test_the_trace_records_what_the_candidate_was_told(spec, tmp_path):
+    """The cold trace has to answer what was ASKED, not only what was done.
+
+    The in-process runtime records the system prompt in SESSION_START and this
+    backend did not, so every prompt-side audit of a dsh run came back empty —
+    indistinguishable from having looked and found nothing. A prompt naming a
+    tool this deployment does not mount was invisible for exactly that reason.
+    """
+
+    sink = RecordingSink()
+    backend = DshAgentBackend(spec)
+    _run_with(backend, spec, tmp_path, [assistant(1, 1, "done")], sink=sink)
+
+    starts = [
+        event for event in sink.events
+        if event.kind is AgentEventKind.SESSION_START
+    ]
+    assert starts, "no session start recorded"
+    assert starts[0].data["system"] == make_request(tmp_path).system
+
+
 def test_a_missing_sdk_stops_the_run_at_launch_not_at_every_proposal(
     tmp_path, monkeypatch
 ):

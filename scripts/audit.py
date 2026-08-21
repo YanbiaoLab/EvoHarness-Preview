@@ -10,6 +10,11 @@ So this audits liveness per mechanism — did it actually fire in this run —
 and flags mechanisms that are silently inert. Run it on any run dir:
 
     python scripts/audit.py results/e5s_s0
+
+Runs that belong to a research experiment can also be audited against the
+research store, which is where routing and the human inbox leave their marks:
+
+    python scripts/audit.py results/e5s_s0 --research research/
 """
 
 import json
@@ -38,7 +43,96 @@ def _jsonl(path):
         return []
 
 
-def audit(run_dir):
+def _pending_requests(research_root, experiment_id):
+    """(count, oldest created_at) of cards nobody has answered."""
+    ledger = f"{research_root}/research.sqlite3"
+    if not os.path.exists(ledger):
+        return None
+    con = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
+    try:
+        row = con.execute(
+            """
+            SELECT COUNT(*), MIN(r.created_at)
+            FROM decision_requests AS r
+            LEFT JOIN research_decisions AS d ON d.request_id = r.request_id
+            WHERE d.request_id IS NULL AND r.experiment_id = ?
+            """,
+            (experiment_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    return int(row[0]), row[1]
+
+
+def audit_research(run_dir, research_root, report):
+    """Did this run reach the research layer at all, and is anyone answering?
+
+    Same disease as the novelty gate: a router that is wired but never fires
+    looks exactly like a router that was never wired. The run dir alone
+    cannot tell them apart — the marks are in the research store.
+    """
+    ref = (_load(f"{run_dir}/manifest.json", {}) or {}).get("experiment_ref")
+    if not ref:
+        return                              # 不是实验的一部分,无路由可言
+    experiment_id = ref.get("experiment_id", "")
+    run_id = os.path.basename(str(run_dir).rstrip("/"))
+    if not research_root:
+        report(WARN, "research routing",
+               f"run belongs to experiment {experiment_id} but no research "
+               "root given — pass --research to audit it")
+        return
+
+    exp_dir = f"{research_root}/experiments/{experiment_id}"
+    if not os.path.isdir(exp_dir):
+        report(DEAD, "research routing",
+               f"experiment {experiment_id} has no record in {research_root}")
+        return
+
+    routed = _jsonl(f"{exp_dir}/routing.jsonl")
+    mine = [e for e in routed if e.get("run_id") == run_id]
+    if not routed:
+        report(DEAD, "research routing",
+               "outcome recorded but nothing routed — router unmounted")
+    elif not mine:
+        report(DEAD, "research routing",
+               f"{len(routed)} routed events, none from this run "
+               f"({run_id}) — this run bypassed the router")
+    else:
+        report(OK, "research routing",
+               f"{len(mine)} events this run: "
+               f"{dict(Counter(e.get('disposition') for e in mine))}")
+
+    # 断言评估留痕:评估过的 claim 是卡片和冲突通知的唯一来源,
+    # 一条都没有意味着 route_assessment 从未被走到。
+    assessments = _jsonl(f"{exp_dir}/assessments.jsonl")
+    evidence = _jsonl(f"{run_dir}/evidence.jsonl")
+    verdicts = sum(1 for e in evidence if e.get("objective_met") is not None)
+    if verdicts and not assessments:
+        report(DEAD, "research assessment",
+               f"{verdicts} envelopes carry a verifier verdict but no claim "
+               "was ever assessed")
+    else:
+        report(OK if assessments else "info", "research assessment",
+               f"{len(assessments)} assessments recorded "
+               f"({verdicts} verifier verdicts in this run)")
+
+    pending = _pending_requests(research_root, experiment_id)
+    if pending is None:
+        report(DEAD, "research inbox", "no decision ledger — inbox unmounted")
+        return
+    count, oldest = pending
+    stale_days = (time.time() - oldest) / 86400 if count and oldest else 0.0
+    report(WARN if stale_days > 7 else ("info" if count else OK),
+           "research inbox",
+           f"{count} unanswered cards"
+           + (f", oldest {stale_days:.0f} days" if count and oldest else "")
+           + (" — decisions are the output; an unanswered queue means the "
+              "loop stops at the human" if stale_days > 7 else ""))
+
+
+def audit(run_dir, research_root=None):
     findings = []
 
     def report(status, mechanism, detail):
@@ -46,7 +140,17 @@ def audit(run_dir):
 
     ckpt = _load(f"{run_dir}/checkpoint.json", {})
     rr = ckpt.get("run_report", {})
-    manifest = _load(f"{run_dir}/experiment_manifest.json", {})
+    # Two drivers, two filenames. `start_manifest` (the recipe path, and every
+    # run started through evoharness.launch) writes manifest.json; the imo
+    # driver writes experiment_manifest.json. Reading only the second meant
+    # that on every mainline run this whole file was `{}` — so `code version`
+    # read "unknown" forever and the manifest half of the evidence gate never
+    # applied. An audit for silently-inert mechanisms, silently inert.
+    manifest = (
+        _load(f"{run_dir}/manifest.json")
+        or _load(f"{run_dir}/experiment_manifest.json", {})
+        or {}
+    )
     arm = manifest.get("actual", {})
     rows = []
     if os.path.exists(f"{run_dir}/run.db"):
@@ -54,7 +158,7 @@ def audit(run_dir):
         rows = list(con.execute(
             "SELECT id, generation, island_idx, operator, in_archive, "
             "embedding IS NOT NULL, behavior_signature, inspiration_ids, "
-            "json_extract(report,'$.fitness') FROM candidates"))
+            "json_extract(report,'$.fitness'), metadata FROM candidates"))
         con.close()
 
     n = len(rows)
@@ -85,7 +189,14 @@ def audit(run_dir):
                    f"last write {idle_min:.0f} min ago"
                    + (" — run appears hung, not slow" if idle_min > 20 else ""))
 
-    version = manifest.get("code_version", "unknown")
+    # Same fact under two spellings: a `code_version` string from the imo
+    # driver, a `code` object from `start_manifest`. Normalised to the string
+    # so the dirty-tree warning fires on both.
+    code = manifest.get("code") or {}
+    version = manifest.get("code_version") or (
+        f"{code['commit']}+dirty" if code.get("dirty")
+        else code.get("commit", "unknown")
+    )
     report("info", "run", f"{n} candidates, gen {ckpt.get('generation')}, "
            f"arm {arm.get('experience_mode')}, best {rr.get('best_fitness')}")
     report(WARN if version.endswith("+dirty") or version == "unknown" else OK,
@@ -163,8 +274,14 @@ def audit(run_dir):
     # -- experience buffer ----------------------------------------------------
     entries = _jsonl(f"{run_dir}/experience.jsonl")
     kinds = Counter(e.get("kind", "evaluated") for e in entries)
+    # The verdict and the words have to agree. An empty buffer printed
+    # "no offspring yet" whether or not there were any, so a DEAD line read
+    # as "nothing to report yet" and was dismissed.
     report(OK if entries else (DEAD if started else "info"),
-           "experience buffer", dict(kinds) or "no offspring yet")
+           "experience buffer",
+           dict(kinds) if kinds
+           else ("no entries despite offspring — producer unmounted?"
+                 if started else "no offspring yet"))
     lessons = [e["lesson"] for e in entries if e.get("kind") == "lesson"]
     if arm.get("experience_mode", "").startswith("lessons"):
         if not lessons:
@@ -247,14 +364,79 @@ def audit(run_dir):
                f"{compactions} compaction events")
         report("info", "tool usage", dict(tools.most_common(8)))
 
+    # -- traceability: can each candidate be walked back to its session? ------
+    #
+    # An agentic candidate whose row carries no session id cannot be tied to
+    # what the agent actually did. The trace is on disk either way, so nothing
+    # errors and nothing looks wrong — the link is simply not there, and the
+    # loss shows up much later, when a result is being explained.
+    proposal = manifest.get("proposal", {})
+    mode = proposal.get("mode")
+    if mode in {"agentic", "hybrid", "conversational"} and offspring:
+        linked = 0
+        for row in rows:
+            if row[1] == 0:
+                continue  # seeds were not proposed by an agent
+            meta = json.loads(row[9]) if row[9] else {}
+            if meta.get("session_id") or meta.get("agent_session_id"):
+                linked += 1
+        # Hybrid routes only some proposals through a session, so a partial
+        # link is the expected shape there and a total absence is not.
+        floor = DEAD if linked == 0 else (
+            OK if linked == offspring or mode == "hybrid" else WARN
+        )
+        report(floor, "traceability",
+               f"{linked}/{offspring} agentic candidates carry a session id"
+               + (" — no candidate can be walked back to what the agent did"
+                  if linked == 0 else ""))
+
+    # -- did the candidate's runtime really replace the in-process one? -------
+    #
+    # `_build_proposer` clears every in-process tool when a backend is
+    # substituted, so a run under an external runtime that shows EvoHarness's
+    # own tool names is one where the substitution did not happen. The
+    # manifest saying which backend ran is a declaration; the tools the
+    # sessions actually called are the evidence.
+    backend = proposal.get("agent_backend")
+    if backend and tools:
+        declared = set(proposal.get("tools") or ())
+        in_process = {"workspace_read", "workspace_write", "workspace_edit",
+                      "inspect_candidate", "workspace_glob", "workspace_grep"}
+        leaked = sorted(set(tools) & in_process)
+        report(DEAD if leaked else OK, "runtime substitution",
+               f"external backend, {len(declared)} in-process tools declared"
+               + (f" — but sessions called {leaked}: the in-process runtime "
+                  "was not replaced" if leaked else ""))
+
+    # -- were the prompt's named tools actually available? -------------------
+    #
+    # The prompt offers reference programs as an inventory and names the tool
+    # that expands one. Naming a tool the runtime does not mount costs the
+    # source too, since the listing stood in for it. `prompt_tools` is
+    # declared by the assembly; whether the model could call it is not.
+    prompt_tools = proposal.get("prompt_tools") or {}
+    peer_tool = prompt_tools.get("peer_fetch")
+    if peer_tool and sessions:
+        used = tools.get(peer_tool, 0)
+        # Zero calls is not proof of absence — a run may simply never have had
+        # a reference worth opening — so this warns rather than condemning.
+        report(OK if used else WARN, "peer fetch",
+               f"prompt named {peer_tool}, called {used} times"
+               + (" — never exercised, so its availability is unverified"
+                  if not used else ""))
+
     # -- prompt injection liveness -------------------------------------------
     sections = Counter()
+    recorded_prompts = 0
     if os.path.isdir(base):
         for sid in os.listdir(base):
             events = _jsonl(f"{base}/{sid}/events.jsonl")
             if not events:
                 continue
             system = events[0].get("event", {}).get("data", {}).get("system", "")
+            if not system:
+                continue
+            recorded_prompts += 1
             for label, marker in (
                 ("lessons", "# Lessons from past mutations"),
                 ("experience", "# Experience from this run"),
@@ -266,18 +448,35 @@ def audit(run_dir):
             ):
                 if marker in system:
                     sections[label] += 1
-    report("info", "prompt sections", f"{dict(sections)} of {len(sessions)} sessions")
+    # "Found no sections" and "could not look" print the same empty dict, and
+    # they mean opposite things. A backend that records no system prompt makes
+    # every prompt-side audit vacuous, so say that instead of an empty count.
+    if sessions and not recorded_prompts:
+        report(WARN, "prompt sections",
+               "no session recorded its system prompt — prompt-side checks "
+               "cannot run against this backend's trace")
+    else:
+        report("info", "prompt sections",
+               f"{dict(sections)} of {recorded_prompts} sessions")
 
     # -- cost accounting ------------------------------------------------------
     report(WARN if not rr.get("total_llm_cost") else OK, "cost accounting",
            f"llm {rr.get('total_llm_cost')}, eval {rr.get('total_eval_cost')}"
            + (" — pricing unset, budget fuse inert" if not rr.get("total_llm_cost") else ""))
 
+    audit_research(run_dir, research_root, report)
+
     return findings
 
 
 if __name__ == "__main__":
-    for target in sys.argv[1:] or ["results/e5s_s0"]:
+    args = sys.argv[1:]
+    research = None
+    if "--research" in args:
+        index = args.index("--research")
+        research = args[index + 1]
+        args = args[:index] + args[index + 2:]
+    for target in args or ["results/e5s_s0"]:
         print(f"\n===== {target} =====")
-        for status, mechanism, detail in audit(target):
+        for status, mechanism, detail in audit(target, research):
             print(f"[{status}] {mechanism:<20} {detail}")

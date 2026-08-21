@@ -512,6 +512,14 @@ class DshAgentBackend:
                 "operator": request.operator,
                 "identity": self.spec.identity(),
                 "unsupported_limits": list(UNSUPPORTED_LIMITS),
+                # What the candidate was actually told, recorded the way the
+                # in-process runtime records it. Without it the cold trace
+                # answers what the candidate DID and not what it was asked,
+                # and every audit of the prompt reads as "found nothing"
+                # rather than "could not look". A prompt that named a tool
+                # this deployment does not mount was invisible for exactly
+                # that reason. Once per session, not per turn.
+                "system": request.system,
             },
         )
 
