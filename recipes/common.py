@@ -238,7 +238,21 @@ def _build_proposer(
                 ),
             }
         ),
-        "limits": dataclasses.asdict(limits),
+        "limits": {
+            **dataclasses.asdict(limits),
+            # Which of the numbers above were actually in force. Printed here
+            # rather than only under the backend's identity, because a reader
+            # takes `max_turns: 48` for a cap the run ran under — and where an
+            # external runtime enforces none of them, the only real bound is
+            # `timeout_s`.
+            "unenforceable": list(
+                getattr(
+                    getattr(ctx.agent_backend, "spec", None),
+                    "unsupported_limits",
+                    (),
+                )
+            ),
+        },
         "max_repair_rounds": ctx.proposal.max_repair_rounds,
         "max_input_tokens": ctx.proposal.max_input_tokens,
         "max_parallel_tools": ctx.proposal.max_parallel_tools,

@@ -96,6 +96,26 @@ class DshBackendError(RuntimeError):
     """The dsh runtime could not be launched or driven."""
 
 
+def _harness_class() -> Any:
+    """The SDK entry point, or a `DshBackendError` naming what to do.
+
+    Imported through a function so the spec can try it at construction and the
+    backend can use it at launch, with one message between them. Not imported
+    at module scope: the SDK lives outside this package and importing it to
+    define a class would make the whole agent module unimportable without it.
+    """
+
+    try:
+        from deepseek_harness import DeepSeekHarness
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise DshBackendError(
+            "the deepseek-harness Python SDK is not importable; install it "
+            "or add its src directory to PYTHONPATH "
+            "(<deepseek-harness>/python/sdk/src)"
+        ) from exc
+    return DeepSeekHarness
+
+
 @dataclass(frozen=True)
 class DshRuntimeSpec:
     """Everything that decides what a candidate's runtime can do.
@@ -154,6 +174,11 @@ class DshRuntimeSpec:
             or not self.peer_fetch_tool.strip()
         ):
             raise ValueError("peer_fetch_tool must be non-empty when set")
+        # Checked here rather than at the first session. Without it a missing
+        # SDK is a normal terminal result for every proposal in turn, so the
+        # run spends its whole circuit-breaker budget before stopping, and
+        # what it reports is `proposer_dead` — a verdict about the model.
+        _harness_class()
         if self.price_usd_per_mtok is not None and (
             not isinstance(self.price_usd_per_mtok, tuple)
             or len(self.price_usd_per_mtok) != 2
@@ -168,6 +193,18 @@ class DshRuntimeSpec:
             raise ValueError(
                 "price_usd_per_mtok must be two nonnegative finite numbers"
             )
+
+    @property
+    def unsupported_limits(self) -> tuple[str, ...]:
+        """Caller limits this runtime cannot enforce.
+
+        Exposed as a plain attribute, not only inside `identity()`, so the
+        manifest can print it beside the limits themselves. A reader who finds
+        `max_turns: 48` in one place and its unenforceability three levels
+        away in another has to know to look.
+        """
+
+        return UNSUPPORTED_LIMITS
 
     def config_hash(self) -> str:
         """Content hash of the cordis deployment the candidate runs under."""
@@ -341,13 +378,7 @@ class DshAgentBackend:
         return live
 
     def _build_harness(self, request: AgentSessionRequest) -> Any:
-        try:
-            from deepseek_harness import DeepSeekHarness
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            raise DshBackendError(
-                "the deepseek-harness Python SDK is not importable; "
-                "install it or set PYTHONPATH to its src directory"
-            ) from exc
+        DeepSeekHarness = _harness_class()
 
         env = dict(self.spec.env)
         # The candidate's persona is the caller's system prompt. The cordis

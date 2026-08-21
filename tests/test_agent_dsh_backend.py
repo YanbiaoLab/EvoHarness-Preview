@@ -497,6 +497,32 @@ def test_an_argv_element_that_is_not_a_file_passes_through(tmp_path):
     assert spec.fingerprint()["runtime_argv"] == ["node", "--import", "tsx/esm"]
 
 
+def test_a_missing_sdk_stops_the_run_at_launch_not_at_every_proposal(
+    tmp_path, monkeypatch
+):
+    """The first live attempt died five proposals deep on this.
+
+    A missing SDK is reported per proposal as a normal terminal result, which
+    is right — the spend has to stay on the books. But it means the run burns
+    its whole circuit-breaker budget and then reports `proposer_dead`, a
+    verdict about the model rather than about the interpreter.
+    """
+
+    config = tmp_path / "c.yml"
+    config.write_text("- id: stub\n", encoding="utf-8")
+    monkeypatch.delitem(__import__("sys").modules, "deepseek_harness")
+    monkeypatch.setattr(
+        dsh_backend_module,
+        "_harness_class",
+        lambda: (_ for _ in ()).throw(
+            dsh_backend_module.DshBackendError("SDK not importable")
+        ),
+    )
+
+    with pytest.raises(dsh_backend_module.DshBackendError):
+        DshRuntimeSpec(config_path=config, runtime_argv=("node",))
+
+
 def test_any_model_id_is_accepted(tmp_path):
     config = tmp_path / "c.yml"
     config.write_text("- id: stub\n", encoding="utf-8")

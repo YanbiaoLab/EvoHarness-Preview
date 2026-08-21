@@ -7,10 +7,26 @@ must make the run a different one. Until this held, swapping
 two runs under different tool sets compared as one.
 """
 
+import sys
+
 import pytest
 
 from evoharness.launch.build import build
 from evoharness.launch.config import LaunchConfig, LaunchConfigError
+
+
+@pytest.fixture(autouse=True)
+def _stub_sdk(monkeypatch):
+    """Stand in for the deepseek-harness SDK.
+
+    `DshRuntimeSpec` now refuses to exist without it, so that a missing SDK
+    stops a run at launch instead of failing every proposal in turn. These
+    cases assemble a run rather than driving one, so the module only has to
+    be importable.
+    """
+
+    module = type("_Module", (), {"DeepSeekHarness": object})
+    monkeypatch.setitem(sys.modules, "deepseek_harness", module)
 
 
 @pytest.fixture
@@ -143,6 +159,48 @@ def test_a_lane_that_never_opens_a_session_refuses_a_runtime(
     )
     with pytest.raises(LaunchConfigError, match="single_shot"):
         build(cfg)
+
+
+def test_the_manifest_says_which_limits_were_actually_in_force(
+    tmp_path, runtime_tree
+):
+    """A cap nobody enforces reads exactly like one that held.
+
+    A live run recorded `max_turns: 48` beside an `unsupported_limits` list
+    naming `max_turns` — three levels away, under the backend's identity.
+    Anyone reading the limits believed the run was capped at 48 turns. It was
+    capped by `timeout_s` and nothing else.
+    """
+
+    config, entry = runtime_tree
+    dsh = build(make_config(tmp_path, config, entry))
+    limits = dsh.ctx.extras["proposal_manifest"]["limits"]
+    assert set(limits["unenforceable"]) == {
+        "max_turns",
+        "max_tool_calls",
+        "max_cost_usd",
+    }
+    # The one that IS enforced must not be listed as unenforceable, or the
+    # annotation says nothing.
+    assert "timeout_s" not in limits["unenforceable"]
+
+    # The control has to be the same lane in-process, not a single-shot run:
+    # single_shot opens no session and so has no limits at all, which would
+    # pass this for the wrong reason.
+    in_process = build(
+        LaunchConfig(
+            recipe="e0",
+            run_dir=tmp_path / "in_process",
+            task="demo_counter",
+            overrides=(
+                "search.num_generations=1",
+                "proposal.mode=agentic",
+            ),
+        )
+    )
+    limits = in_process.ctx.extras["proposal_manifest"]["limits"]
+    assert limits["unenforceable"] == []
+    assert limits["max_turns"] == 48
 
 
 def test_the_declared_peer_tool_is_part_of_the_experiment(tmp_path, runtime_tree):
