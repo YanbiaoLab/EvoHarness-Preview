@@ -385,19 +385,29 @@ def audit(run_dir, research_root=None):
     mode = proposal.get("mode")
     if mode in {"agentic", "hybrid", "conversational"} and offspring:
         linked = 0
+        dangling = 0
         for row in rows:
             if row[1] == 0:
                 continue  # seeds were not proposed by an agent
             meta = json.loads(row[9]) if row[9] else {}
-            if meta.get("session_id") or meta.get("agent_session_id"):
-                linked += 1
+            if not (meta.get("session_id") or meta.get("agent_session_id")):
+                continue
+            linked += 1
+            # An id that leads nowhere is worse than none: it reads as a
+            # traceable candidate right up to the moment someone follows it.
+            trace = f"{run_dir}/agent_sessions/{meta.get('proposal_id')}"
+            if not os.path.isfile(f"{trace}/events.jsonl"):
+                dangling += 1
         # Hybrid routes only some proposals through a session, so a partial
         # link is the expected shape there and a total absence is not.
         floor = DEAD if linked == 0 else (
+            WARN if dangling else
             OK if linked == offspring or mode == "hybrid" else WARN
         )
         report(floor, "traceability",
                f"{linked}/{offspring} agentic candidates carry a session id"
+               + (f", {dangling} of them with no trace on disk" if dangling
+                  else "")
                + (" — no candidate can be walked back to what the agent did"
                   if linked == 0 else ""))
 

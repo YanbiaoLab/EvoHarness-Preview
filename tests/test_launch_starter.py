@@ -109,6 +109,99 @@ def test_starting_over_a_live_run_is_refused(tmp_path):
         reap(started)
 
 
+def test_a_resume_that_dies_on_the_way_in_is_not_reported_as_started(tmp_path):
+    """A resume has no fresh manifest to wait for.
+
+    The handshake waits for the child to write one, but on a resume it is
+    already there from the original start — so the wait succeeded instantly
+    however the child fared. A real resume against a changed cordis config
+    was reported as `identified: true` and had already died on the
+    checkpoint's configuration fingerprint.
+    """
+
+    run = tmp_path / "r"
+    run.mkdir()
+    (run / "manifest.json").write_text(
+        json.dumps({"report": {"stopped_reason": "running"}}), encoding="utf-8"
+    )
+    (run / "job.json").write_text(
+        json.dumps({
+            "argv": ["x"], "cwd": str(run), "created_at": 1.0, "pid": None,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StartError, match="before writing its manifest|exited"):
+        start_run(
+            run,
+            python_argv("import sys; sys.exit(3)"),
+            cwd=run,
+            force=True,
+        )
+
+
+def test_a_resume_that_survives_is_reported_as_started(tmp_path):
+    run = tmp_path / "r"
+    run.mkdir()
+    (run / "manifest.json").write_text(
+        json.dumps({"report": {"stopped_reason": "running"}}), encoding="utf-8"
+    )
+
+    started = start_run(run, python_argv(SLEEP), cwd=run, force=True)
+    try:
+        assert started.identified is True
+    finally:
+        reap(started)
+
+
+def test_a_crashed_run_can_be_resumed_without_force(tmp_path):
+    """The recovery path must not need the flag that also corrupts a live run.
+
+    A run killed mid-generation leaves a checkpoint saying `running` forever,
+    so recovering from a crash used to need the same `force` that lets a
+    second writer loose on a working run. A flag whose safe use and dangerous
+    use look identical becomes habitual.
+    """
+
+    argv = python_argv(WRITE_MANIFEST, SLEEP)
+    first = start_run(tmp_path / "r", argv, cwd=tmp_path / "r")
+    reap(first)
+    time.sleep(0.2)
+
+    second = start_run(tmp_path / "r", argv, cwd=tmp_path / "r")
+    try:
+        assert second.pid != first.pid
+    finally:
+        reap(second)
+
+
+def test_the_run_directory_records_which_process_owns_it(tmp_path):
+    argv = python_argv(WRITE_MANIFEST, SLEEP)
+    started = start_run(tmp_path / "r", argv, cwd=tmp_path / "r")
+    try:
+        assert JobSpec.read(tmp_path / "r").pid == started.pid
+    finally:
+        reap(started)
+
+
+def test_a_directory_from_before_pids_were_recorded_still_refuses(tmp_path):
+    """Absent evidence is not evidence of absence. An older run directory
+    cannot say whether its process is gone, so it keeps the old answer."""
+
+    run = tmp_path / "r"
+    run.mkdir()
+    (run / "manifest.json").write_text(
+        json.dumps({"report": {"stopped_reason": "running"}}), encoding="utf-8"
+    )
+    (run / "job.json").write_text(
+        json.dumps({"argv": ["x"], "cwd": str(run), "created_at": 1.0}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StartError, match="has not finished"):
+        start_run(run, python_argv(WRITE_MANIFEST, SLEEP), cwd=run)
+
+
 def test_force_overrides_the_refusal(tmp_path):
     argv = python_argv(WRITE_MANIFEST, SLEEP)
     first = start_run(tmp_path / "r", argv, cwd=tmp_path / "r")

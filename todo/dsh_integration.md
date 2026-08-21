@@ -275,8 +275,19 @@ Python SearchLoop
 - [x] agentic lane 的候选进种群并被评分 —— patch 是 `SOLVED = ["q0"]` → `["q0","q1","q2","q3","q4"]`。
 - [x] 执行内核确实换掉了 —— 冷 trace 里候选用的是 **dsh 自己的工具**(`bash` 17 次、`str_replace_editor` 2 次、`evo_spike_tools` 2 次),不是 EvoHarness 的进程内工具集。两次提案两个 `dsh_sessions/` 目录,**每候选一个运行时**成立。会话规模:6 turns/6 tool_calls/25.9s 与 10 turns/15 tool_calls/103.4s。
 - [ ] ~~成本对账~~ —— **随价目表一起作废**。`total_llm_cost: 0.0` 是设计结果不是 bug。**但留下一个真问题**:`--budget-usd` 现在对提案侧完全不起作用(BudgetMeter 收到的提案花费恒为 0),评测侧照常。要用预算停机,得先决定是给 backend 传价格,还是明确预算门只管评测侧。
-- [ ] **可回溯四跳** —— 前三跳通(候选 → `session_id` → 冷 trace → `dsh_sessions/*/session.jsonl`),未系统验证。
-- [ ] 杀掉进程再 resume —— 未做。
+- [x] **可回溯四跳(2026-08-21 实测 4/4)** —— 键搞清楚了:**跳 3 用 `proposal_id`,跳 4 才用 `session_id`**。链路是 候选 id → `metadata.proposal_id` → `agent_sessions/<proposal_id>/events.jsonl` → `metadata.session_id` → `dsh_sessions/<workdir>/<session_id>/session.jsonl`。真实 run 上四个 agentic 候选全通。
+
+  审计的 traceability 检查跟着加严:原来只验"session id 在不在",现在还验**那个 id 指向的冷 trace 目录真的存在**——**指向空处的 id 比没有 id 更糟**,它一路读起来都像可回溯的,直到有人真去追。
+
+- [x] **杀掉进程再 resume(2026-08-21 实测)** —— 起一个 20 代的 dsh 跑,第 4 代 `kill -9` 父进程,然后同一条命令恢复:日志里 `resuming from generation 5`,接着跑而不是从头。**孤儿进程不漏**:候选的 dsh 运行时短暂变成 PPID 1,但 dsh 的 `runner.ts` 在 stdin 关闭时自行 dispose,父进程一死管道就断,它自己退了。
+
+  **决定四也在真实 resume 上验了**:往 `candidate.cordis.yml` 追加一个字节再恢复 → `ValueError: checkpoint was written with a different configuration`。换部署确实 resume 不了。
+
+  过程中挖出两个:
+
+  ① **崩溃恢复需要 `--force`,而 `--force` 也是能毁掉活跑的那个开关。** 被杀的跑留下一个永远写着 `running` 的检查点,`_already_running` 没有别的证据可用。**安全用法和危险用法长得一样的开关,迟早变成习惯性动作。** 现在 `job.json` 记 pid:pid 没了 → 明确是崩溃 → 直接放行;pid 还在 → 仍然要求显式 `force`(pid 复用只往"拒绝"方向错);老目录没记 pid → 保持旧行为。顺带处理了僵尸进程——`os.kill(pid, 0)` 对僵尸返回成功,而僵尸是确定死了的。
+
+  ② **resume 的握手是假的。** 握手等的是"子进程写出 manifest",而 resume 时 manifest 早就在了,所以**无论子进程死活都立刻通过**。那次被决定四拒掉的 resume,`start_run` 报的是 `identified: true`,而进程两秒后就死了——**握手本来要防的那种混淆,在证据过期的这条路径上原样重现**。现在 resume 走"活过一小段"的判据,并写清它只覆盖"进门就死",不保证第三分钟。
 - [x] **`scripts/audit.py` 活性检查(2026-08-21)** —— 三个新检查:**traceability**(agentic 候选必须带 session 引用,全零即 DEAD)、**runtime substitution**(外部后端下若会话调了进程内工具名,说明替换没发生)、**peer fetch**(提示词点名的工具到底调没调得动)。每个都配"活着"的对照,不然一个永远返回 DEAD 的实现也能全绿。
 
   检查本身又挖出四个:①**审计脚本自己是死的**——它读 `experiment_manifest.json`,而主线写的是 `manifest.json`,所以每次主线跑 manifest 都是 `{}`,`code version` 永远 "unknown";②`prompt sections` 对 dsh 跑永远是空,因为 dsh backend 的 `session_start` 没记系统提示词(进程内那个记了)——**"没找到"和"没法看"印出来一模一样**,已给 backend 补上并让检查说清是哪种;③`experience buffer` 的 DEAD 旁边写着"还没有后代",而实际有,读的人会直接跳过;④`turn budget` 只数 `termination == turn_limit`,而**不能强制上限的后端永远不会那样终止**,改成读候选的 `limit_overruns`。

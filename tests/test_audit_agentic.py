@@ -32,8 +32,11 @@ def _db(run_dir, rows):
     con.close()
 
 
-def _candidate(cid, generation, *, session_id=None):
-    metadata = {} if session_id is None else {"session_id": session_id}
+def _candidate(cid, generation, *, session_id=None, proposal_id=None):
+    metadata = (
+        {} if session_id is None
+        else {"session_id": session_id, "proposal_id": proposal_id or "s1"}
+    )
     return (
         cid, generation, 0, "revise" if generation else "seed", 1, b"e",
         "sig", "[]", json.dumps({"fitness": 0.5}), json.dumps(metadata),
@@ -115,6 +118,26 @@ def test_a_linked_agentic_candidate_passes(tmp_path):
     status, detail = _findings(run_dir)["traceability"]
     assert status.strip() == "ok"
     assert "1/1" in detail
+
+
+def test_a_session_id_that_leads_nowhere_is_worse_than_none(tmp_path):
+    """It reads as a traceable candidate right up to the moment someone
+    follows it. The four-hop walk goes candidate → proposal_id → cold trace →
+    the runtime's own session log; checking only that the id exists proves
+    the first hop and nothing after it."""
+
+    run_dir = _run(
+        tmp_path,
+        proposal=AGENTIC,
+        candidates=[
+            _candidate("c1", 1, session_id="s1", proposal_id="written"),
+            _candidate("c2", 1, session_id="s2", proposal_id="never-written"),
+        ],
+        sessions=[{"sid": "written"}],
+    )
+    status, detail = _findings(run_dir)["traceability"]
+    assert status == "WARN"
+    assert "1 of them with no trace on disk" in detail
 
 
 def test_a_single_shot_run_is_not_asked_for_session_ids(tmp_path):
