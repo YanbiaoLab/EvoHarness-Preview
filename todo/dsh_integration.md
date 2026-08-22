@@ -305,7 +305,30 @@ Python SearchLoop
 
 用户 2026-08-18 决定跳过安全测试,先做业务实现。以下条目保留但不阻塞 DH-1..DH-3:
 
-- [ ] 沙箱逃逸验证:候选试图写工作区外的绝对路径,断言被拒且留痕;
+- [x] **沙箱边界已测定,并发现一个承重缺陷(2026-08-21)** —— 结论不是"沙箱漏了",是**我们把 run 目录放错了地方**。
+
+  dsh 的 `workspace-write` 明文定义(`@deepseek-ai/dsh-sandbox` 的 `writableRoots`)是"工作区根 **加上平台临时区**":
+
+  ```ts
+  return [...new Set([policy.workspaceRoot, '/tmp', tmpdir()].map(canonicalPath))]
+  ```
+
+  而这个项目历史上**每一次跑的 run 目录都是 `/tmp/evo_*`**。实测确认候选可写:
+
+  ```
+  ⚠️ /private/tmp/evo_dsp2/run.db            种群库(自己和所有对手的分数)
+  ⚠️ /private/tmp/evo_dsp2/evidence.jsonl    证据账本
+  ⚠️ /private/tmp/evo_dsp2/checkpoint.json   运行状态
+  ⚠️ /private/tmp/evo_dsp2/manifest.json     冻结身份
+     /Users/.../tasks/demo_counter.py        评分函数(不在临时区,安全)
+  ```
+
+  **候选读 harness 是研究诚信问题;候选能写 harness 不是结果有问题,是没有结果。**
+
+  修法:`DshRuntimeSpec` 构造时拒绝落在临时区里的 run 目录,和缺 SDK 那条同一个纪律——**不可信的跑不该起来,而不是跑完才发现候选不可信**。逃生口 `allow_writable_run_dir` 给测试用(pytest 的 `tmp_path` 天生在临时区),但它**进 `fingerprint()`**:用了它的跑不是同一个实验,没法悄悄拿来跟正经跑比。测试在 `tests/test_dsh_sandbox_boundary.py`,含变异对照与"活着"的对照。
+
+  ⚠️ **遗留:临时区可写这一条本身没堵。** 候选仍可写 `/tmp` 下的任何东西,只是 run 目录不再在那儿。要真堵得把候选的 mode 收到 `read-only` 再单开工作区写权,或者用 dsh 的 bwrap/Landlock 方言——未做。
+  ⚠️ **读那一侧完全没堵**,这是 `workspace-write` 的设计:候选照样读得到仓库、读得到别的 run 目录。已实测候选会**自发**去找(`find / -iname '*harness*'`,还显式排除自己的工作区)。
 - [ ] 对抗测试:诱导候选挂插件、联网、改评测配置、用 `tools/pre-execute` 翻案、经嵌套子 agent 逃逸,断言全部被拒且留痕;
 - [ ] 审批答复循环:白名单内 allowed-once,名单外 rejected 并落审计。
 

@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+from evoharness.core.agent import dsh_backend as dsh_backend_module
 from evoharness.launch.build import build
 from evoharness.launch.config import LaunchConfig, LaunchConfigError
 
@@ -27,6 +28,15 @@ def _stub_sdk(monkeypatch):
 
     module = type("_Module", (), {"DeepSeekHarness": object})
     monkeypatch.setitem(sys.modules, "deepseek_harness", module)
+    # A run directory under pytest's tmp_path is inside the platform temp
+    # area, which is exactly what a real launch now refuses: a candidate under
+    # workspace-write may write there. These cases assemble a run rather than
+    # exposing one to a candidate, so the location check is stood down here
+    # and asserted on its own in tests/test_dsh_sandbox_boundary.py.
+    monkeypatch.setattr(
+        dsh_backend_module, "check_run_dir_outside_candidate_writes",
+        lambda run_dir: None,
+    )
 
 
 @pytest.fixture

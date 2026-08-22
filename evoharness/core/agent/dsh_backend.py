@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -96,6 +97,64 @@ class DshBackendError(RuntimeError):
     """The dsh runtime could not be launched or driven."""
 
 
+def _granted_write_roots(workspace_root: Path) -> tuple[Path, ...]:
+    """The directories a `workspace-write` candidate may write under.
+
+    Mirrors `writableRoots` in dsh's `@deepseek-ai/dsh-sandbox` — the mode
+    means "the workspace root plus the platform temp areas", and the temp
+    areas are the part that surprises. This is a second copy of that list in
+    another language, so it can drift; it errs the safe way, since a root dsh
+    adds would be one this misses only until someone reads the release notes,
+    while a root dsh drops merely makes this refuse a little too much.
+    """
+
+    roots = [workspace_root, Path("/tmp"), Path(tempfile.gettempdir())]
+    resolved = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve(strict=True))
+        except OSError:
+            # A root that does not exist grants nothing until it does.
+            continue
+    return tuple(dict.fromkeys(resolved))
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def check_run_dir_outside_candidate_writes(run_dir: Path) -> None:
+    """Refuse a run directory the candidate would be allowed to write into.
+
+    `workspace-write` confines a candidate's edits to its workspace *and the
+    platform temp areas*. A run directory under `/tmp` is therefore inside
+    that grant, which puts `run.db`, `evidence.jsonl`, `checkpoint.json` and
+    `manifest.json` — the scores, the evidence, the run state and the frozen
+    identity — where the program being scored can rewrite them. Reading the
+    harness is a research-integrity problem; writing to it is not a problem
+    with results, it is the absence of results.
+
+    Checked at launch rather than left to the sandbox, because the sandbox is
+    working as documented: this is a choice of directory, and the only place
+    it can be refused is where the directory is chosen.
+    """
+
+    run_dir = Path(run_dir).resolve()
+    for root in (Path("/tmp"), Path(tempfile.gettempdir())):
+        try:
+            resolved = root.resolve(strict=True)
+        except OSError:
+            continue
+        if _is_inside(run_dir, resolved):
+            raise DshBackendError(
+                f"run directory {run_dir} is inside {resolved}, which a "
+                "workspace-write candidate may write to; its run.db, "
+                "evidence.jsonl and checkpoint would be editable by the "
+                "program being scored. Put the run directory outside the "
+                "temp areas."
+            )
+
+
 def _harness_class() -> Any:
     """The SDK entry point, or a `DshBackendError` naming what to do.
 
@@ -150,6 +209,13 @@ class DshRuntimeSpec:
     # convenience for callers that want a rough per-session figure, never the
     # number a budget decision rests on.
     price_usd_per_mtok: tuple[float, float] | None = None
+    #: Run anyway with the run directory inside a candidate-writable area.
+    #: Exists for tests, whose run directories are temporary by construction.
+    #: It enters `fingerprint()`, so a run that used it is not the same
+    #: experiment as one that did not and cannot be quietly compared with it —
+    #: which is what keeps an escape hatch for tests from becoming the way
+    #: real runs get started.
+    allow_writable_run_dir: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.config_path, Path):
@@ -179,6 +245,8 @@ class DshRuntimeSpec:
         # run spends its whole circuit-breaker budget before stopping, and
         # what it reports is `proposer_dead` — a verdict about the model.
         _harness_class()
+        if self.run_dir is not None and not self.allow_writable_run_dir:
+            check_run_dir_outside_candidate_writes(self.run_dir)
         if self.price_usd_per_mtok is not None and (
             not isinstance(self.price_usd_per_mtok, tuple)
             or len(self.price_usd_per_mtok) != 2
@@ -229,6 +297,7 @@ class DshRuntimeSpec:
             "provider": self.provider,
             "model": self.model,
             "peer_fetch_tool": self.peer_fetch_tool,
+            "allow_writable_run_dir": self.allow_writable_run_dir,
             "unsupported_limits": list(UNSUPPORTED_LIMITS),
         }
 
@@ -257,6 +326,9 @@ class DshRuntimeSpec:
             # What the candidate can reach is part of what the experiment IS,
             # and this also decides what the prompt promises it.
             "peer_fetch_tool": self.peer_fetch_tool,
+            # A run whose candidates could edit the record is not comparable
+            # with one whose candidates could not.
+            "allow_writable_run_dir": self.allow_writable_run_dir,
             "unsupported_limits": list(UNSUPPORTED_LIMITS),
         }
 
