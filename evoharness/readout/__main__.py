@@ -17,6 +17,7 @@ import json
 import sys
 
 from .detail import candidate_detail, trajectory
+from .governance import card, pending_cards, recent_decisions
 from .peer import peer_view
 from .status import ReadoutError, list_runs, run_status
 
@@ -67,6 +68,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="a file inside that candidate; omit for its inventory",
     )
 
+    # Governance. Read-only by construction: there is no `answer` subcommand
+    # here and there is no function behind one — a card is signed through the
+    # path that binds an actor to an authenticated identity, not through a
+    # view.
+    cards = sub.add_parser("cards", help="decision requests awaiting a person")
+    cards.add_argument("--research-root", required=True)
+
+    one_card = sub.add_parser("card", help="one decision request in full")
+    one_card.add_argument("--research-root", required=True)
+    one_card.add_argument("--id", required=True)
+
+    decided = sub.add_parser("decided", help="recently answered cards")
+    decided.add_argument("--research-root", required=True)
+    decided.add_argument("--limit", type=int, default=20)
+
     return parser
 
 
@@ -82,6 +98,12 @@ def _dispatch(args: argparse.Namespace) -> object:
         else:
             return [row.summary() for row in rows]
 
+    elif args.command == "cards":
+        return pending_cards(args.research_root)
+    elif args.command == "card":
+        return card(args.research_root, args.id)
+    elif args.command == "decided":
+        return recent_decisions(args.research_root, args.limit)
     elif args.command == "peer":
         # Not candidate_detail with fewer keys — a separate view, so a field
         # added to EvalReport later cannot reach a candidate by default.

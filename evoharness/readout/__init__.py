@@ -18,6 +18,12 @@ from .detail import (
     run_detail,
     trajectory,
 )
+from .governance import (
+    GovernanceError,
+    card,
+    pending_cards,
+    recent_decisions,
+)
 from .peer import DEFAULT_MAX_CHARS, UnknownCandidate, peer_view
 from .status import (
     STALL_AFTER_S,
@@ -33,14 +39,18 @@ __all__ = [
     "STALL_AFTER_S",
     "CandidateRow",
     "Generation",
+    "GovernanceError",
     "ReadoutError",
     "RunDirectory",
     "RunStatus",
     "UnknownCandidate",
     "candidate_detail",
+    "card",
     "list_runs",
     "peer_view",
+    "pending_cards",
     "population",
+    "recent_decisions",
     "run_detail",
     "run_status",
     "trajectory",
