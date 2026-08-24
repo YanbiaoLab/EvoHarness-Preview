@@ -1,4 +1,4 @@
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 from evoharness.contracts import spec_hash
 
@@ -155,6 +155,12 @@ class ResearchDecision:
     reason: str
     actor: str
     created_at: float
+    request_id: str = ""    # 由 Inbox 回答产生时,指回 DecisionRequest
+    #: 签字经过的界面。没有这个字段,事后审计分不清"人在终端上敲的"和
+    #: "经会话签的",而这两者的可信度不同——会话签字若不是人的点击本身
+    #: 构成事件,它就只是模型对一句话的解读。缺省 unknown 是为了老记录
+    #: 读得出来:**不知道来源**与**来源是终端**必须可区分。
+    source: str = "unknown"
 
     def __post_init__(self) -> None:
         if self.action not in _DECISION_ACTIONS:
@@ -168,6 +174,15 @@ class ResearchDecision:
 
     def to_json(self) -> dict:
         return {"schema_version": 1, **asdict(self)}
+
+    @classmethod
+    def from_json(cls, data: dict) -> "ResearchDecision":
+        if data.get("schema_version") != 1:
+            raise ValueError("ResearchDecision schema_version must be 1")
+        payload = {
+            key: value for key, value in data.items() if key != "schema_version"
+        }
+        return cls(**payload)
 
 
 
@@ -193,3 +208,6 @@ class ProtocolChangeProposal:
 
     def to_json(self) -> dict:
         return {"schema_version": 1, **asdict(self)}
+
+
+DECISION_ACTIONS = frozenset(_DECISION_ACTIONS)
