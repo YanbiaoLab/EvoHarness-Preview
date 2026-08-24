@@ -147,7 +147,10 @@ def _build_proposer(
         ()
         if mode == "conversational"
         else (
-            *make_default_agent_tools(runner),
+            *make_default_agent_tools(
+                runner,
+                run_timeout_cap_s=ctx.proposal.run_timeout_cap_s,
+            ),
             # Reference programs reach the prompt as an inventory; this is
             # how the agent expands one it actually wants to read.
             *((InspectCandidateTool(store),) if store is not None else ()),
@@ -260,6 +263,7 @@ def _build_proposer(
             ctx.proposal.recent_tool_results_to_keep
         ),
         "compact_trigger_ratio": ctx.proposal.compact_trigger_ratio,
+        "run_timeout_cap_s": ctx.proposal.run_timeout_cap_s,
         "tools": [definition.name for definition in registry.definitions],
         # Next to `tools` on purpose. A run whose prompt named a tool absent
         # from that list is misinforming its candidates, and this is the only
