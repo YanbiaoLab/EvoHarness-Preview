@@ -10,11 +10,14 @@ from evoharness.evaluation import (
 from evoharness.research import (
     MigrationApprovalRequired,
     MigrationPanelError,
+    ExperimentSpec,
+    InboxStore,
     ReferenceRecord,
     ReferenceStore,
-    ResearchDecision,
+    ResearchStore,
     compare_measurements,
     establish_baseline,
+    protocol_change_request,
 )
 
 OLD_NS = ScoreNamespace(
@@ -89,10 +92,11 @@ def test_mixed_namespace_panel_is_rejected():
         compare_measurements(mixed, _panel({"a": 0.8, "b": 0.6}, NEW_NS))
 
 
-def _record(candidate_id, namespace):
+def _record(candidate_id, namespace, *, fitness=0.5, evidence_id="record"):
     return ReferenceRecord(
-        candidate_id=candidate_id, evidence_id=f"ev-{candidate_id}",
-        namespace=namespace, fitness=0.5, policy_hash="p",
+        candidate_id=candidate_id,
+        evidence_id=evidence_id,
+        namespace=namespace, fitness=fitness, policy_hash="p",
         assessor_hash="a", reasons=(), promoted_at=1.0,
     )
 
@@ -104,34 +108,61 @@ def _report():
     )
 
 
-def test_baseline_requires_protocol_change_approval(tmp_path):
-    store = ReferenceStore(tmp_path / "reference.json")
-    store.promote(_record("gen0", OLD_NS), expected_current=None)
-    wrong = ResearchDecision(
-        experiment_id="exp-1", action="approve",
-        reason="looks fine", actor="zk", created_at=1.0,
+def _approved_inbox(tmp_path, report, *, action="approve-protocol-change"):
+    research = ResearchStore(tmp_path / "research")
+    research.put_experiment(ExperimentSpec(
+        experiment_id="exp-1", hypothesis_id="hyp-1", goal_id="goal-1",
+        task_ref="t", run_ref="r", search_ref="s", intervention="migrate",
+        created_at=1.0,
+    ))
+    inbox = InboxStore(research, authorized_actors={"zk"})
+    request_id = inbox.submit(protocol_change_request(
+        report, experiment_id="exp-1", created_at=1.0,
+    ))
+    inbox.answer(
+        request_id, action=action, reason="panel reviewed", actor="zk",
+        now=lambda: 2.0,
     )
+    return inbox, request_id
+
+
+def test_baseline_requires_protocol_change_approval(tmp_path):
+    report = _report()
+    store = ReferenceStore(tmp_path / "reference.json")
+    store.promote(_record(
+        "a", OLD_NS, fitness=0.9,
+        evidence_id=report.champion_old_evidence_id,
+    ), expected_current=None)
+    inbox, request_id = _approved_inbox(tmp_path, report, action="veto")
     with pytest.raises(MigrationApprovalRequired):
         establish_baseline(
-            store, _record("a", NEW_NS), report=_report(), decision=wrong,
+            store, _record(
+                "a", NEW_NS, fitness=0.8,
+                evidence_id=report.champion_new_evidence_id,
+            ), report=report, inbox=inbox,
+            request_id=request_id, experiment_id="exp-1",
         )
     assert store.current().namespace == OLD_NS   # 没被偷渡
 
 
 def test_approved_migration_rebases_and_records_the_basis(tmp_path):
+    report = _report()
     store = ReferenceStore(tmp_path / "reference.json")
-    store.promote(_record("gen0", OLD_NS), expected_current=None)
-    approval = ResearchDecision(
-        experiment_id="exp-1", action="approve-protocol-change",
-        reason="panel reviewed: champion stable, 0 flips", actor="zk",
-        created_at=2.0,
-    )
+    store.promote(_record(
+        "a", OLD_NS, fitness=0.9,
+        evidence_id=report.champion_old_evidence_id,
+    ), expected_current=None)
+    inbox, request_id = _approved_inbox(tmp_path, report)
     rebased = establish_baseline(
-        store, _record("a", NEW_NS), report=_report(), decision=approval,
+        store, _record(
+            "a", NEW_NS, fitness=0.8,
+            evidence_id=report.champion_new_evidence_id,
+        ), report=report, inbox=inbox,
+        request_id=request_id, experiment_id="exp-1",
         now=lambda: 42.0,
     )
     assert store.current().namespace == NEW_NS
-    assert rebased.previous_candidate_id == "gen0"
+    assert rebased.previous_candidate_id == "a"
     # 历史里必须能找到带 migration 依据的那一行
     history = (tmp_path / "reference_history.jsonl").read_text().splitlines()
     assert any('"migration"' in line for line in history)
@@ -139,11 +170,50 @@ def test_approved_migration_rebases_and_records_the_basis(tmp_path):
 
 def test_record_must_match_report_namespace(tmp_path):
     store = ReferenceStore(tmp_path / "reference.json")
-    approval = ResearchDecision(
-        experiment_id="exp-1", action="approve-protocol-change",
-        reason="r", actor="zk", created_at=2.0,
-    )
+    report = _report()
+    inbox, request_id = _approved_inbox(tmp_path, report)
     with pytest.raises(MigrationPanelError, match="does not match"):
         establish_baseline(
-            store, _record("a", OLD_NS), report=_report(), decision=approval,
+            store, _record("a", OLD_NS, fitness=0.9), report=report, inbox=inbox,
+            request_id=request_id, experiment_id="exp-1",
+        )
+
+
+def test_approval_cannot_be_replayed_for_another_report(tmp_path):
+    approved_report = _report()
+    inbox, request_id = _approved_inbox(tmp_path, approved_report)
+    different_report = compare_measurements(
+        _panel({"a": 0.9, "b": 0.7, "c": 0.5}, OLD_NS),
+        _panel({"a": 0.6, "b": 0.8, "c": 0.4}, NEW_NS),
+    )
+    store = ReferenceStore(tmp_path / "reference.json")
+    store.promote(_record(
+        "a", OLD_NS, fitness=0.9,
+        evidence_id=different_report.champion_old_evidence_id,
+    ), expected_current=None)
+
+    with pytest.raises(MigrationApprovalRequired, match="different subject"):
+        establish_baseline(
+            store, _record(
+                "b", NEW_NS, fitness=0.8,
+                evidence_id=different_report.champion_new_evidence_id,
+            ), report=different_report,
+            inbox=inbox,
+            request_id=request_id, experiment_id="exp-1",
+        )
+
+
+def test_approved_report_cannot_select_a_non_champion_record(tmp_path):
+    report = _report()
+    inbox, request_id = _approved_inbox(tmp_path, report)
+    store = ReferenceStore(tmp_path / "reference.json")
+    store.promote(_record(
+        "a", OLD_NS, fitness=0.9,
+        evidence_id=report.champion_old_evidence_id,
+    ), expected_current=None)
+
+    with pytest.raises(MigrationPanelError, match="approved panel champion"):
+        establish_baseline(
+            store, _record("b", NEW_NS, fitness=0.6), report=report,
+            inbox=inbox, request_id=request_id, experiment_id="exp-1",
         )

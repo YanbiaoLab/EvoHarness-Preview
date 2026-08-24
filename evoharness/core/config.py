@@ -32,6 +32,13 @@ class ProposalConfig:
     max_repair_rounds: int = 3
     max_input_tokens: int = 131_072
     max_parallel_tools: int = 4
+    # Ceiling the `run` tool clamps every requested timeout to. The default
+    # suits a shell command; a domain whose verification step runs for
+    # minutes needs it raised, or the agent has to poll. Measured on ETP run
+    # 15: a self-check takes 60-150s against a 60s cap, so each one cost two
+    # or three extra model calls -- and at that point a call resends 130-200k
+    # tokens of context, which is where the run's budget actually went.
+    run_timeout_cap_s: float = 60.0
     # Mirrors the validated keep-recent-5 window used by production
     # tool-using agents; older results of expiring tools are cleared.
     recent_tool_results_to_keep: int = 5
@@ -80,6 +87,15 @@ class ProposalConfig:
             or self.timeout_s <= 0
         ):
             raise ValueError("proposal timeout_s must be positive and finite")
+        if (
+            isinstance(self.run_timeout_cap_s, bool)
+            or not isinstance(self.run_timeout_cap_s, (int, float))
+            or not math.isfinite(self.run_timeout_cap_s)
+            or self.run_timeout_cap_s <= 0
+        ):
+            raise ValueError(
+                "proposal run_timeout_cap_s must be positive and finite"
+            )
         if self.max_cost_usd is not None and (
             isinstance(self.max_cost_usd, bool)
             or not isinstance(self.max_cost_usd, (int, float))

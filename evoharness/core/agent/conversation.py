@@ -19,7 +19,7 @@ class ConversationalAgentBackend:
     response formats used by SingleShotProposer.
     """
 
-    def __init__(self, backend: NativeToolAgentBackend , *, language: str = "python"):
+    def __init__(self, backend: object | NativeToolAgentBackend , *, language: str = "python"):
         if not isinstance(backend, AgentBackend):
             raise TypeError("backend must implement AgentBackend")
         if not isinstance(language, str) or not language.strip():

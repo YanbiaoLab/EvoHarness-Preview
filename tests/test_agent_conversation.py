@@ -30,6 +30,7 @@ from evoharness.core.agent import (
     AgentToolRegistry,
     make_tool_result,
 )
+from evoharness.core.llm import LLMBillingError, LLMToolCallFormatError
 
 
 class QueueTransport:
@@ -189,6 +190,22 @@ def make_backend(
         session_id_factory=lambda: "session-1",
         recent_tool_results_to_keep=recent_tool_results_to_keep,
     )
+
+
+def test_billing_failure_escapes_the_session_instead_of_finishing_it(tmp_path):
+    # Every other transport failure here becomes a finished session with
+    # BACKEND_ERROR, which the proposer then reports as one failed proposal.
+    # That is right for anything a retry might survive and wrong for an empty
+    # account: ETP runs 12 and 13 both ended on "proposer_dead" -- five and
+    # six generations of slots planned against a balance of zero -- while the
+    # session log recorded the real cause verbatim.
+    transport = QueueTransport(
+        LLMBillingError("account cannot pay for the call (HTTP 402)")
+    )
+    backend = make_backend(transport)
+
+    with pytest.raises(LLMBillingError):
+        backend.run(make_request(tmp_path))
 
 
 def test_conversational_run_completes_and_accounts_one_response(tmp_path):
@@ -778,6 +795,74 @@ def test_second_max_tokens_stops_with_output_limit(tmp_path):
         event.kind is AgentEventKind.RECOVERY
         for event in result.events
     ) == 1
+
+
+def test_malformed_tool_call_is_retried_instead_of_killing_the_session(tmp_path):
+    # ETP run 14: three of six terminated sessions died on a single unparseable
+    # tool call, one of them 135 turns and 145 tool calls deep. The malformed
+    # turn is never appended, so the transcript stays well-formed and the only
+    # repair needed is one instruction plus another attempt.
+    transport = QueueTransport(
+        LLMToolCallFormatError(
+            "invalid tool call at index 0: Invalid control character at: "
+            "line 1 column 29 (char 28)"
+        ),
+        LLMResponse("recovered and finished", "model", completion_tokens=5),
+    )
+    backend = make_backend(transport)
+
+    result = backend.run(make_request(tmp_path))
+    state = backend._sessions.get(result.session_id)
+
+    assert result.termination is AgentTermination.COMPLETED
+    assert result.final_message == "recovered and finished"
+    assert [message.role for message in state.messages] == [
+        "system",
+        "user",
+        "user",
+        "assistant",
+    ]
+    # The instruction has to name the actual defect, not just say "try again".
+    assert "control character" in state.messages[2].content
+    assert "Invalid control character" in state.messages[2].content
+    assert sum(
+        event.kind is AgentEventKind.RECOVERY
+        for event in result.events
+    ) == 1
+
+
+def test_malformed_tool_calls_stop_the_session_once_the_budget_is_spent(tmp_path):
+    transport = QueueTransport(
+        *[LLMToolCallFormatError("invalid tool call at index 0: boom")] * 4
+    )
+    backend = make_backend(transport)
+
+    result = backend.run(make_request(tmp_path))
+
+    assert result.termination is AgentTermination.PROTOCOL_ERROR
+    assert sum(
+        event.kind is AgentEventKind.RECOVERY
+        for event in result.events
+    ) == 3
+
+
+def test_other_protocol_errors_still_stop_immediately(tmp_path):
+    # The retry is scoped to tool-call formatting. A provider that disagrees
+    # with this client about the wire is not going to be talked round, and
+    # retrying it would burn a session's budget three times over for nothing.
+    transport = QueueTransport(
+        LLMProtocolError("provider response must be an object"),
+        LLMResponse("should never be reached", "model"),
+    )
+    backend = make_backend(transport)
+
+    result = backend.run(make_request(tmp_path))
+
+    assert result.termination is AgentTermination.PROTOCOL_ERROR
+    assert not any(
+        event.kind is AgentEventKind.RECOVERY
+        for event in result.events
+    )
 
 
 def test_event_sink_receives_ordered_events_and_accounting(tmp_path):

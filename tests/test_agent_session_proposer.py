@@ -21,6 +21,7 @@ from evoharness.core import (
     ProposalPreflight,
     JsonlEventSinkFactory,
 )
+from evoharness.core.llm import LLMBillingError
 from evoharness.core.workspace import GitWorkspace
 
 
@@ -463,6 +464,29 @@ def test_sink_cleanup_failure_overrides_otherwise_valid_proposal(tmp_path):
     assert summary.success is False
     assert summary.failure_reason == "sink-flush-error"
     assert final_patch is not None
+
+
+def test_billing_failure_escapes_instead_of_becoming_a_proposal_failure(tmp_path):
+    # ETP run 12 (2026-08-21): the provider answered HTTP 403 "insufficient
+    # balance", the broad backend-error handler turned it into an ordinary
+    # failed proposal, and the run planned five more generations before
+    # stopping on "proposer_dead". The SearchLoop has a handler that stops on
+    # the first one and names the real cause -- it only ever fired in the
+    # non-agentic lane, which ETP does not use.
+    def fail(request):
+        raise LLMBillingError("account cannot pay for the call (HTTP 403)")
+
+    sink_factory = MemorySinkFactory()
+    backend = QueueBackend(fail)
+    proposer = make_proposer(tmp_path, backend, sink_factory=sink_factory)
+
+    with pytest.raises(LLMBillingError):
+        propose(proposer)
+
+    # Escaping must not leak the session's resources.
+    assert sink_factory.sink.flushed
+    assert sink_factory.sink.closed
+    assert not any((tmp_path / "sessions").iterdir())
 
 
 def test_backend_exception_is_classified_and_resources_are_closed(tmp_path):

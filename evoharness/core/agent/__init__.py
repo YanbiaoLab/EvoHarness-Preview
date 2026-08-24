@@ -56,8 +56,17 @@ from .tools import (
 from .runtime import NativeToolAgentBackend, TokenEstimator
 
 
-def make_default_agent_tools(runner: Runner) -> tuple[AgentTool, ...]:
-    """Build the stable P1.1 tool set in provider-visible order."""
+def make_default_agent_tools(
+    runner: Runner,
+    *,
+    run_timeout_cap_s: float = 60.0,
+) -> tuple[AgentTool, ...]:
+    """Build the stable P1.1 tool set in provider-visible order.
+
+    `run_timeout_cap_s` is the ceiling `run` clamps requested timeouts to.
+    Left at the default it is the previous hard-coded 60s; a domain whose
+    verification step outlives that has to raise it or pay for the polling.
+    """
 
     return (
         WorkspaceReadTool(),
@@ -66,7 +75,7 @@ def make_default_agent_tools(runner: Runner) -> tuple[AgentTool, ...]:
         WorkspaceWriteTool(),
         WorkspaceEditTool(),
         WorkspaceDeleteTool(),
-        RunTool(runner),
+        RunTool(runner, runner_timeout_cap_s=run_timeout_cap_s),
         RunPreflightTool(),
     )
 

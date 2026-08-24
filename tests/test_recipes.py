@@ -80,6 +80,28 @@ def _ctx(tmp_path, task, generations=8, seed=3):
     )
 
 
+def test_run_timeout_cap_reaches_the_run_tool(tmp_path):
+    # Adding the knob is not the same as wiring it. ETP has twice shipped a
+    # mechanism that could never fire, so the assertion is on the tool the
+    # agent actually calls, not on the config object.
+    task = get_task("demo_counter")
+    ctx = _ctx(tmp_path, task, generations=1)
+    ctx.proposal = ProposalConfig(
+        mode="agentic",
+        max_turns=6,
+        timeout_s=30,
+        run_timeout_cap_s=300.0,
+    )
+    loop = recipes.get_recipe("e0").build(ctx)
+
+    registry = loop.proposer.backend.registry
+    run_tool = next(
+        tool for tool in registry.tools if tool.definition.name == "run"
+    )
+    assert run_tool.runner_timeout_cap_s == 300.0
+    assert ctx.extras["proposal_manifest"]["run_timeout_cap_s"] == 300.0
+
+
 @pytest.mark.parametrize(
     ("mode", "proposer_type"),
     [

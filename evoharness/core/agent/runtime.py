@@ -12,10 +12,12 @@ from time import monotonic
 from typing import Protocol
 
 from ..llm import (
+    LLMBillingError,
     LLMClient,
     LLMMessage,
     LLMProtocolError,
     LLMResponse,
+    LLMToolCallFormatError,
     LLMStopReason,
     LLMToolCall,
     LLMToolDefinition,
@@ -43,6 +45,25 @@ _MAX_TOKENS_CONTINUATION = (
     "Continue exactly where the previous response stopped. "
     "Do not repeat completed content."
 )
+
+# The provider rejected our parse, so the turn it describes was never recorded:
+# there is no assistant message and no dangling tool_call_id to answer. A plain
+# user turn is therefore the whole repair, and it has to say what was wrong
+# specifically enough to change the next attempt.
+_MALFORMED_TOOL_CALL_RETRY = (
+    "Your last tool call could not be parsed and was discarded: {error}. "
+    "The `arguments` field must be a single valid JSON object encoded as a "
+    "string, with every control character escaped -- a literal newline, tab or "
+    "carriage return inside a JSON string value is invalid and must be written "
+    "as \\n, \\t or \\r. Reissue the call with well-formed arguments. If the "
+    "payload is a large multi-line file, write it with a shell tool instead of "
+    "embedding it in the arguments."
+)
+
+# A malformed call is per-turn flakiness, not a stuck model, so the budget is
+# per run rather than per turn -- but it is bounded, because a model that keeps
+# emitting the same broken shape is not going to be argued out of it.
+_MAX_TOOL_CALL_RECOVERIES = 3
 
 
 def _new_session_id() -> str:
@@ -101,6 +122,7 @@ class _RunState:
     events: list[AgentEvent]
     sink: EventSink | None
     recoveries: int = 0
+    tool_call_recoveries: int = 0
     sink_error: str | None = None
 
 
@@ -632,6 +654,8 @@ class NativeToolAgentBackend:
                     request,
                     run,
                 )
+            except LLMBillingError:
+                raise
             except Exception as exc:
                 return self._finish(
                     state,
@@ -659,6 +683,11 @@ class NativeToolAgentBackend:
                     parallel_tool_calls=True,
                     timeout_s=remaining_s,
                 )
+            except LLMToolCallFormatError as exc:
+                recovered = self._recover_malformed_tool_call(state, run, exc)
+                if recovered is not None:
+                    return recovered
+                continue
             except LLMProtocolError as exc:
                 return self._finish(
                     state,
@@ -677,6 +706,15 @@ class NativeToolAgentBackend:
                     ),
                     final_message=str(exc),
                 )
+            except LLMBillingError:
+                # Every other failure here becomes a finished session with
+                # BACKEND_ERROR, which is right for anything a later attempt
+                # might survive. An empty account is not that: ETP runs 12 and
+                # 13 both ended on "proposer_dead" because this handler turned
+                # the balance error into an ordinary backend failure, and the
+                # SearchLoop -- which has a handler that stops the run and
+                # names the real cause -- never saw it.
+                raise
             except Exception as exc:
                 return self._finish(
                     state,
@@ -1031,6 +1069,55 @@ class NativeToolAgentBackend:
                     },
                 ),
             )
+
+    def _recover_malformed_tool_call(
+        self,
+        state: _SessionState,
+        run: _RunState,
+        exc: LLMToolCallFormatError,
+    ) -> AgentSessionResult | None:
+        """Ask for the call again. Returns None to continue the session.
+
+        Terminating here used to throw away everything the session had already
+        built: ETP run 14 lost a session 135 turns and 145 tool calls deep to
+        one unescaped newline. Nothing about that state is invalid -- the
+        malformed turn was never appended, so the transcript is still
+        well-formed and the next request is simply the same conversation plus
+        one instruction.
+        """
+
+        if run.tool_call_recoveries >= _MAX_TOOL_CALL_RECOVERIES:
+            return self._finish(
+                state,
+                run,
+                termination=AgentTermination.PROTOCOL_ERROR,
+                final_message=str(exc),
+            )
+
+        run.tool_call_recoveries += 1
+        content = _MALFORMED_TOOL_CALL_RETRY.format(error=exc)
+        state.messages.append(LLMMessage(role="user", content=content))
+        self._record_event(
+            run,
+            state.next_event(
+                AgentEventKind.RECOVERY,
+                elapsed_s=max(0.0, self.clock() - run.started_at),
+                content=content,
+                data={
+                    "reason": "malformed-tool-call",
+                    "attempt": run.tool_call_recoveries,
+                    "error": str(exc),
+                },
+            ),
+        )
+        if run.sink_error is not None:
+            return self._finish(
+                state,
+                run,
+                termination=AgentTermination.BACKEND_ERROR,
+                final_message=run.sink_error,
+            )
+        return None
 
     @staticmethod
     def _synthetic_results(

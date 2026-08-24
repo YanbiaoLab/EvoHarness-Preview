@@ -86,6 +86,19 @@ class LLMProtocolError(RuntimeError):
     """A provider response cannot be represented by the normalized IR."""
 
 
+class LLMToolCallFormatError(LLMProtocolError):
+    """A tool call arrived with arguments that are not parseable JSON.
+
+    Separated from the rest of LLMProtocolError because the recovery differs.
+    Most protocol errors say the provider and this client disagree about the
+    wire, which no retry fixes. This one is per-turn flakiness -- a model that
+    wrote a raw newline inside a JSON string, or truncated the object -- and
+    the same model reissues a well-formed call when told what was wrong.
+    Measured on ETP run 14: three of six terminated sessions died here, one of
+    them after 135 turns and 145 tool calls, all from a single bad call.
+    """
+
+
 class LLMTransientError(RuntimeError):
     """A transport failure that may succeed when retried."""
 
@@ -563,7 +576,7 @@ def _parse_openai_tool_calls(
                 )
             )
         except (json.JSONDecodeError, ValueError) as exc:
-            raise LLMProtocolError(
+            raise LLMToolCallFormatError(
                 f"invalid tool call at index {index}: {exc}"
             ) from exc
 
