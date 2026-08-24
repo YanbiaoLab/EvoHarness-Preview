@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from evoharness.contracts import spec_hash
 from evoharness.evaluation import EvidenceEnvelope
@@ -6,6 +7,9 @@ from evoharness.evaluation import EvidenceEnvelope
 from .assessment import AssessmentGuard, ClaimAssessment, Verdict
 from .claims import Claim, ClaimKind
 from .reference import ReferenceRecord, ReferenceStore
+
+if TYPE_CHECKING:
+    from .routing import ResearchRouter
 
 
 @dataclass(frozen=True)
@@ -24,12 +28,22 @@ class PromotionPolicy:
                  *,
                  margin: float = 0.0,
                  require_no_regression: bool = False,
+                 router: "ResearchRouter | None" = None,
+                 experiment_id: str = "",
 
                  ):
         self._guard = guard
         self._store = store
         self._margin = margin
         self._require_no_regression = require_no_regression
+        if router is not None and not experiment_id.strip():
+            raise ValueError(
+                "routing a promotion needs the experiment it belongs to"
+            )
+        self._router = router
+        self._experiment_id = experiment_id
+        # 路由器不进 policy_hash:换不换冠军由 margin 与 assessor 决定,
+        # 谁被通知不改变晋升本身,不该让同一策略产生两个身份。
         self.policy_hash = spec_hash({
             "kind": "promotion_policy",
             "margin": margin,
@@ -107,12 +121,24 @@ class PromotionPolicy:
             ),
             expected_current=current.candidate_id,
         )
+        self._route_flip(current, promoted, assessments)
         return PromotionDecision(
             action="promote",
             reasons=("all required claims supported",),
             assessments=assessments,
             policy_hash=self.policy_hash,
             promoted=promoted,
+        )
+
+    def _route_flip(self, previous, promoted, assessments) -> None:
+        """换冠军是要被人看见的事,但晋升不等人:卡片提交后立即返回。"""
+        if self._router is None:
+            return
+        self._router.route_promotion(
+            experiment_id=self._experiment_id,
+            previous=previous,
+            promoted=promoted,
+            reasons=tuple(r for a in assessments for r in a.reasons),
         )
 
     def _bootstrap(self, subject: EvidenceEnvelope) -> PromotionDecision:

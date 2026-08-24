@@ -1,11 +1,10 @@
 import json
-import os
 import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from evoharness.core.checkpoint import atomic_write_json
+from evoharness.core.checkpoint import append_jsonl, atomic_write_json
 from evoharness.evaluation import ScoreNamespace
 
 
@@ -76,14 +75,7 @@ class ReferenceStore:
                 }
             )
             atomic_write_json(self.path, stamped.to_json())
-            self._history.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(
-                stamped.to_json(), ensure_ascii=False, sort_keys=True
-            )
-            with open(self._history, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            append_jsonl(self._history, stamped.to_json())
             return stamped
 
     def rebase(
@@ -115,15 +107,9 @@ class ReferenceStore:
                 }
             )
             atomic_write_json(self.path, stamped.to_json())
-            self._history.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(
+            append_jsonl(
+                self._history,
                 {**stamped.to_json(), "migration": migration_decision},
-                ensure_ascii=False,
-                sort_keys=True,
             )
-            with open(self._history, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
             return stamped
 

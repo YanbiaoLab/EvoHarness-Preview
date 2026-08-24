@@ -45,6 +45,33 @@ def load_json(path: Path) -> dict | None:
     return json.loads(path.read_text())
 
 
+def append_jsonl(path: Path, payload: dict) -> None:
+    """Append-only JSONL: one fsynced line per call.
+
+    The other half of the run-dir persistence discipline: atomic_write_json
+    replaces whole documents; this appends facts that must never be
+    rewritten (evidence, decisions, reference history, inbox records).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    path = Path(path)
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+
+
 def config_fingerprint(*configs: Any) -> str:
     """Stable hash over effective configuration and assembly descriptors.
 

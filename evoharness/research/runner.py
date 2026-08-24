@@ -6,7 +6,9 @@ from evoharness.contracts import RunSpec, SearchProfile
 from evoharness.runtime.compiler import compile_specs, spec_hashes
 from evoharness.runtime.task import ResolvedTask
 
+from .assessment import AssessmentGuard
 from .models import ExperimentOutcome, ExperimentSpec
+from .routing import ResearchRouter
 from .store import ResearchStore
 
 
@@ -48,6 +50,8 @@ def run_experiment(
     run_spec: RunSpec,
     profile: SearchProfile,
     transport=None,
+    router: ResearchRouter | None = None,
+    guard: AssessmentGuard | None = None,
     now=time.time,
 ) -> ExperimentOutcome:
     # 冻结先于执行:已存在且内容一致则幂等,内容不同在 store 层报错。
@@ -95,4 +99,14 @@ def run_experiment(
         created_at=now(),
     )
     store.append_outcome(outcome)
+
+    # 先落 outcome 再路由:卡片提交失败必须炸出来,而不是连带把这次运行
+    # 的记录一起吞掉。路由本身不阻塞——run 到此已经结束了。
+    if router is not None:
+        router.route_run(
+            outcome,
+            run_dir=run_dir,
+            budget_usd=run_spec.budget_usd,
+            guard=guard,
+        )
     return outcome

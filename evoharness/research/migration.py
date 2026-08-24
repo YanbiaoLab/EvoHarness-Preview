@@ -1,13 +1,5 @@
-"""Measurement Migration Panel(设计文档契约 C4 的执行件)。
+"""Measurement Migration Panel
 
-Measurement / Evaluator 变更前,用同一批候选在新旧口径下的证据面板量化
-迁移会改变哪些决策。报告永远 requires_human_approval——全局秩相关再高
-也不自动放行:冠军互换、阈值附近翻转、关键 pairwise 逆序正是相关系数
-会隐藏的东西。
-
-面板只能由携带 namespace 的证据构建(I-2 之前的历史 run 没有 namespace
-元数据,无法回填入面板)。这是本模块与 EvidenceEnvelope 的硬耦合,
-也是刻意的:没有身份的分数不配参与迁移决策。
 """
 
 from __future__ import annotations
@@ -16,9 +8,10 @@ import math
 import time
 from dataclasses import asdict, dataclass
 
+from evoharness.contracts import spec_hash
 from evoharness.evaluation import EvidenceEnvelope, ScoreNamespace
 
-from .models import ResearchDecision
+from .inbox import InboxError, InboxStore
 from .reference import ReferenceRecord, ReferenceStore
 
 
@@ -38,6 +31,10 @@ class MigrationReport:
     spearman: float | None          # None = 样本不足或秩退化
     champion_old: str
     champion_new: str
+    champion_old_fitness: float
+    champion_new_fitness: float
+    champion_old_evidence_id: str
+    champion_new_evidence_id: str
     champion_changed: bool
     top_k: int
     top_k_overlap: float
@@ -47,7 +44,12 @@ class MigrationReport:
     inverted_pairs_sample: tuple[tuple[str, str], ...]
     cost_old_usd: float
     cost_new_usd: float
+    evidence_refs: tuple[str, ...]
     requires_human_approval: bool = True
+
+    @property
+    def hash(self) -> str:
+        return spec_hash({"kind": "measurement_migration_report", **self.to_json()})
 
     def to_json(self) -> dict:
         payload = asdict(self)
@@ -57,12 +59,19 @@ class MigrationReport:
         payload["inverted_pairs_sample"] = [
             list(pair) for pair in self.inverted_pairs_sample
         ]
+        payload["evidence_refs"] = list(self.evidence_refs)
         return {"schema_version": 1, **payload}
 
 
 def _score_map(
     envelopes: list[EvidenceEnvelope], label: str
-) -> tuple[ScoreNamespace, dict[str, float], float]:
+) -> tuple[
+    ScoreNamespace,
+    dict[str, float],
+    dict[str, str],
+    float,
+    tuple[str, ...],
+]:
     if not envelopes:
         raise MigrationPanelError(f"{label} panel is empty")
     namespaces = {env.namespace for env in envelopes}
@@ -71,6 +80,7 @@ def _score_map(
             f"{label} panel mixes {len(namespaces)} namespaces"
         )
     scores: dict[str, float] = {}
+    evidence_by_candidate: dict[str, str] = {}
     cost = 0.0
     for env in envelopes:
         if not env.evaluation_valid or env.fitness is None:
@@ -88,8 +98,10 @@ def _score_map(
                 f"{label} panel has duplicate candidate {env.candidate_id}"
             )
         scores[env.candidate_id] = env.fitness
+        evidence_by_candidate[env.candidate_id] = env.evidence_id
         cost += env.budget_used_usd or 0.0
-    return namespaces.pop(), scores, cost
+    evidence_refs = tuple(sorted({env.evidence_id for env in envelopes}))
+    return namespaces.pop(), scores, evidence_by_candidate, cost, evidence_refs
 
 
 def _spearman(xs: list[float], ys: list[float]) -> float | None:
@@ -98,7 +110,7 @@ def _spearman(xs: list[float], ys: list[float]) -> float | None:
         return None
 
     def ranks(values: list[float]) -> list[float]:
-        order = sorted(range(n), key=lambda i: values[i])
+        order = sorted(range(n), key=lambda i_: values[i_])
         result = [0.0] * n
         i = 0
         while i < n:
@@ -131,8 +143,8 @@ def compare_measurements(
 ) -> MigrationReport:
     if direction not in {"maximize", "minimize"}:
         raise MigrationPanelError(f"invalid direction: {direction!r}")
-    old_ns, old_scores, cost_old = _score_map(old, "old")
-    new_ns, new_scores, cost_new = _score_map(new, "new")
+    old_ns, old_scores, old_evidence, cost_old, old_refs = _score_map(old, "old")
+    new_ns, new_scores, new_evidence, cost_new, new_refs = _score_map(new, "new")
     if old_ns == new_ns:
         raise MigrationPanelError(
             "old and new panels share one namespace — nothing migrated; "
@@ -183,6 +195,10 @@ def compare_measurements(
         ),
         champion_old=champion_old,
         champion_new=champion_new,
+        champion_old_fitness=old_scores[champion_old],
+        champion_new_fitness=new_scores[champion_new],
+        champion_old_evidence_id=old_evidence[champion_old],
+        champion_new_evidence_id=new_evidence[champion_new],
         champion_changed=champion_old != champion_new,
         top_k=k,
         top_k_overlap=overlap,
@@ -192,6 +208,7 @@ def compare_measurements(
         inverted_pairs_sample=tuple(inversions[:5]),
         cost_old_usd=cost_old,
         cost_new_usd=cost_new,
+        evidence_refs=tuple(dict.fromkeys((*old_refs, *new_refs))),
     )
 
 
@@ -200,33 +217,59 @@ def establish_baseline(
     record: ReferenceRecord,
     *,
     report: MigrationReport,
-    decision: ResearchDecision,
+    inbox: InboxStore,
+    request_id: str,
+    experiment_id: str,
     now=time.time,
 ) -> ReferenceRecord:
-    """迁移后的新 baseline:面板报告 + approve-protocol-change 决定,缺一不可。"""
-    if decision.action != "approve-protocol-change":
-        raise MigrationApprovalRequired(
-            "establishing a baseline on a new namespace requires an "
-            f"approve-protocol-change decision, got {decision.action!r}"
+    """Establish a new-namespace baseline from one bound Inbox approval."""
+    try:
+        request, decision = inbox.require_decision(
+            request_id,
+            kind="protocol-change",
+            action="approve-protocol-change",
+            experiment_id=experiment_id,
+            subject_hash=report.hash,
         )
+    except InboxError as exc:
+        raise MigrationApprovalRequired(str(exc)) from exc
     if record.namespace != report.new_namespace:
         raise MigrationPanelError(
             "record namespace does not match the migration report"
         )
+    if (
+        record.candidate_id != report.champion_new
+        or record.evidence_id != report.champion_new_evidence_id
+        or record.fitness != report.champion_new_fitness
+    ):
+        raise MigrationPanelError(
+            "new baseline record does not match the approved panel champion"
+        )
     current = store.current()
-    if current is not None:
-        if current.namespace == record.namespace:
-            raise MigrationPanelError(
-                "same namespace — use PromotionPolicy/promote()"
-            )
-        if current.namespace != report.old_namespace:
-            raise MigrationPanelError(
-                "current reference is not on the report's old namespace"
-            )
+    if current is None:
+        raise MigrationPanelError("measurement migration requires an old baseline")
+    if current.namespace == record.namespace:
+        raise MigrationPanelError(
+            "same namespace — use PromotionPolicy/promote()"
+        )
+    if current.namespace != report.old_namespace:
+        raise MigrationPanelError(
+            "current reference is not on the report's old namespace"
+        )
+    if (
+        current.candidate_id != report.champion_old
+        or current.evidence_id != report.champion_old_evidence_id
+        or current.fitness != report.champion_old_fitness
+    ):
+        raise MigrationPanelError(
+            "current reference does not match the migration panel champion"
+        )
     return store.rebase(
         record,
         migration_decision={
             "experiment_id": decision.experiment_id,
+            "request_id": request.request_id,
+            "migration_report_hash": report.hash,
             "action": decision.action,
             "actor": decision.actor,
             "reason": decision.reason,

@@ -1,8 +1,13 @@
 import json
-import os
+import sqlite3
 from pathlib import Path
 
-from evoharness.core.checkpoint import atomic_write_json
+from evoharness.contracts import canonical_json
+from evoharness.core.checkpoint import (
+    append_jsonl as _append_jsonl,
+    atomic_write_json,
+    read_jsonl as _read_jsonl,
+)
 
 from .models import (
     ExperimentOutcome,
@@ -18,36 +23,46 @@ class ResearchStoreError(RuntimeError):
     """Append-only violation or corrupted research record."""
 
 
-def _append_jsonl(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in path.read_text().splitlines()
-        if line.strip()
-    ]
-
-
 class ResearchStore:
     def __init__(self, root: Path):
         self.root = Path(root)
+        self.ledger_path = self.root / "research.sqlite3"
+        self._initialize_ledger()
+
+    def _initialize_ledger(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.ledger_path, timeout=30.0) as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS decision_requests (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL UNIQUE,
+                    experiment_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_decision_requests_experiment
+                    ON decision_requests(experiment_id);
+
+                CREATE TABLE IF NOT EXISTS research_decisions (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT UNIQUE,
+                    experiment_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_decisions_experiment
+                    ON research_decisions(experiment_id);
+                """
+            )
 
     # -- write-once specs --------------------------------------------------
 
     def _put_once(self, path: Path, payload: dict, identity: str) -> None:
         if not self.root.exists():
             self.root.mkdir(parents=True, exist_ok=True)
-            
+
         if path.exists():
             # 比较规范化 JSON 而非 Python 对象:内存里的 tuple 落盘再读回
             # 是 list,直接 == 会把幂等重放误判成内容冲突。
@@ -107,9 +122,69 @@ class ResearchStore:
 
     def append_decision(self, decision: ResearchDecision) -> None:
         self._require_experiment(decision.experiment_id)
+        if decision.request_id:
+            raise ResearchStoreError(
+                "decisions tied to a request must be committed through "
+                "InboxStore.answer() so authorization and one-answer "
+                "transaction rules cannot be bypassed"
+            )
+        encoded = canonical_json(decision.to_json())
+        with sqlite3.connect(self.ledger_path, timeout=30.0) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO research_decisions(
+                    request_id, experiment_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    None,
+                    decision.experiment_id,
+                    encoded,
+                    decision.created_at,
+                ),
+            )
+
+    def append_assessment(
+        self, experiment_id: str, assessment: "ClaimAssessment"
+    ) -> None:
+        """Record one verdict so a later assessor can be caught contradicting it.
+
+        Conflict detection is the whole point: two assessors that disagree
+        about one claim are only visible if the earlier verdict survived.
+        """
+        self._require_experiment(experiment_id)
         _append_jsonl(
-            self._experiment_dir(decision.experiment_id) / "decisions.jsonl",
-            decision.to_json(),
+            self._experiment_dir(experiment_id) / "assessments.jsonl",
+            assessment.to_json(),
+        )
+
+    def assessments(self, experiment_id: str) -> list["ClaimAssessment"]:
+        from .assessment import ClaimAssessment
+
+        return [
+            ClaimAssessment.from_json(d)
+            for d in _read_jsonl(
+                self._experiment_dir(experiment_id) / "assessments.jsonl"
+            )
+        ]
+
+    def append_routed_event(self, event) -> None:
+        """The routing audit trail, including events executed without a human.
+
+        Cards land in the ledger on their own; auto-executed events would
+        otherwise leave no trace at all, which is exactly the silence an
+        activity audit has to be able to detect.
+        """
+        self._require_experiment(event.experiment_id)
+        _append_jsonl(
+            self._experiment_dir(event.experiment_id) / "routing.jsonl",
+            event.to_json(),
+        )
+
+    def routed_events(self, experiment_id: str) -> list[dict]:
+        return _read_jsonl(
+            self._experiment_dir(experiment_id) / "routing.jsonl"
         )
 
     def append_proposal(self, proposal: ProtocolChangeProposal) -> None:
@@ -128,9 +203,20 @@ class ResearchStore:
         ]
 
     def decisions(self, experiment_id: str) -> list[dict]:
-        return _read_jsonl(
+        # Keep old JSONL readable while all new decisions use the transactional
+        # ledger shared with InboxStore.
+        legacy = _read_jsonl(
             self._experiment_dir(experiment_id) / "decisions.jsonl"
         )
+        with sqlite3.connect(self.ledger_path, timeout=30.0) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM research_decisions
+                WHERE experiment_id = ? ORDER BY sequence
+                """,
+                (experiment_id,),
+            ).fetchall()
+        return legacy + [json.loads(row[0]) for row in rows]
 
     # -- helpers -------------------------------------------------------------
 

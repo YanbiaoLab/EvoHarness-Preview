@@ -78,11 +78,24 @@ class ClaimAssessment:
         payload["reasons"] = list(self.reasons)
         return {"schema_version": 1, **payload}
 
+    @classmethod
+    def from_json(cls, payload: dict) -> "ClaimAssessment":
+        if payload.get("schema_version") != 1:
+            raise ValueError("ClaimAssessment schema_version must be 1")
+        return cls(
+            claim_hash=payload["claim_hash"],
+            claim_kind=payload["claim_kind"],
+            status=Verdict(payload["status"]),
+            assessor_hash=payload["assessor_hash"],
+            evidence_refs=tuple(payload.get("evidence_refs", ())),
+            reasons=tuple(payload.get("reasons", ())),
+        )
+
 
 def require_supported(assessment: ClaimAssessment) -> None:
     if assessment.status is not Verdict.SUPPORTED:
         raise InsufficientEvidence(
-            f"{assessment.claim_kind} is {assessment.status.value}: "
+            f"{assessment.claim_kind} is {assessment.status}: "
             + "; ".join(assessment.reasons)
         )
 
