@@ -379,6 +379,18 @@ Python SearchLoop
 
 - [x] **`ResearchDecision` 补了来源字段(2026-08-23)** —— `source`,缺省 `"unknown"`。老记录读得出来,而且**"不知道来源"与"来源是终端"可区分**。`InboxStore.answer` 多收一个 `source`,命令行传 `"cli"`。
 
+#### evoweb 删除时一并失去的(2026-08-23 记账)
+
+`evoharness/evoweb/` 与 `evoharness/evoviz/` 删除后,两个测试文件成了孤儿(import 已不存在的模块),随删。它们断言的性质里**大部分在新面上有等价物**——卡片不能提名自己的审批人、actor 由进程侧定、没理由不能签、动作必须在卡片策略内、未配置时明说而不是装作空队列,这些都在 `tests/test_research_answer.py` 与 `tests/test_readout_governance.py` 里重新成立了。
+
+**没有等价物的三条,是真的丢了,不是搬走了:**
+
+- **卡片视图从 run 目录解析 coverage** —— `readout/governance.py` 只透传卡片载荷,不解析证据。功能没移植。
+- **解析不出的证据引用要显示、不要藏** —— 同上。这条尤其值得记:一个把解析失败静默吞掉的视图,读起来和"这张卡片没有证据"一模一样。
+- **协议变更提案那一整套**(`insights` / `proposal_patch` / `decide_proposal`)—— 完全没有替代面。L2 未升版不得接受、已决提案不可改,这些规则现在没有任何界面执行。
+
+前两条要补的话是 `governance.py` 加一个证据解析步骤;第三条是一整个面,得先决定还要不要。
+
 #### 原有条目(不变)
 
 - [ ] 冻结实验的启动仍走 `run_experiment`;
