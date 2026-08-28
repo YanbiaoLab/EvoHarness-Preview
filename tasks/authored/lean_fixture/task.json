@@ -1,0 +1,45 @@
+{
+  "task_id": "authored_lean_fixture",
+  "version": "v1",
+  "prompt": "prompt.md",
+  "criterion": {
+    "name": "lean_axiom_report",
+    "direction": "maximize",
+    "description": "1.0 when Lean reports fixture_main depends only on propext, Quot.sound and Classical.choice. Between 0 and 1 when the file compiles but still depends on sorryAx: that band orders the search and never establishes that the theorem is proved.",
+    "solved_at": 1.0
+  },
+  "measurement": {
+    "name": "lean-fixture",
+    "version": "v1",
+    "universe_hash": "fixture_main",
+    "planned_units": 1
+  },
+  "seed": {
+    "dir": "seed",
+    "main_file": "fixture.lean"
+  },
+  "grade": {
+    "module": "grade.py",
+    "entry": "grade"
+  },
+  "preflight": [
+    {
+      "name": "fixture_present",
+      "argv": [
+        "python",
+        "-c",
+        "import pathlib,sys; p=pathlib.Path('fixture.lean'); sys.exit(0 if p.is_file() and p.stat().st_size > 0 else 'fixture.lean is missing or empty')"
+      ],
+      "timeout_s": 20
+    },
+    {
+      "name": "locked_footer_present",
+      "argv": [
+        "python",
+        "-c",
+        "import pathlib,sys; t=pathlib.Path('fixture.lean').read_text(encoding='utf-8'); sys.exit(0 if '-- LOCKED FOOTER: do not edit or delete.' in t else 'the locked footer was removed; it is what pins the proposition')"
+      ],
+      "timeout_s": 20
+    }
+  ]
+}
