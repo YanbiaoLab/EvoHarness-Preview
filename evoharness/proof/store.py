@@ -1,29 +1,21 @@
 """SQLite persistence for the proof graph: memoization, atomicity, leases.
 
-Three things live here that `graph.py` deliberately does not know about.
+Three primary design properties are managed here:
 
-**Memoization is a UNIQUE constraint, not a lookup.** `goals.identity` is
-unique, so two goals with one identity cannot physically become two rows. That
-constraint is the entire difference between a tree and a DAG -- LEAP's
-memoization ablation is worth 40.0% -> 56.7% on its Advanced set, and this is
-where it is bought. `identity.py` owns the harder half: computing a key that
-fails toward "not the same".
+**Memoization is enforced by a UNIQUE constraint.** `goals.identity` is unique,
+so two goals with identical mathematical identities map to a single node in the
+DAG. This deduplication prevents duplicate search efforts across subgoals.
 
-**A decomposition lands whole or not at all.** Creating the subgoals, checking
-acyclicity and writing the edges happen in one transaction. Half a
-decomposition is worse than none: the controller would see an AND node with
-subgoals it cannot reach, and the graph would be quietly unsound rather than
-loudly missing.
+**Decompositions are transactional.** Creating subgoals, checking acyclicity,
+and writing decomposition edges occur in a single atomic transaction, preventing
+partially created decompositions.
 
-**Leases are not status.** `Goal.status` stays open/proved/exhausted; who is
-currently working a goal lives in its own columns, claimed by a conditional
-UPDATE. Mixing scheduling into semantics is how these enums grow
-`in-progress-retrying` a year later.
+**Leases are separated from proof status.** `Goal.status` reflects semantic state
+(open, proved, exhausted), while transient scheduling state (lease holder and
+expiry) is maintained in separate columns.
 
-Storage is SQLite rather than an append-only log because the graph has mutable
-state and needs multi-row atomic writes -- and because a crash mid-write is
-precisely what P-3's recovery test exercises. `PopulationStore` made the same
-call for the same reason.
+Storage uses SQLite with WAL mode to provide atomic multi-row updates and crash
+consistency across runs.
 """
 
 from __future__ import annotations
@@ -351,6 +343,20 @@ class ProofGraphStore:
             cost=cost,
             created_at=now,
         )
+
+    def total_cost(self) -> float:
+        """Everything spent on this graph, derived rather than kept.
+
+        A separate "spent so far" counter would be a second source of truth,
+        and after a resume the two would disagree with nothing to say which is
+        right. The attempts table already records every charge, so the ledger
+        is a SUM over it -- correct after a crash for free.
+        """
+
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(cost), 0.0) AS total FROM attempts"
+        ).fetchone()
+        return float(row["total"])
 
     def attempts_of(self, goal_id: str) -> list[Attempt]:
         rows = self._conn.execute(
