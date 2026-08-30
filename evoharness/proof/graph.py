@@ -37,9 +37,9 @@ class GoalStatus(str, Enum):
 class DecompositionStatus(str, Enum):
     PROPOSED = "proposed"
     ACCEPTED = "accepted"
-    # 两种否决的认识论地位不同,压成一个 `rejected` 会让这个区别消失。
-    # 验证器说草图不合法是事实,不该重访;审稿人说这个分解没用是启发式
-    # 判断,可能错,换预算或换审稿人之后必须允许重来。
+    # Rejection by a verifier is definitive (the sketch failed formal checking)
+    # and should not be revisited. Rejection by a reviewer is a heuristic judgement
+    # that may be reconsidered under different budgets or review criteria.
     REJECTED_BY_VERIFIER = "rejected-by-verifier"
     REJECTED_BY_REVIEWER = "rejected-by-reviewer"
     COMPLETED = "completed"
@@ -100,12 +100,12 @@ class Goal:
     #: The Lean statement, as source text.
     statement: str
     status: GoalStatus = GoalStatus.OPEN
-    #: 预算相对:在什么预算、什么求解器档次下判定穷尽的。不记这两样,加预算
-    #: resume 之后没有依据重开它,图会永远绕着这个节点走。
+    #: Context for exhaustion: budget spent and solver tier when marked EXHAUSTED.
+    #: Retaining this context allows a subsequent run with more budget to reopen the goal.
     exhausted_at_budget: float | None = None
     exhausted_at_solver: str | None = None
-    #: 调度状态,不是语义状态。混进 status 之后半年就会长出
-    #: `in-progress-retrying` 和 `stale-in-progress`。
+    #: Operational lease metadata for distributed scheduling, separated from
+    #: the goal's semantic proof status.
     lease_owner: str | None = None
     lease_expires_at: float | None = None
 
@@ -134,6 +134,11 @@ class Attempt:
     run_dir: str | None = None
     evidence_ref: str | None = None
     cost: float = 0.0
+    #: The solver's own account of how this ended. Never parsed, but it is the
+    #: only place an infra diagnosis survives -- without it, auditing a run
+    #: that died on infrastructure shows six identical `infra-failed` rows and
+    #: no way to tell what broke.
+    note: str = ""
     created_at: float | None = None
 
 
@@ -213,8 +218,6 @@ def decomposition_status_from(
     if current in _TERMINAL_DECOMPOSITIONS:
         return current
     if current is DecompositionStatus.REJECTED_BY_REVIEWER:
-        # 可重访,但重访是显式动作(把它设回 PROPOSED),不是靠子目标状态
-        # 自己漂回来。
         return current
     if current is not DecompositionStatus.ACCEPTED:
         return current

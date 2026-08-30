@@ -1,11 +1,6 @@
 """The loop: pick a goal, attack it, propagate, decompose when direct proving
 fails.
 
-Deliberately the dumbest thing that can work. LEAP itself runs a plain
-depth-first search with backtracking over its DAG, and notes that better branch
-prioritisation is future work -- and in this project the selection policy is one
-of the genes P-6 would evolve. Making it clever now would lock in by hand the
-thing the search is supposed to discover.
 
 Four rules live here and nowhere else:
 
@@ -40,6 +35,7 @@ from .graph import (
     GoalStatus,
     Outcome,
 )
+from .sketch import Sketch, SketchUnavailable, Validation
 from .solver import Solver
 from .store import ProofGraphStore
 
@@ -50,18 +46,6 @@ _ROUTE_IN_PROGRESS = frozenset(
     {DecompositionStatus.PROPOSED, DecompositionStatus.ACCEPTED}
 )
 
-#: (identity, statement) pairs.
-Subgoals = Sequence[tuple[str, str]]
-
-
-@dataclass(frozen=True)
-class Validation:
-    """Whether a proposed decomposition may be trusted to compose back."""
-
-    ok: bool
-    reason: str = ""
-
-
 class DecompositionSource(Protocol):
     """Where a route from a goal to subgoals comes from.
 
@@ -70,25 +54,30 @@ class DecompositionSource(Protocol):
     the difference, which is the point.
     """
 
-    def propose(self, goal: Goal) -> Subgoals | None:
+    def propose(self, goal: Goal) -> Sketch | None:
         ...
 
 
 @dataclass
 class FixedDecompositions:
-    """A hand-written table, keyed by goal identity. One route per goal."""
+    """A hand-written table, keyed by goal identity. One route per goal.
 
-    table: Mapping[str, Subgoals]
+    Each goal is offered its route once. Offering it again after a rejection
+    would loop: the source has nothing new to say, and the validator would
+    reach the same verdict every time.
+    """
+
+    table: Mapping[str, Sketch]
     _used: set[str] = field(default_factory=set)
 
-    def propose(self, goal: Goal) -> Subgoals | None:
+    def propose(self, goal: Goal) -> Sketch | None:
         if goal.identity in self._used:
             return None
-        subgoals = self.table.get(goal.identity)
-        if not subgoals:
+        sketch = self.table.get(goal.identity)
+        if sketch is None:
             return None
         self._used.add(goal.identity)
-        return subgoals
+        return sketch
 
 
 #: Given a goal and its proposed subgoals, is the sketch sound? P-3 passes an
@@ -96,7 +85,7 @@ class FixedDecompositions:
 #: than defaulted, because "nobody validated this" must never be silent: only
 #: an ACCEPTED decomposition may complete, and accepting without a check would
 #: hand that gate away.
-SketchValidator = Callable[[Goal, Subgoals], Validation]
+SketchValidator = Callable[[Goal, Sketch], Validation]
 
 
 def select_first_open(goals: Sequence[Goal]) -> Goal | None:
@@ -213,6 +202,7 @@ class ProofController:
                     run_dir=result.run_dir,
                     evidence_ref=result.evidence_ref,
                     cost=result.cost,
+                    note=result.note,
                 )
                 attempts += 1
                 self.store.propagate(
@@ -266,12 +256,15 @@ class ProofController:
     def _maybe_decompose(self, goal: Goal) -> tuple[int, int, int]:
         """Ask for a route and validate it. Returns (accepted, rejected, cycles)."""
 
-        subgoals = self.decompositions.propose(goal)
-        if not subgoals:
+        sketch = self.decompositions.propose(goal)
+        if sketch is None:
             return (0, 0, 0)
 
+        subgoals = [(spec.identity, spec.signature) for spec in sketch.subgoals]
         try:
-            decomposition = self.store.add_decomposition(goal.id, subgoals)
+            decomposition = self.store.add_decomposition(
+                goal.id, subgoals, sketch=sketch
+            )
         except CycleError:
             # The degenerate proposal: a subgoal that restates an ancestor.
             # Refused at the store, so nothing landed and there is no row to
@@ -279,7 +272,15 @@ class ProofController:
             # rather than vanishing.
             return (0, 0, 1)
 
-        verdict = self.validate_sketch(goal, subgoals)
+        try:
+            verdict = self.validate_sketch(goal, sketch)
+        except SketchUnavailable:
+            # Not a verdict on the sketch. Marking it rejected-by-verifier is
+            # terminal and never revisited, so a dead toolchain would delete a
+            # viable route from the graph for good. Leave it PROPOSED and let a
+            # later round check it.
+            return (0, 0, 0)
+
         self.store.set_decomposition_status(
             decomposition.id,
             (

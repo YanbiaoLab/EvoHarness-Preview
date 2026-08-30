@@ -11,20 +11,38 @@
 
 import pytest
 
-from evoharness.proof.controller import (
-    FixedDecompositions,
-    ProofController,
-    Validation,
-)
+from evoharness.proof.controller import FixedDecompositions, ProofController
 from evoharness.proof.graph import DecompositionStatus, GoalStatus, Outcome
+from evoharness.proof.sketch import Sketch, SubgoalSpec, Validation
 from evoharness.proof.solver import StubSolver
 from evoharness.proof.store import ProofGraphStore
 
-ROOT = ("sha256:root", "theorem root : A ∧ B := sorry")
-LEFT = ("sha256:left", "theorem left : A := sorry")
-RIGHT = ("sha256:right", "theorem right : B := sorry")
+ROOT = ("sha256:root", "theorem root (A B : Prop) (ha : A) (hb : B) : A ∧ B")
+LEFT = ("sha256:left", "theorem left (A : Prop) (ha : A) : A")
+RIGHT = ("sha256:right", "theorem right (B : Prop) (hb : B) : B")
 
-SPLIT = FixedDecompositions({ROOT[0]: [LEFT, RIGHT]})
+
+def spec(pair, name):
+    return SubgoalSpec(name=name, identity=pair[0], signature=pair[1])
+
+
+def sketch_for(root_pair, subgoal_pairs, *, body="trivial"):
+    """A route the controller can carry. These tests never compile anything --
+    the validator is a stub -- so the Lean text only has to be well formed
+    enough to store and read back."""
+
+    return Sketch(
+        parent_name="root",
+        parent_signature=root_pair[1],
+        parent_body=body,
+        subgoals=tuple(
+            spec(pair, f"sub_{index}")
+            for index, pair in enumerate(subgoal_pairs)
+        ),
+    )
+
+
+SPLIT = sketch_for(ROOT, [LEFT, RIGHT])
 
 
 def accept_all(goal, subgoals):
@@ -46,7 +64,7 @@ def build(store, solver, *, decompositions=None, validate=accept_all, **kwargs):
     return ProofController(
         store,
         solver,
-        decompositions=decompositions or FixedDecompositions({ROOT[0]: [LEFT, RIGHT]}),
+        decompositions=decompositions or FixedDecompositions({ROOT[0]: SPLIT}),
         validate_sketch=validate,
         **kwargs,
     )
@@ -194,7 +212,7 @@ def test_a_decomposition_that_restates_an_ancestor_is_counted_not_crashed(store)
     solver = StubSolver({}, default=Outcome.TASK_FAILED)
     controller = build(
         store, solver,
-        decompositions=FixedDecompositions({ROOT[0]: [ROOT]}),
+        decompositions=FixedDecompositions({ROOT[0]: sketch_for(ROOT, [ROOT])}),
         max_capability_attempts=2,
     )
     report = controller.solve(root.id, budget=100)

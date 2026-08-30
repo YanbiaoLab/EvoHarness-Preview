@@ -1,22 +1,18 @@
-"""The seam between the graph and everything that costs money.
+"""The seam between the graph and solver execution.
 
-The controller needs exactly one thing from the outside world: "attack this
-goal, tell me how it went". Narrowing that to a single method is what lets the
-same controller run against a stub in P-3, one `api.run()` in P-4, and whichever
-rung of P-2's ladder turns out to be worth its cost -- **which is the only
-reason that ladder is an experiment rather than a rewrite.**
+The controller needs exactly one operation from the outside world: "attack this
+goal, tell me how it went". Narrowing that to a single method allows the same
+controller to run against test stubs, standalone runs, and different solver tiers
+or strategies.
 
-Two rules live here rather than in the controller.
+Two rules live here rather than in the controller:
 
-`AttemptResult` is the one place an outcome is derived. The plan is explicit
-that the graph controller must never write its own opinion of whether a run
-succeeded: two sources of truth about that would drift, and nothing would say
-which to believe.
+1. `AttemptResult` is the single place where an outcome is derived. The graph
+   controller does not write its own opinion of whether a run succeeded,
+   preventing duplicate sources of truth from drifting.
 
-A PROVED result must carry proof text. Enforced at construction, because the
-alternative is a goal marked proved with nothing to assemble -- a contradiction
-that would otherwise surface at final re-verification, a long way from whatever
-caused it.
+2. A PROVED result must carry proof text. Enforced at construction, ensuring
+   that a goal marked proved always has proof text available for assembly.
 """
 
 from __future__ import annotations
@@ -128,8 +124,8 @@ class AttemptResult:
 class Solver(Protocol):
     """One attempt against one goal. Nothing about choosing goals lives here."""
 
-    #: Which rung of P-2's ladder this is. Recorded on a goal that exhausts,
-    #: so "we could not do it" is always qualified by "with what".
+    #: Solver capability tier or strategy identifier. Recorded on a goal that
+    #: exhausts, so exhaustion is explicitly qualified by the solver used.
     level: str
 
     def attack(self, goal: Goal, *, budget: float) -> AttemptResult:
@@ -138,13 +134,12 @@ class Solver(Protocol):
 
 @dataclass
 class StubSolver:
-    """Canned outcomes from a script. The reason P-3 is testable at all.
+    """Canned outcomes from a script for deterministic testing.
 
-    The acceptance criteria that matter most -- an infrastructure fault must
-    not push a goal toward exhaustion, an interrupted attempt must resume, the
-    graph must survive a kill -- cannot be exercised against a real solver. You
-    cannot make a judge go down on cue, at one chosen node, three times and then
-    recover. A script does exactly that, in milliseconds:
+    Critical edge cases -- such as infrastructure faults not counting toward
+    exhaustion, resuming interrupted attempts, and graph resilience under
+    abrupt termination -- cannot be exercised reliably against live solvers.
+    A script provides deterministic test behavior in milliseconds:
 
         StubSolver({"sha256:left": [INFRA_FAILED, INFRA_FAILED, PROVED]})
 

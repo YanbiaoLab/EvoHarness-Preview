@@ -20,6 +20,7 @@ consistency across runs.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -37,6 +38,7 @@ from .graph import (
     decomposition_status_from,
     goal_status_from,
 )
+from .sketch import Sketch
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS goals (
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS decompositions (
     goal_id         TEXT NOT NULL REFERENCES goals(id),
     status          TEXT NOT NULL,
     rejected_reason TEXT NOT NULL DEFAULT '',
+    sketch_json     TEXT NOT NULL DEFAULT '',
     created_at      REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS decomposition_subgoals (
@@ -71,6 +74,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     run_dir      TEXT,
     evidence_ref TEXT,
     cost         REAL NOT NULL DEFAULT 0,
+    note         TEXT NOT NULL DEFAULT '',
     created_at   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS roots (
@@ -210,6 +214,7 @@ class ProofGraphStore:
         goal_id: str,
         subgoals: Sequence[tuple[str, str]],
         *,
+        sketch: Sketch | None = None,
         status: DecompositionStatus = DecompositionStatus.PROPOSED,
     ) -> Decomposition:
         """Create or reuse the subgoals, check acyclicity, write the edges.
@@ -249,9 +254,16 @@ class ProofGraphStore:
                 ).fetchone()
                 subgoal_ids.append(row["id"])
             self._conn.execute(
-                "INSERT INTO decompositions (id, goal_id, status, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (decomposition_id, goal_id, status.value, now),
+                "INSERT INTO decompositions (id, goal_id, status, sketch_json,"
+                " created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    decomposition_id,
+                    goal_id,
+                    status.value,
+                    json.dumps(sketch.to_json(), ensure_ascii=False)
+                    if sketch else "",
+                    now,
+                ),
             )
             self._conn.executemany(
                 "INSERT INTO decomposition_subgoals (decomposition_id, ordinal,"
@@ -289,6 +301,23 @@ class ProofGraphStore:
         ).fetchall()
         return [self.decomposition(row["id"]) for row in rows]
 
+    def sketch_of(self, decomposition_id: str) -> Sketch | None:
+        """The Lean artifact behind a decomposition, or None if it never had one.
+
+        Deliberately separate from `decomposition()`: `graph.py` stays free of
+        Lean, and a caller that only needs the shape of the DAG should not have
+        to deserialize a proof term to get it.
+        """
+
+        row = self._conn.execute(
+            "SELECT sketch_json FROM decompositions WHERE id = ?",
+            (decomposition_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no such decomposition: {decomposition_id}")
+        raw = row["sketch_json"]
+        return Sketch.from_json(json.loads(raw)) if raw else None
+
     def set_decomposition_status(
         self,
         decomposition_id: str,
@@ -314,14 +343,15 @@ class ProofGraphStore:
         run_dir: str | None = None,
         evidence_ref: str | None = None,
         cost: float = 0.0,
+        note: str = "",
     ) -> Attempt:
         attempt_id = _new_id("att")
         now = time.time()
         with self._conn:
             self._conn.execute(
                 "INSERT INTO attempts (id, goal_id, outcome, proof_text,"
-                " run_dir, evidence_ref, cost, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " run_dir, evidence_ref, cost, note, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     attempt_id,
                     goal_id,
@@ -330,6 +360,7 @@ class ProofGraphStore:
                     run_dir,
                     evidence_ref,
                     cost,
+                    note,
                     now,
                 ),
             )
@@ -341,6 +372,7 @@ class ProofGraphStore:
             run_dir=run_dir,
             evidence_ref=evidence_ref,
             cost=cost,
+            note=note,
             created_at=now,
         )
 
@@ -372,6 +404,7 @@ class ProofGraphStore:
                 run_dir=row["run_dir"],
                 evidence_ref=row["evidence_ref"],
                 cost=row["cost"],
+                note=row["note"],
                 created_at=row["created_at"],
             )
             for row in rows
