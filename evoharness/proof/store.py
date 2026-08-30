@@ -496,6 +496,34 @@ class ProofGraphStore:
             )
         return cursor.rowcount == 1
 
+    def stale_leases(self, now: float | None = None) -> list[Goal]:
+        """Goals whose lease has run out with nobody having released it.
+
+        A worker that died mid-attempt left one of these behind. The attempt
+        itself was never recorded -- the process stopped before it could be --
+        so without this scan the fact that anything was tried at all is simply
+        gone, and the run directory it left is an orphan nothing points at.
+        """
+
+        now = time.time() if now is None else now
+        rows = self._conn.execute(
+            "SELECT * FROM goals WHERE lease_owner IS NOT NULL"
+            " AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?"
+            " ORDER BY created_at",
+            (now,),
+        ).fetchall()
+        return [_goal(row) for row in rows]
+
+    def force_release(self, goal_id: str) -> None:
+        """Clear a lease regardless of who holds it. Recovery only."""
+
+        with self._conn:
+            self._conn.execute(
+                "UPDATE goals SET lease_owner = NULL, lease_expires_at = NULL"
+                " WHERE id = ?",
+                (goal_id,),
+            )
+
     def release(self, goal_id: str, owner: str) -> None:
         with self._conn:
             self._conn.execute(

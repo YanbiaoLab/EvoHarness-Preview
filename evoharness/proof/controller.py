@@ -151,6 +151,37 @@ class ProofController:
             actionable.append(goal)
         return actionable
 
+    def recover(self, now: float | None = None) -> list[str]:
+        """Turn abandoned leases into recorded interruptions.
+
+        Called before the loop. A worker that died mid-attempt recorded
+        nothing, so the goal looks untouched apart from a lease nobody will
+        ever release. Writing an INTERRUPTED attempt makes the gap visible and
+        frees the goal; because INTERRUPTED carries no verdict it cannot push
+        the goal toward exhaustion, which is the whole point -- a crash is not
+        evidence that a lemma is hard.
+
+        Returns the goal ids recovered, so a resumed run can say how much it
+        inherited rather than presenting itself as a fresh start.
+        """
+
+        recovered: list[str] = []
+        for goal in self.store.stale_leases(now):
+            self.store.record_attempt(
+                goal.id,
+                Outcome.INTERRUPTED,
+                note=f"lease held by {goal.lease_owner} expired without release",
+            )
+            self.store.force_release(goal.id)
+            self.store.propagate(
+                goal.id,
+                max_capability_attempts=self.max_capability_attempts,
+                budget_spent=self.store.total_cost(),
+                solver_level=self.solver.level,
+            )
+            recovered.append(goal.id)
+        return recovered
+
     # -- the loop -------------------------------------------------------------
 
     def solve(
@@ -160,6 +191,7 @@ class ProofController:
         budget: float,
         max_iterations: int = 1000,
     ) -> SolveReport:
+        self.recover()
         iterations = 0
         attempts = 0
         accepted = 0
@@ -178,17 +210,30 @@ class ProofController:
                 stopped = "budget"
                 break
 
-            goal = self.select(self.actionable_goals())
-            if goal is None:
+            candidates = self.actionable_goals()
+            if not candidates:
                 # Everything is either proved, exhausted, or already carried by
                 # a decomposition. Nothing left this controller can do.
                 stopped = "no_actionable_goal"
                 break
-            if not self.store.claim(
-                goal.id, self.owner, ttl_s=self.lease_ttl_s
-            ):
-                # Another worker holds it. Single-threaded today; the path has
-                # to exist before it is needed, not after.
+
+            # Skip past goals somebody else holds rather than stopping. One
+            # busy node must not halt the run: with several workers that would
+            # make throughput depend on which goal happened to be picked first,
+            # and after a crash it would block every resume until the dead
+            # worker's lease expired.
+            goal = None
+            while candidates:
+                choice = self.select(candidates)
+                if choice is None:
+                    break
+                if self.store.claim(
+                    choice.id, self.owner, ttl_s=self.lease_ttl_s
+                ):
+                    goal = choice
+                    break
+                candidates = [c for c in candidates if c.id != choice.id]
+            if goal is None:
                 stopped = "goal_leased_elsewhere"
                 break
 
