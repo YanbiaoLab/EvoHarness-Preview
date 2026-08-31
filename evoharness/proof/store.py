@@ -207,6 +207,27 @@ class ProofGraphStore:
                 frontier.append(parent_id)
         return seen
 
+    def reachable_from(self, goal_id: str) -> set[str]:
+        """This goal and every goal below it, through its decompositions.
+
+        `solve(root)` has to be scoped to this set. Without it `open_goals()`
+        answers with everything open in the WORKSPACE, so attacking one subgoal
+        spends budget on unrelated goals -- including other problems, since one
+        workspace is meant to hold several. Observed: attacking one lemma
+        quietly proved its sibling and charged the first lemma's budget for it.
+        """
+
+        seen = {goal_id}
+        frontier = [goal_id]
+        while frontier:
+            current = frontier.pop()
+            for decomposition in self.decompositions_of(current):
+                for subgoal_id in decomposition.subgoal_ids:
+                    if subgoal_id not in seen:
+                        seen.add(subgoal_id)
+                        frontier.append(subgoal_id)
+        return seen
+
     # -- decompositions -------------------------------------------------------
 
     def add_decomposition(

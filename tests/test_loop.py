@@ -403,3 +403,48 @@ def test_multi_file_evolution_smoke(tmp_path):
     root = child.workspace.materialize(tmp_path / "check")
     assert (root / "helper.py").read_text() == "def n():\n    return 2\n"
     assert (root / "util.py").read_text() == "HELPER = 1\n"
+
+
+def test_failed_attempts_ledger_reaches_the_prompt(tmp_path):
+    """试过而没涨分的改动要进提案上下文。
+
+    参考程序那两条通道(archive / top_k)都按**高分**选,所以一个分数原地踏步的
+    run 里失败尝试对提案器完全不可见,它会一遍遍重提同一类改动,每次付一整轮评测。
+
+    实测(ETP Austin 线,2026-08-31):八个候选、五个不同旋钮,全是 28/100,
+    而且解出的是完全相同的 28 行。提案器当时看得见的只有种子和「top」,
+    两者都是 0.28 —— 没有任何东西告诉它这五条路已经走过。
+
+    判据是「没有严格超过父本」而不是「分数低」:持平才是原地踏步的 run 里的
+    主要失败形态,那八个候选里一个「低分」的都没有。
+    """
+    from evoharness.core.interfaces import MutationContext
+    from evoharness.core.operators import PromptBuilder
+
+    from conftest import make_candidate
+
+    parent = make_candidate("p", 0.28)
+    ctx = MutationContext(
+        parent=parent,
+        archive_inspirations=[],
+        top_k_inspirations=[],
+        operator="revise",
+        generation=3,
+        failed_attempts=(
+            ("Bounded 16-Rule CNF Saturation", 0.0),
+            ("Retain larger CNF completion prefixes", 0.0),
+            ("Widen v13 target-witness pool", -0.01),
+        ),
+    )
+    builder = PromptBuilder(task_sys_msg="")
+    text = builder._history(ctx)
+    assert "Already tried, no gain" in text
+    assert "Bounded 16-Rule CNF Saturation — +0.0000" in text
+    assert "Widen v13 target-witness pool — -0.0100" in text
+    # 没有失败记录时不留空节 —— 一个只有标题的小节是纯噪声。
+    assert builder._history(replace_failed(ctx, ())) == ""
+
+
+def replace_failed(ctx, attempts):
+    import dataclasses
+    return dataclasses.replace(ctx, failed_attempts=attempts)

@@ -140,8 +140,13 @@ class ProofController:
 
     # -- scheduling -----------------------------------------------------------
 
-    def actionable_goals(self) -> list[Goal]:
-        """Open goals with no route already in progress.
+    def actionable_goals(self, scope: set[str] | None = None) -> list[Goal]:
+        """Open goals with no route already in progress, within `scope`.
+
+        `scope` is the set reachable from the root being solved. Omitting it
+        means the whole workspace, which is right for a reader and wrong for a
+        solver: one workspace is meant to hold several problems, and "attack
+        this goal" must not charge this goal's budget for another one.
 
         A goal whose accepted decomposition is being worked is carried by its
         subgoals; attacking it directly as well would spend twice and, because
@@ -150,6 +155,8 @@ class ProofController:
 
         actionable = []
         for goal in self.store.open_goals():
+            if scope is not None and goal.id not in scope:
+                continue
             statuses = {
                 decomposition.status
                 for decomposition in self.store.decompositions_of(goal.id)
@@ -200,6 +207,7 @@ class ProofController:
         max_iterations: int = 1000,
     ) -> SolveReport:
         self.recover()
+        scope = self.store.reachable_from(root_goal_id)
         iterations = 0
         attempts = 0
         accepted = 0
@@ -218,7 +226,7 @@ class ProofController:
                 stopped = "budget"
                 break
 
-            candidates = self.actionable_goals()
+            candidates = self.actionable_goals(scope)
             if not candidates:
                 # Everything is either proved, exhausted, or already carried by
                 # a decomposition. Nothing left this controller can do.
@@ -253,6 +261,7 @@ class ProofController:
                     and not self.store.decompositions_of(goal.id)
                 ):
                     counted = self._maybe_decompose(goal)
+                    scope = self.store.reachable_from(root_goal_id)
                     accepted += counted[0]
                     rejected += counted[1]
                     cycles += counted[2]
@@ -297,6 +306,9 @@ class ProofController:
                     continue
 
                 outcome = self._maybe_decompose(goal)
+                # A decomposition that just landed added subgoals; they belong
+                # to this root's scope or the loop would never attack them.
+                scope = self.store.reachable_from(root_goal_id)
                 accepted += outcome[0]
                 rejected += outcome[1]
                 cycles += outcome[2]
@@ -324,6 +336,17 @@ class ProofController:
         sketch = self.decompositions.propose(goal)
         if sketch is None:
             return (0, 0, 0)
+        return self.record_decomposition(goal, sketch)
+
+    def record_decomposition(self, goal: Goal, sketch: Sketch) -> tuple[int, int, int]:
+        """Validate a sketch someone else built, and record the verdict.
+
+        Split out from `_maybe_decompose` so a caller who already has a sketch
+        -- a person in a conversation, say -- goes through exactly the same
+        gates as the autonomous loop. A second path that recorded
+        decompositions without validating them would be a way to put an
+        unchecked implication into the graph by hand.
+        """
 
         subgoals = [(spec.identity, spec.signature) for spec in sketch.subgoals]
         try:

@@ -288,3 +288,42 @@ def test_a_resumed_controller_starts_from_the_spend_already_on_disk(store):
     # 预算已经花完了,第二个控制器一次都不该攻。
     assert report.stopped_reason == "budget"
     assert second.calls == []
+
+
+# --- 作用域 ------------------------------------------------------------------
+
+def test_solving_one_goal_does_not_spend_on_an_unrelated_problem(store):
+    """一个工作区装着几道题是刻意的设计,所以「攻这个目标」必须只攻这个。
+
+    实跑抓到的:`actionable_goals()` 原本返回整个工作区所有开着的目标,于是攻
+    一条引理顺手把它的兄弟也证了,并且把账记在第一条引理的预算上。
+    """
+
+    root = seeded_root(store)
+    other = store.upsert_goal("sha256:unrelated", "theorem unrelated : C")
+    store.add_root(other.id, "另一道题")
+
+    solver = StubSolver({}, default=Outcome.TASK_FAILED)
+    build(
+        store, solver, decompositions=FixedDecompositions({}),
+        max_capability_attempts=1,
+    ).solve(root.id, budget=100)
+
+    assert solver.calls == [ROOT[0]]
+    assert store.goal(other.id).status is GoalStatus.OPEN
+
+
+def test_subgoals_of_a_fresh_decomposition_enter_the_scope(store):
+    """作用域是分解之后才长出来的,所以它必须在分解落地后重算——否则新子目标
+    永远进不了候选集,循环立刻报「没有可攻的目标」。"""
+
+    root = seeded_root(store)
+    solver = StubSolver({
+        ROOT[0]: [Outcome.TASK_FAILED],
+        LEFT[0]: [Outcome.PROVED],
+        RIGHT[0]: [Outcome.PROVED],
+    })
+    report = build(store, solver).solve(root.id, budget=100)
+
+    assert report.root_proved is True
+    assert LEFT[0] in solver.calls and RIGHT[0] in solver.calls

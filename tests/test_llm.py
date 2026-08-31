@@ -764,7 +764,18 @@ def test_openai_compat_transport_serializes_structured_tool_history(
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-        def read(self):
+        # 形状要跟 http.client.HTTPResponse 一致:read(amt) 收长度,读完返回 b""。
+        # 之前写成无参 read(),比真实接口窄 —— 于是传输层改成分块读之后,
+        # 这两个测试挂在假货身上,而被测代码是对的。
+        _done = False
+
+        def read(self, _amt=None):
+            if self._done:
+                return b""
+            self._done = True
+            return self._body()
+
+        def _body(self):
             return json.dumps(
                 {
                     "choices": [
@@ -983,7 +994,18 @@ def test_openai_compat_transport_sends_a_non_default_user_agent(monkeypatch):
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-        def read(self):
+        # 形状要跟 http.client.HTTPResponse 一致:read(amt) 收长度,读完返回 b""。
+        # 之前写成无参 read(),比真实接口窄 —— 于是传输层改成分块读之后,
+        # 这两个测试挂在假货身上,而被测代码是对的。
+        _done = False
+
+        def read(self, _amt=None):
+            if self._done:
+                return b""
+            self._done = True
+            return self._body()
+
+        def _body(self):
             return json.dumps({
                 "choices": [
                     {"finish_reason": "stop", "message": {"content": "ok"}}

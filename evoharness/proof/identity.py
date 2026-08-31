@@ -113,7 +113,12 @@ class ExactTextHasher:
 
     @staticmethod
     def _one(statement: str) -> str:
-        normalized = " ".join(statement.split())
+        # Hash the PROPOSITION, not the declaration. The name is not part of
+        # what a lemma says, and hashing it defeats the acyclicity check by
+        # rename: a decomposition proposing its own parent under a fresh name
+        # gets a fresh identity, forms no cycle, and is accepted -- which is
+        # exactly the degenerate mode LEAP burns rollouts on.
+        normalized = " ".join(_proposition(statement).split())
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         return f"text:{digest}"
 

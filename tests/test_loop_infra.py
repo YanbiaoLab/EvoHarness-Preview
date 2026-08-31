@@ -38,15 +38,23 @@ class FlakyGrader:
     fail_seed: raise on the seed itself (must be fatal for the run).
     """
 
-    def __init__(self, fail_on=(), fail_all_children=False, fail_seed=False):
+    def __init__(self, fail_on=(), fail_all_children=False, fail_seed=False,
+                 seed_recovers_after=None):
         self.fail_on = set(fail_on)
         self.fail_all_children = fail_all_children
         self.fail_seed = fail_seed
+        #: None = 种子永远挂;整数 N = 前 N 次挂,之后恢复(模拟一段坏窗口)。
+        self.seed_recovers_after = seed_recovers_after
         self.children_seen = 0
+        self.seed_attempts = 0
 
     def grade(self, cand, workdir: Path) -> EvalReport:
         if cand.operator == "seed":
-            if self.fail_seed:
+            self.seed_attempts += 1
+            if self.fail_seed and (
+                self.seed_recovers_after is None
+                or self.seed_attempts <= self.seed_recovers_after
+            ):
                 raise EvalInfraError("eval service down at seeding")
         else:
             self.children_seen += 1
@@ -100,6 +108,9 @@ def build_loop(grader, tmp_path, generations=10, breaker=5, transport=None):
         model_router=StaticRouter(["mock-model"]),
         workdir=tmp_path,
     )
+    # 种子重试之间的等待是给真实的池子恢复用的(默认 5 分钟)。测试里要它为 0,
+    # 否则一个「种子一直挂」的用例会睡满 breaker × 5 分钟。
+    loop.SEED_INFRA_RETRY_WAIT_S = 0.0
     return loop, store
 
 
@@ -144,9 +155,34 @@ def test_streak_resets_on_success(tmp_path):
 
 
 def test_ungradeable_seed_is_fatal(tmp_path):
-    loop, _ = build_loop(FlakyGrader(fail_seed=True), tmp_path)
+    """种子最终仍然是致命的 —— 但只在重试用尽之后。"""
+    grader = FlakyGrader(fail_seed=True)
+    loop, _ = build_loop(grader, tmp_path, breaker=5)
     with pytest.raises(EvalInfraError, match="seeding"):
         loop.run(INITIAL)
+    assert grader.seed_attempts == 5, grader.seed_attempts
+
+
+def test_a_seed_that_only_hits_a_bad_window_survives_it(tmp_path):
+    """种子的基础设施故障要重试,不能一次就判死。
+
+    别的候选评测挂了可以直接丢:loop 计进 infra_streak,接着跑。种子不行 ——
+    它是唯一的祖先,丢了之后每个岛都是空的,而这场跑会在好几代之后以另一个
+    名字("proposer_dead")死掉,查起来指向提案器。
+
+    重试在这里是安全的,换成子代就不是:种子是**已经量过的固定产物**,重跑
+    它不可能把一个差候选洗成好分数,因为此刻根本还没有候选。
+
+    2026-08-28 ETP 第 18 轮实测:凌晨沙箱池劣化,种子评测跑了 5 小时、触发
+    可信度闸,整场跑随之结束。7 小时,0 代。
+    """
+    grader = FlakyGrader(fail_seed=True, seed_recovers_after=2)
+    loop, store = build_loop(grader, tmp_path, generations=1, breaker=5)
+    report = loop.run(INITIAL)
+
+    assert grader.seed_attempts == 3          # 挂两次,第三次成功
+    assert report.stopped_reason == "completed"
+    assert store.best() is not None
 
 
 def dead_proposer_transport(messages, model, **kw):

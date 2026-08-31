@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+import evoharness.launch.build as launch_build_module
 from evoharness.core.agent import dsh_backend as dsh_backend_module
 from evoharness.launch.build import build
 from evoharness.launch.config import LaunchConfig, LaunchConfigError
@@ -67,6 +68,60 @@ def make_config(tmp_path, config=None, entry=None, **changes):
         overrides=tuple(overrides),
         **changes,
     )
+
+
+def test_live_defaults_to_the_aliyun_endpoint(tmp_path, monkeypatch):
+    captured = {}
+    original = launch_build_module.make_openai_compat_transport
+
+    def recording_transport(api_base, api_key, timeout_s=120.0):
+        captured.update(api_base=api_base, api_key=api_key)
+        return original(api_base, api_key, timeout_s=timeout_s)
+
+    monkeypatch.delenv("EVOHARNESS_API_BASE", raising=False)
+    monkeypatch.delenv("EVOHARNESS_API_KEY", raising=False)
+    monkeypatch.setenv("ALIYUN_MAAS_API_KEY", "test-key-not-a-secret")
+    monkeypatch.setattr(
+        launch_build_module, "make_openai_compat_transport", recording_transport
+    )
+
+    build(make_config(tmp_path, live=True))
+
+    assert captured == {
+        "api_base": launch_build_module.DEFAULT_LLM_API_BASE,
+        "api_key": "test-key-not-a-secret",
+    }
+
+
+def test_live_keeps_the_existing_endpoint_and_key_overrides(tmp_path, monkeypatch):
+    captured = {}
+    original = launch_build_module.make_openai_compat_transport
+
+    def recording_transport(api_base, api_key, timeout_s=120.0):
+        captured.update(api_base=api_base, api_key=api_key)
+        return original(api_base, api_key, timeout_s=timeout_s)
+
+    monkeypatch.setenv("EVOHARNESS_API_BASE", "https://override.example/v1")
+    monkeypatch.setenv("EVOHARNESS_API_KEY", "legacy-test-key")
+    monkeypatch.delenv("ALIYUN_MAAS_API_KEY", raising=False)
+    monkeypatch.setattr(
+        launch_build_module, "make_openai_compat_transport", recording_transport
+    )
+
+    build(make_config(tmp_path, live=True))
+
+    assert captured == {
+        "api_base": "https://override.example/v1",
+        "api_key": "legacy-test-key",
+    }
+
+
+def test_live_without_any_key_fails_before_a_run_starts(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALIYUN_MAAS_API_KEY", raising=False)
+    monkeypatch.delenv("EVOHARNESS_API_KEY", raising=False)
+
+    with pytest.raises(LaunchConfigError, match="ALIYUN_MAAS_API_KEY"):
+        build(make_config(tmp_path, live=True))
 
 
 def test_the_cordis_deployment_reaches_the_run_hash(tmp_path, runtime_tree):

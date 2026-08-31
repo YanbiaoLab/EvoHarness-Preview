@@ -149,6 +149,36 @@ def test_refuses_store_without_checkpoint(tmp_path):
         loop.run(INITIAL)
 
 
+def test_keep_population_opts_out_of_the_orphan_store_guard(tmp_path, monkeypatch):
+    """换提案模型时要保住实测过的种群,而这条路必须显式开。
+
+    换模型必然改掉配置指纹,于是接续被指纹闸拦下;删掉 checkpoint 又撞上
+    孤儿种群闸。两道闸都对,缺的是第三条路 —— **保留种群,重开日程**。
+    分界线在于两样东西性质不同:run.db 里的分数是求解器跑出来的,跟哪个模型
+    提的案无关;而 checkpoint 里的 RNG、组件状态、代号计数器全属于那一次日程,
+    在新配置下沿用它们才是真的瞎猜。
+
+    2026-08-30 的实际场景:Austin 线跑了六代之后换 deepseek → gpt-5.6-sol,
+    种子那 28/100 花了 52 分钟评测,而它跟提案模型毫无关系。
+    """
+    from conftest import make_candidate
+
+    pop_cfg = PopulationConfig(num_islands=2)
+    store = PopulationStore(pop_cfg, tmp_path / "run.db")
+    store.insert(make_candidate("measured", 1.0))
+    loop, _ = _make_loop(tmp_path, 5)
+    loop.store = store
+
+    # 默认仍然拦住 —— 静默继续正是这道闸存在的理由。
+    with pytest.raises(RuntimeError, match="no checkpoint"):
+        loop.run(INITIAL)
+
+    monkeypatch.setenv("EVOHARNESS_KEEP_POPULATION", "1")
+    loop.run(INITIAL)
+    kept = [c.id for c in store.all_candidates()]
+    assert "measured" in kept, "开了开关反而把实测候选丢了"
+
+
 def test_refuses_checkpoint_without_store(tmp_path):
     loop1, store1 = _make_loop(tmp_path, 3)
     loop1.run(INITIAL)

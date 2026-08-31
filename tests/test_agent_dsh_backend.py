@@ -622,3 +622,147 @@ def _run_with(
     return backend.run(make_request(
         tmp_path, session_id="proposal-fixed", event_sink=sink
     ))
+
+
+# -- what the runtime said went wrong ---------------------------------------
+#
+# Run etp_one_run1 asked for a model the candidate route's catalog did not
+# hold. Five generations failed in five seconds, the breaker stopped the run
+# as `proposer_dead`, and the whole durable record of the cause was the word
+# "backend-error": `run.log` held nothing but "plan gen=N". The message was
+# there all along, inside the `turn/end` event this translation drops.
+
+
+def _turn_end(reason):
+    return {"type": "turn/end", "data": {"reason": reason}}
+
+
+def test_a_failed_turn_keeps_what_the_runtime_said_about_it(spec, tmp_path):
+    backend = DshAgentBackend(spec)
+    result = _run_with(
+        backend, spec, tmp_path,
+        [_turn_end({
+            "kind": "error",
+            "error": {
+                "message": (
+                    'pi-ai provider "evo-gateway" has no configured model '
+                    '"gpt-5.1"'
+                ),
+                "code": "UNKNOWN_MODEL",
+            },
+        })],
+        finish_reason="error",
+    )
+
+    assert result.termination is AgentTermination.BACKEND_ERROR
+    failure = result.events[-1].data["failure"]
+    assert failure["message"] == (
+        'pi-ai provider "evo-gateway" has no configured model "gpt-5.1"'
+    )
+    assert failure["code"] == "UNKNOWN_MODEL"
+
+
+def test_a_turn_that_did_not_fail_carries_no_failure_at_all(spec, tmp_path):
+    """Absent by construction rather than emptied.
+
+    The control for the case above: an implementation that always wrote a
+    `failure` key would satisfy it while making every completed session look
+    like it had something to report.
+    """
+
+    backend = DshAgentBackend(spec)
+    result = _run_with(
+        backend, spec, tmp_path,
+        [_turn_end({"kind": "completed"})],
+        finish_reason="completed",
+    )
+
+    assert "failure" not in result.events[-1].data
+
+
+def test_reading_the_failure_does_not_stop_the_lossiness_tally(spec, tmp_path):
+    """`turn/end` is still untranslated, and the count has to keep saying so.
+
+    Pulling one field out of an event does not make the translation lossless.
+    A tally that quietly stopped counting it would report a trace as complete
+    when the rest of the payload is still being discarded.
+    """
+
+    backend = DshAgentBackend(spec)
+    result = _run_with(
+        backend, spec, tmp_path,
+        [_turn_end({"kind": "completed"})],
+        finish_reason="completed",
+    )
+
+    assert result.events[-1].data["untranslated_event_types"] == {"turn/end": 1}
+
+
+def test_a_backend_error_names_the_model_in_the_run_log(spec, tmp_path, caplog):
+    """The trace is for afterwards; the log is for whoever is watching it fail.
+
+    Five identical failures cost five generations before the breaker fires,
+    and the operator reads `run.log` long before anyone opens a trace — which
+    is exactly where the model being asked for was missing.
+    """
+
+    backend = DshAgentBackend(spec)
+    with caplog.at_level("ERROR", logger=dsh_backend_module.__name__):
+        _run_with(
+            backend, spec, tmp_path,
+            [_turn_end({
+                "kind": "error",
+                "error": {"message": "model not found", "code": "UNKNOWN_MODEL"},
+            })],
+            finish_reason="error",
+        )
+
+    logged = caplog.text
+    assert "model not found" in logged
+    assert spec.model in logged
+
+
+def test_provider_finish_failure_cannot_fake_a_dsh_turn_error(
+    spec, tmp_path, caplog
+):
+    """The provider finish shape is not the DSH ``turn/end`` wire shape.
+
+    This counterexample keeps a fixture using the wrong protocol field from
+    making the real DSH integration look covered.
+    """
+
+    backend = DshAgentBackend(spec)
+    with caplog.at_level("ERROR", logger=dsh_backend_module.__name__):
+        result = _run_with(
+            backend, spec, tmp_path,
+            [_turn_end({
+                "kind": "error",
+                "failure": {
+                    "message": "this belongs to a provider finish event",
+                    "code": "WRONG_LAYER",
+                },
+            })],
+            finish_reason="error",
+        )
+
+    assert result.termination is AgentTermination.BACKEND_ERROR
+    assert "failure" not in result.events[-1].data
+    assert "reported no message" in caplog.text
+    assert "this belongs to a provider finish event" not in caplog.text
+
+
+def test_a_failure_with_no_message_says_that_rather_than_nothing(
+    spec, tmp_path, caplog
+):
+    """A runtime that reports an error and says nothing about it is a fact
+    worth logging as itself. Logging an empty string reads as a missing log
+    line, which sends someone looking for a logging bug."""
+
+    backend = DshAgentBackend(spec)
+    with caplog.at_level("ERROR", logger=dsh_backend_module.__name__):
+        _run_with(
+            backend, spec, tmp_path, [_turn_end({"kind": "error"})],
+            finish_reason="error",
+        )
+
+    assert "reported no message" in caplog.text

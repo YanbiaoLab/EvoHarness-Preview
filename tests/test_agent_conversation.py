@@ -30,6 +30,7 @@ from evoharness.core.agent import (
     AgentToolRegistry,
     make_tool_result,
 )
+from evoharness.core.agent import runtime as runtime_module
 from evoharness.core.llm import LLMBillingError, LLMToolCallFormatError
 
 
@@ -286,14 +287,18 @@ def test_resume_preserves_history_and_reports_per_run_delta(tmp_path):
     assert second.prompt_tokens == 9
     assert second.completion_tokens == 3
     history = transport.calls[1]["messages"]
+    # 末尾那条 user 是每轮追加的预算尾注(见 _messages_with_budget):它只进
+    # 这一次请求,不进 state.messages,所以既不打断缓存前缀也不在历史里堆积。
     assert [message.role for message in history] == [
         "system",
         "user",
         "assistant",
         "user",
+        "user",
     ]
     assert history[2].content == "First pass."
     assert "syntax-error" in history[3].content
+    assert history[-1].content.startswith("[budget]")
     assert [event.sequence for event in second.events] == [3, 4, 5]
     assert {event.session_id for event in second.events} == {"session-1"}
     assert {event.round_index for event in second.events} == {1}
@@ -487,9 +492,11 @@ def test_tool_result_returns_to_model_before_final_response(tmp_path):
         "user",
         "assistant",
         "tool",
+        "user",                 # 预算尾注,每轮重算,不进历史
     ]
     assert second_history[2].tool_calls == (call,)
     assert second_history[3].tool_results[0].call_id == "call-1"
+    assert second_history[-1].content.startswith("[budget]")
     assert [event.kind for event in result.events] == [
         AgentEventKind.SESSION_START,
         AgentEventKind.MODEL_RESPONSE,
@@ -1046,3 +1053,44 @@ def test_pressure_compaction_drops_only_expiring_results(tmp_path):
     assert '"compacted":true' in by_id["call-read"]      # expiring, trimmed
     assert '"compacted":true' not in by_id["call-diag"]  # diagnostic, kept
     assert '"compacted":true' not in by_id["call-recent"]  # keep window
+
+
+def test_one_call_cannot_consume_the_whole_remaining_session(tmp_path, monkeypatch):
+    """单次调用的超时受 MAX_CALL_SECONDS 封顶,不等于剩余会话预算。
+
+    传 `timeout_s=remaining_s`(「别等得比会话还久」)听上去是对的,而它正是
+    把每次调用的上限整个关掉的那一步:`timeout_s` 是 **socket** 超时,
+    `llm.HARD_TIMEOUT_FACTOR` 又从它推出正文的死线 —— 喂进去剩余会话预算,
+    等于覆盖掉调好的 EVOHARNESS_LLM_TIMEOUT_S,并让硬死线变成 3 倍剩余会话,
+    也就是**永远不触发**。一次挂住的调用于是拥有了剩下的全部时间。
+
+    2026-08-30 Austin 线同一小时里的两个会话:最后一次健康响应分别在 737 秒和
+    905 秒,之后直到 3600 秒超时**什么都没有**(空转 2863 / 2695 秒)。两个会话
+    各自已经干净地跑了 14 轮和 22 轮、都还在读代码。六代里有两代零编辑,而日志
+    里没有任何错误 —— 看起来像 agent 很慢,实际是 socket 卡住了。
+    """
+    monkeypatch.setattr(runtime_module, "MAX_CALL_SECONDS", 20.0)
+    transport = QueueTransport(
+        LLMResponse("done", "provider-model", cost=0.0,
+                    prompt_tokens=11, completion_tokens=7)
+    )
+    backend = make_backend(transport)
+    # 会话预算 30 秒 > 单次上限 20 秒 —— 取小的那个。
+    backend.run(make_request(tmp_path, limits=AgentSessionLimits(timeout_s=30)))
+    assert transport.calls[0]["timeout_s"] == 20.0
+
+
+def test_call_timeout_still_shrinks_with_a_short_session(tmp_path, monkeypatch):
+    """封顶是**上限**不是固定值:会话只剩 5 秒时,别申请 20 秒。
+
+    两个方向都要对。只取 MAX_CALL_SECONDS 会让最后一次调用超出会话死线,
+    而那正是 remaining_s 当初要解决的问题 —— 修法不能把它换成另一个 bug。
+    """
+    monkeypatch.setattr(runtime_module, "MAX_CALL_SECONDS", 20.0)
+    transport = QueueTransport(
+        LLMResponse("done", "provider-model", cost=0.0,
+                    prompt_tokens=11, completion_tokens=7)
+    )
+    backend = make_backend(transport)
+    backend.run(make_request(tmp_path, limits=AgentSessionLimits(timeout_s=5)))
+    assert transport.calls[0]["timeout_s"] == 5
