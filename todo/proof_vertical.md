@@ -1,6 +1,7 @@
 # EvoHarness 形式证明纵向切片：Lean 判题、目标图与子目标求解（P-0..P-6）
 
-> 状态：v6（2026-08-28）——**P-0a 已落地**，其余仍是设计。
+> 状态：v7（2026-08-28）——**P-0a 与 P-3 已落地并实跑验证**；P-4 的求解与分解两块
+> 提前落了，审稿人未做。分支 `proof/vertical-slice`。
 > 定位：**Domain Layer 的形式证明外壳**。Lean 与证明语义只进 `evoharness/proof/`，
 > 不进 Core。配对文档：[research_layer.md](research_layer.md)（治理层，本切片是其
 > I-6 的展开）、[dsh_integration.md](dsh_integration.md)（执行内核与角色划分）、
@@ -28,6 +29,9 @@
 > 计划，全部记在 P-0a 节内：命题锁改由 Lean 类型检查执行（比计划强）；超时按来源
 > 分成 `timeout` 裁定与 `InfraError` 两类（计划写的「一律 infra」会让真实能力失败从
 > 统计里消失）；编辑区标记必须用框架的 `EDIT-REGION-*` 名字，这是端到端验收抓到的。
+> **v7：P-3 全部落地并实跑**（§4.1 记实跑结果与偏离）。P-4 的求解器与分解源提前做了
+> ——用户要的验收本身就是那条链，做不出来验不了。**审稿人仍未做**，所以 P-4 的验收
+> 「关掉审稿人能复现退化模式」还没兑现。
 >
 > **一句话定位**：dsh 出判断（检索、提议分解、审稿分解），Python 出控制流与裁决
 > （图、预算、检查点），EvoHarness Core 出子目标求解（求解器强度由 P-2 的阶梯决定），
@@ -288,6 +292,30 @@ dsh 承担的三件事——检索、提议分解、审稿分解——**都是�
 
 ## 4. 里程碑
 
+### 4.1 实跑记录（2026-08-28，gpt-5.6-sol）
+
+链路端到端通过，**两次跑，两条不同的路径**：
+
+| | 结果 |
+| --- | --- |
+| 默认（先直接证） | 模型一次证掉根目标，`iterations=1`。分解路径**没被走到** |
+| `--decompose-first` | 模型自行提出三引理分解 → Lean 校验 ACCEPTED → 三次独立 `api.run()` 各自证完 → 组装复验 `depends on axioms: [propext]` |
+
+引理名是模型自己起的（`add_mul_distrib` / `add_assoc_nat` / `mul_zero_nat`），结合律
+那条它写的是真归纳而非一行 `simp`。组装产物拿出来 `lean assembled.lean` 独立复验通过。
+规模：三个子目标各一个 run，每个 3 次评估、best 1.0；中途一次 `IncompleteRead`
+被既有重试路径吃掉并恢复。
+
+**第一次跑抓到两个离线 demo 结构上够不到的 bug。** 脚本化的模型总是拒绝根目标，
+所以离线每次都走分解；真模型直接证掉之后：`assemble()` 对直接证的目标只返回证明
+**体**、外面没有声明（一个裸的项），而 `_root_name` 坚持要有草图——**最容易的那个
+结果恰恰是唯一会崩的那个**。
+
+由此新增 `decompose_root_first`：只对根目标反转「先直接证」的顺序。它不是测试权宜
+之计——**P-5 的「有图 / 无图」两条臂必须能在一道直接证也能过的题上强制走分解**，
+否则那个对照做不出来。作用域限定在根目标，全局打开会去分解已经没得拆的叶子。
+
+
 > **v5 重排：先做机制，benchmark 相关的推迟。** 用户决定不先做「任务相关的 P-0..P-2」。
 > P-3、P-4 的验收全部是**机制性**的（AND-OR 传播、`infra-failed` 不推终态、崩溃恢复、
 > 装配复验挡漂移），不需要 benchmark，也不受成本闸门影响。**P-5 才是第一个真正需要
@@ -487,7 +515,30 @@ infra 失败    → 不计入任何统计
 
 ---
 
-### P-3 · 图外壳骨架〔先不接模型〕
+### P-3 · 图外壳骨架〔先不接模型〕 ✅ 2026-08-28
+
+**交付**：`evoharness/proof/{graph,store,solver,sketch,assembly,identity}.py` +
+`controller.py`，共 98 项测试。
+
+**四处偏离计划，都是实现时才看清的：**
+
+**其一，草图校验提前到 P-3**（计划在 P-4）。理由如设计时所述：手写分解不过同一个
+校验器，P-4 就是在一条从没跑过的路径上第一次接模型。
+
+**其二，`sorry` 位置判据比计划具体。** 计划只说「主体 sorry-free」。实现用的是
+Lean 警告自带的行列号——**而行号是 `render` 排版时记下来的，不是回头解析源码解出来
+的**。我们自己排的文件，再去猜它落在哪一行等于凭空制造一个不确定性。
+
+**其三，校验器跑不起来必须抛异常，不能返回 `ok=False`。** 后者会把分解标成
+`rejected-by-verifier`——终态、永不重访——于是一次基础设施故障会**永久删掉**一条本来
+可行的路。控制器捕获 `SketchUnavailable` 后把分解留在 `PROPOSED`。
+
+**其四，`AttemptResult.interrupted()` 原本是死代码。** 进程死在 `solver.attack()` 里
+走不到 `record_attempt`，图上只剩一个 `OPEN` 目标和一把没人释放的租约，「试过」这个
+事实整个丢失。补了恢复扫描（`recover()`）。杀进程那条用真 SIGKILL 测——**用异常模拟
+测不出来**，异常会走 `finally` 释放租约，而那正是被 kill 时不会发生的事。那个测试顺带
+抓出：一次失败的 claim 会 `break` 掉整个循环，多 worker 下吞吐量取决于「先挑中了谁」。
+
 
 新增 `evoharness/proof/`，**Core 改动仍然是 0**。
 
@@ -517,10 +568,10 @@ Attempt.outcome       proved | task-failed | budget-exhausted
                              | timeout | infra-failed | interrupted
 ```
 
-- [ ] **`infra-failed` 是一次 attempt 的结果，不是节点终态。** 它绝不能让图把该子目标
+- [x] **`infra-failed` 是一次 attempt 的结果，不是节点终态。** 它绝不能让图把该子目标
       标记成「此路不通」然后去换分解——那是「基础设施故障被当成能力退步」的翻版，
       在这里后果更贵：它会让整张图朝错误方向重构。
-- [ ] **`Attempt` 就是一次 `api.run()`**，对应一个 run 目录 + manifest + `EvidenceEnvelope`。
+- [x] **`Attempt` 就是一次 `api.run()`**，对应一个 run 目录 + manifest + `EvidenceEnvelope`。
       `outcome` **必须从 run 报告派生，不得由图控制器另写一遍**——否则「这次试成了没有」
       有两个真相源。现成映射：
 
@@ -534,48 +585,48 @@ Attempt.outcome       proved | task-failed | budget-exhausted
 
   **只有 `task-failed` 是关于能力的证据，其余全是关于这次运行的证据。**
   `budget-exhausted` 必须与 `task-failed` 分开：前者加预算重跑可能就成，后者才是能力信号。
-- [ ] **`Decomposition` 的两种 `rejected` 必须分来源。** `rejected-by-verifier` 是 Lean 说
+- [x] **`Decomposition` 的两种 `rejected` 必须分来源。** `rejected-by-verifier` 是 Lean 说
       草图不合法——事实，不该重访；`rejected-by-reviewer` 是审稿人说这个分解没用——
       **启发式判断，可能错，必须可重访**（换预算、换审稿人提示、或别的路都走死后回来）。
       压成一个 `rejected` 会让 §1.2 那条线（模型判方向、不判对错）在实现里消失。
-- [ ] **`Goal.exhausted` 是预算相对的**，必须记下在什么预算、什么求解器档次下穷尽。
+- [x] **`Goal.exhausted` 是预算相对的**，必须记下在什么预算、什么求解器档次下穷尽。
       否则加预算 resume 时没有依据重开它，图会永远绕着那个节点走。
-- [ ] **并发租约不进 `status`。** `Goal.status` 保持三值纯语义；「谁正在攻这个目标」
+- [x] **并发租约不进 `status`。** `Goal.status` 保持三值纯语义；「谁正在攻这个目标」
       放单独的 lease 字段。L1/L2 可并行，图层一定会并发攻多个开放目标，但那是调度状态。
       把 `in-progress` 塞进 `status`，半年后会看到 `in-progress-retrying`、
       `stale-in-progress` 并存。
 
 #### 3b. 身份哈希：范围与失败方向〔承重〕
 
-- [ ] **只承诺对 elaborated Lean expression 做 alpha-normalization / definitional identity
+- [x] **只承诺对 elaborated Lean expression 做 alpha-normalization / definitional identity
       hash。不承诺识别逻辑等价命题**——那通常不可判定。
-- [ ] **这个哈希本身是一次 Lean 调用**（要拿 elaborated 表达式就得跑 elaborator），
+- [x] **这个哈希本身是一次 Lean 调用**（要拿 elaborated 表达式就得跑 elaborator），
       因此会失败：超时、Mathlib 报错、依赖没编。
-- [ ] **失败时必须倒向「不是同一个」，绝不能倒向「是同一个」。** 错误合并会让一个
+- [x] **失败时必须倒向「不是同一个」，绝不能倒向「是同一个」。** 错误合并会让一个
       未证目标继承另一个目标的已证状态——**这是本切片里唯一能直接产出假结论的路径**。
-- [ ] **代价不对称，写在正文里挡住后人**：漏合并只损失效率（少一次复用），错合并
+- [x] **代价不对称，写在正文里挡住后人**：漏合并只损失效率（少一次复用），错合并
       损失正确性。**因此禁止用 LLM 判定引理等价来「提高复用率」**——那是个很自然、
       很诱人的后续改进，而它会把上面这条护栏整个拆掉。
 
 #### 3c. 其余骨架
 
-- [ ] 图存储：带 schema 的外部对象（SQLite 或 JSONL），不是上下文里的一段 JSON。
-- [ ] 写入守卫：无环性检查 + 3b 的身份哈希。
-- [ ] 跨 run 总预算账本（承重点其四）。
-- [ ] 整张图可检查点、可恢复。`interrupted` 是唯一**可续**的 attempt outcome
+- [x] 图存储：带 schema 的外部对象（SQLite 或 JSONL），不是上下文里的一段 JSON。
+- [x] 写入守卫：无环性检查 + 3b 的身份哈希。
+- [x] 跨 run 总预算账本（承重点其四）。
+- [x] 整张图可检查点、可恢复。`interrupted` 是唯一**可续**的 attempt outcome
       （run 目录本身带检查点），其余都是终态。
-- [ ] 每个子目标是**动态生成的 TaskSpec**（Lean 命题不同 → task hash 不同）。契约上
+- [x] 每个子目标是**动态生成的 TaskSpec**（Lean 命题不同 → task hash 不同）。契约上
       干净，但要为每个子目标物化一个种子目录（放一份带 `sorry` 的骨架）；现在
       `ResolvedTask.from_directory` 是从目录构建的，这几十行要写。
-- [ ] 建一个「图节点 → run 目录」的索引。170 个节点就是 170 个目录 170 个 `run.db`，
+- [x] 建一个「图节点 → run 目录」的索引。170 个节点就是 170 个目录 170 个 `run.db`，
       没有索引事后无法审计。
 
 #### 3d. 最终整体复验〔承重〕
 
-- [ ] **`Decomposition.completed → Goal.proved` 这条传播不得以逐节点绿灯收尾。**
+- [x] **`Decomposition.completed → Goal.proved` 这条传播不得以逐节点绿灯收尾。**
       引理是在 N 个独立 run 目录里、跨很长时间分别证出来的；凑齐时 Mathlib 版本、
       兄弟引理签名、`sorry` 填法都可能已经漂了。
-- [ ] **根目标被证明的凭据，是组装后整份文件完整编译通过 + 公理检查通过。**
+- [x] **根目标被证明的凭据，是组装后整份文件完整编译通过 + 公理检查通过。**
       草图校验挡的是分解错误，这一道挡的是**装配漂移**。
 
 #### 3e. 用桩求解器建图，不接模型也不调 `api.run()`
@@ -583,12 +634,12 @@ Attempt.outcome       proved | task-failed | budget-exhausted
 > **v5 收紧。** v4 写的是「先不接模型，人工分解，让图去调 `api.run()` 逐个攻」——
 > 还不够。真正该桩掉的是**子目标求解本身**。
 
-- [ ] **每个子目标由一个桩返回一份预写好的证明**（fixture 的三条引理各配一份）。
+- [x] **每个子目标由一个桩返回一份预写好的证明**（fixture 的三条引理各配一份）。
       这样 AND-OR 传播、三套状态、身份哈希、装配复验、崩溃恢复**全部可以确定性地测**，
       跑一遍几秒钟，一次模型调用都不花。
-- [ ] 桩要能按剧本返回**每一种 `Attempt.outcome`**——尤其 `infra-failed` 与
+- [x] 桩要能按剧本返回**每一种 `Attempt.outcome`**——尤其 `infra-failed` 与
       `interrupted`，否则那两条最重要的路径根本没被走过。
-- [ ] 图跑对之后，再把桩换成真的 `api.run()`（节点求解器暂用 L2，见 §4 开头的空缺表）。
+- [x] 图跑对之后，再把桩换成真的 `api.run()`（节点求解器暂用 L2，见 §4 开头的空缺表）。
 
 **验收**：fixture 端到端通过——**子目标全绿、组装后整体复验也绿**；杀掉进程再恢复，
 图状态完整且 `interrupted` 的那个 attempt 能续上；**桩注入一次 `infra-failed`，确认它
@@ -600,7 +651,20 @@ Attempt.outcome       proved | task-failed | budget-exhausted
 
 ---
 
-### P-4 · 分解与审稿接 dsh
+### P-4 · 分解与审稿接 dsh 🟡 部分（求解与分解已做，审稿人未做）
+
+> **提前落地的部分**：`propose.py`（模型分解源 + 严格解析）与 `run_solver.py`
+> （`ApiRunSolver`，一个子目标一次 `api.run()`）。用户要的验收就是这条链，做不出来
+> 验不了，所以先于 P-0b 做了。
+>
+> **仍然欠着的**：**独立审稿人**。所以本节验收「关掉审稿人能复现退化模式」尚未兑现，
+> 而那条正是 §1.2「让模型判方向、不让它判对错」在实现层的落点。审稿人要在真题上才
+> 有意义（fixture 太简单，退化模式不会出现），因此它排在 P-0b 之后。
+>
+> **现在的阻塞是 Mathlib**：`lean_proof_bench_v2.csv` 的题面全部 `import Mathlib`，
+> 而当前环境只有裸 Lean，没有 lake 工程。这既是 P-0b 的前置，也是 P-1 能出真数字的
+> 前提——**成本闸门量的正是 Mathlib 编译几十秒对核心 Lean 一秒这个差别**。
+
 
 按 §2.1 的环路接线。
 
@@ -666,6 +730,7 @@ Attempt.outcome       proved | task-failed | budget-exhausted
 | 机制空转（图退化成树） | P-5 | `audit.py` 查引理复用次数 |
 | **机制空转（种群退化成串行修复）** | P-2 空转检查 | `passed` = 编译通过（§1.5）；确认带 sorry 的父本被采样过 |
 | **归因错误：把一坨机制的总效应记到其中一件头上** | P-2 阶梯、P-5 双臂 | 一次只跨一格；两臂求解器同级。**本文档 v1、v2 各犯过一次** |
+| **离线 demo 结构上够不到某些路径** | P-3 实跑 | 脚本化的模型总走同一条路；真模型走了另一条，两个 bug 才现形。**桩测的是机制，不是覆盖** |
 | **`repair` 一词歧义导致误判开关** | 设计期 | §1.3 的三分表；`repair_enabled=False` ≠ 无编译反馈迭代 |
 | **软适应度被刷（削弱命题、sorry 外逃）** | P-0a 验收 | 编辑区标记锁死 `theorem` 语句；公理检查；软分只进排序不建立事实 |
 | 基础设施故障被当能力退步 | P-3 验收注入 | `infra-failed` 是 attempt 结果，不是 `Goal` 终态；不触发重新分解 |
@@ -680,8 +745,11 @@ Attempt.outcome       proved | task-failed | budget-exhausted
 ## 6. 依赖线与停止线
 
 ```
-P-0a → P-3 → P-0b → P-4 → 〔P-0c + P-1 闸门 + P-2 阶梯〕→ P-5 → P-6
+P-0a ✅ → P-3 ✅ → P-0b ⬅ 现在这里 → P-4 审稿人 → 〔P-0c + P-1 闸门 + P-2 阶梯〕→ P-5 → P-6
+                    ↑ 阻塞在 Mathlib 工程
 ```
+
+**P-4 的求解器与分解源已提前落地**（见该节），所以 P-0b 之后要补的只有审稿人。
 
 **机制侧（不需要 benchmark）**
 
