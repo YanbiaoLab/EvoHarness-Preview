@@ -44,8 +44,19 @@ const passthrough = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-function harnessFrom(env: Record<string, string>) {
-  return { python: env.EVO_PYTHON, root: env.EVO_HARNESS_ROOT }
+/**
+ * Resolve the environment at CALL time, as `peer.ts` does.
+ *
+ * Doing it in `apply` would fail plugin load when a variable is missing, which
+ * takes the whole runtime down; doing it here fails one tool with a message
+ * naming what to set, and the session carries on.
+ */
+function harness(): { python: string, root: string } {
+  const env = requireEnv(REQUIRED_ENV)
+  return {
+    python: env['EVO_PYTHON'] as string,
+    root: env['EVO_HARNESS_ROOT'] as string,
+  }
 }
 
 /** Flags every subcommand accepts, from the environment rather than the model. */
@@ -55,8 +66,6 @@ function commonFlags(): string[] {
 }
 
 export function apply(ctx: Context) {
-  const env = requireEnv(REQUIRED_ENV)
-  const harness = harnessFrom(env)
 
   ctx.tools.register(defineTool({
     name: 'proof_open',
@@ -73,7 +82,7 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness,
+      harness(),
       ['-m', MODULE, ...commonFlags(), 'open',
         '--statement', String(args.statement),
         ...(args.preamble ? ['--preamble', String(args.preamble)] : []),
@@ -94,7 +103,7 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness,
+      harness(),
       ['-m', MODULE, ...commonFlags(), 'status',
         ...(args.goal_id ? ['--goal', String(args.goal_id)] : [])],
       exec.signal, 'reading the board',
@@ -119,7 +128,7 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness,
+      harness(),
       ['-m', MODULE, ...commonFlags(), 'sketch',
         '--goal', String(args.goal_id),
         '--proposal', String(args.proposal)],
@@ -148,7 +157,7 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness,
+      harness(),
       ['-m', MODULE, ...commonFlags(), 'attack',
         '--goal', String(args.goal_id),
         ...(args.budget === undefined ? [] : ['--budget', String(args.budget)]),
@@ -172,7 +181,7 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness,
+      harness(),
       ['-m', MODULE, ...commonFlags(), 'assemble',
         '--goal', String(args.goal_id),
         ...(args.out ? ['--out', String(args.out)] : []),

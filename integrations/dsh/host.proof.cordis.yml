@@ -1,48 +1,31 @@
-# The runtime YOU talk to, not the one a candidate runs in.
+# The proof tools, as a PATCH onto whatever configuration your dsh already runs.
 #
-# `candidate.cordis.yml` in the deepseek-harness checkout composes a world for
-# one CANDIDATE: its in-process tools are cleared and a guard refuses the
-# dangerous ones, because the thing driving it is a mutation under evaluation.
-# This file composes the other side. The session here is a person and an agent
-# working on a proof together, so it keeps the ordinary tool set and adds the
-# five that reach the graph.
+# Not a deployment. `demo.cordis.yml` beside this one says the same thing and
+# says why: patch files resolve modules from the selected dsh profile rather
+# than from this directory, so a launcher has to render these portable relative
+# source paths to checkout-local absolute paths before boot. Do not pass this
+# source file to `--patch` directly -- use `scripts/dsh_proof.sh`.
 #
-# Copy `proof.ts` next to the other evo-harness example plugins (it imports
-# `./cli.ts` from there) and point the row below at it.
+# This is the HOST side: a person and an agent working on a proof together. It
+# must never be merged into a CANDIDATE's config. A candidate holding
+# `proof_attack` could spend the run's budget on goals nobody asked for, and
+# one holding `proof_sketch` would be inside the loop that is supposed to be
+# judging it.
 #
-#   export EVO_PYTHON=$(cd /path/to/EvoHarness && uv run which python)
-#   export EVO_HARNESS_ROOT=/path/to/EvoHarness
-#   export EVO_PROOF_WORK=/path/to/a/workspace
-#   export EVO_LEAN_PROJECT=/path/to/EvoHarness/tasks/lean_env   # Mathlib goals
-#   export EVOHARNESS_API_BASE=... EVOHARNESS_API_KEY=...        # proof_attack
-#   export DSH_MODEL=gpt-5.6-sol
+# No llm row: the session's model is whatever your dsh profile already
+# configures. This patch adds tools and nothing else.
+#
+# Required in the launching environment:
+#
+#   EVO_PYTHON         interpreter EvoHarness is installed in
+#   EVO_HARNESS_ROOT   the EvoHarness checkout
+#   EVO_PROOF_WORK     workspace holding graph.db and every run directory
+#   EVO_LEAN_PROJECT   lake project providing Mathlib (omit for core-Lean goals)
+#
+# And, for `proof_attack` only:
+#
+#   EVOHARNESS_API_BASE / EVOHARNESS_API_KEY
 
-- id: evo-proof
-  name: './proof.ts'
-
-- id: sdk-jsonrpc-server
-  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
-  config:
-    maxTokensAsSuccess: false
-
-# A hand-declared OpenAI-compatible route rather than `dsh-llm-deepseek`, for
-# the reason `candidate.cordis.yml` records: that adapter parses DeepSeek's own
-# streaming shape, where a continuation tool-call delta omits id and name. An
-# OpenAI-compatible gateway sends them as "" and null instead, which its
-# `!== undefined` guards accept and write over the real values -- every tool
-# call then arrives named "" and the session can do nothing at all.
-#
-# The krill gateway answers both `/responses` and `/chat/completions`; this
-# route uses the latter, which is what `openai-completions` speaks.
-- id: llm
-  name: '@deepseek-ai/dsh-llm-pi-ai'
-  config:
-    providers:
-      evo-gateway:
-        displayName: EvoHarness proof gateway
-        apiKeyEnv: EVOHARNESS_API_KEY
-        api: openai-completions
-        baseURL: !!js process.env.EVOHARNESS_API_BASE
-        streamIdleTimeoutMs: 172800000
-        models:
-          - id: !!js process.env.DSH_MODEL ?? 'gpt-5.6-sol'
+- insert:
+    - id: evo-proof
+      name: '../src/proof.ts'
