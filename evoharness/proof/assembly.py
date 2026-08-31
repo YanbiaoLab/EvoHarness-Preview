@@ -79,8 +79,11 @@ def assemble(store: "ProofGraphStore", goal_id: str) -> str:
 
     direct = _direct_proof(store, goal_id)
     if direct is not None:
-        # Closed without decomposing: the attempt's own text is the proof.
-        return direct
+        # Closed without decomposing. `_direct_proof` yields the BODY, which is
+        # what a subgoal contributes when spliced into a sketch; at the top of
+        # the file it still needs its own declaration around it, or what comes
+        # back is a bare term that compiles as nothing.
+        return f"{goal.statement} := {direct}\n"
 
     completed = [
         decomposition
@@ -191,13 +194,35 @@ def verify(
 
 
 def _root_name(store: "ProofGraphStore", goal_id: str) -> str:
+    """The declaration `#print axioms` should be asked about.
+
+    Taken from the goal's own statement rather than from a sketch. A goal the
+    solver closed directly has no decomposition and therefore no sketch, and
+    requiring one turned the easiest possible outcome -- the model just proved
+    it -- into a crash.
+    """
+
+    name = _declaration_name(store.goal(goal_id).statement)
+    if name:
+        return name
     for decomposition in store.decompositions_of(goal_id):
         sketch = store.sketch_of(decomposition.id)
         if sketch is not None:
             return sketch.parent_name
     raise AssemblyError(
-        f"goal {goal_id} has no sketch, so the declaration to check is unknown"
+        f"goal {goal_id} has no readable declaration name"
     )
+
+
+def _declaration_name(signature: str) -> str:
+    body = signature.strip()
+    for keyword in ("theorem", "lemma", "example", "def"):
+        if body.startswith(keyword + " "):
+            body = body[len(keyword) + 1:].lstrip()
+            break
+    else:
+        return ""
+    return body.split(None, 1)[0] if body else ""
 
 
 def _axioms(output: str, name: str) -> frozenset[str] | None:

@@ -60,7 +60,7 @@ class DecompositionSource(Protocol):
 
 @dataclass
 class FixedDecompositions:
-    """A hand-written table, keyed by goal identity. One route per goal.
+    """A handwritten table, keyed by goal identity. One route per goal.
 
     Each goal is offered its route once. Offering it again after a rejection
     would loop: the source has nothing new to say, and the validator would
@@ -119,6 +119,7 @@ class ProofController:
         select: Callable[[Sequence[Goal]], Goal | None] = select_first_open,
         lease_ttl_s: float = 600.0,
         owner: str = "controller",
+        decompose_root_first: bool = False,
     ):
         self.store = store
         self.solver = solver
@@ -129,6 +130,13 @@ class ProofController:
         self.select = select
         self.lease_ttl_s = lease_ttl_s
         self.owner = owner
+        # LEAP's order is direct-first, and that is the default. Inverting it
+        # for the ROOT only is the "with graph" arm P-5 needs: comparing
+        # decomposition against direct proving requires being able to ask for
+        # decomposition even where direct proving would have worked. Scoped to
+        # the root because applying it everywhere would decompose leaves that
+        # have nothing left to split.
+        self.decompose_root_first = decompose_root_first
 
     # -- scheduling -----------------------------------------------------------
 
@@ -239,6 +247,18 @@ class ProofController:
 
             iterations += 1
             try:
+                if (
+                    self.decompose_root_first
+                    and goal.id == root_goal_id
+                    and not self.store.decompositions_of(goal.id)
+                ):
+                    counted = self._maybe_decompose(goal)
+                    accepted += counted[0]
+                    rejected += counted[1]
+                    cycles += counted[2]
+                    if counted[0]:
+                        continue
+
                 result = self.solver.attack(goal, budget=budget - spent)
                 self.store.record_attempt(
                     goal.id,

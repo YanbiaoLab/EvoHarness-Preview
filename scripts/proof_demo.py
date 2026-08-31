@@ -207,6 +207,12 @@ def main() -> int:
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--work", default="")
     parser.add_argument(
+        "--decompose-first", action="store_true",
+        help="decompose the root before trying to prove it directly; the "
+             "'with graph' arm, and the only way to exercise the whole chain "
+             "on a goal the model could have closed in one shot",
+    )
+    parser.add_argument(
         "--lean-identity", action="store_true",
         help="merge alpha-equivalent lemmas (asks Lean); default is the "
              "conservative text hasher",
@@ -259,6 +265,7 @@ def main() -> int:
             decompositions=source,
             validate_sketch=LeanSketchValidator(),
             max_capability_attempts=1,
+            decompose_root_first=args.decompose_first,
         )
 
         print("solving...")
