@@ -1,0 +1,20 @@
+# Mathlib environment for the proof slice.
+#
+# Pinned to Lean and Mathlib 4.27.0 because that is what IMO-LeanProofBench's
+# own release note names: the v2 statements were checked to be friendly to
+# automated proof comparators under that version. Changing it changes the task,
+# so the pin lives in git even though the build products do not.
+#
+# `.lake/` is several gigabytes of downloaded oleans and is gitignored. What is
+# committed is only what reproduces it: this file, `lean-toolchain`, and
+# `lake-manifest.json`.
+name = "leanenv"
+defaultTargets = ["LeanEnv"]
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "v4.27.0"
+
+[[lean_lib]]
+name = "LeanEnv"

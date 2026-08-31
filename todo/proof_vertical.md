@@ -428,7 +428,47 @@ example : ∀ (a b c : Nat), <原命题> := fixture_main
 
 ---
 
-### P-0b · 三五道真题〔P-4 的前置〕
+### P-0b · 三五道真题〔P-4 的前置〕 ✅ 2026-08-31
+
+**交付**：`tasks/lean_env/`（钉死的 Mathlib 工程）+ `tasks/lean_bench/extract.py`
++ `problems.json`（5 道，全部验证种子骨架编译通过）。
+
+**版本钉法**：Lean 与 Mathlib **v4.27.0**（Mathlib rev `a3a10db0e9d6`），因为
+`lean_proof_bench_v2.csv` 的发布说明点名 v2 题面是在这个版本下核过的。`.lake/`
+是 6.8 GB 下载来的 olean，gitignore 掉；进 git 的只有能复现它的四个文件
+（`lean-toolchain` / `lakefile.toml` / `lake-manifest.json` / 占位 lib）。
+
+**接线缺口（实施时才发现）**：Mathlib 必须走 `lake env lean`，而此前所有地方都是
+裸 `lean`——Mathlib 的 olean 搜索路径只来自 lake 环境，裸 `lean` 会把 `import Mathlib`
+读成未知模块。抽出 `sketch.LeanRunner`（`cmd` + `cwd`），`LeanSketchValidator`、
+`assembly.verify`、`LeanExprHasher` 全部改吃它。
+
+**抽取时踩到的坑，失败模式很安静**：preamble 起初只留 `import` 与 `set_option`，
+于是 PB-Advanced-001 的 `open scoped Classical` 被丢掉，它的 `Finset.filter` 合成不出
+`DecidablePred`，题面编译不过。而**种子编译不过 → 不 `passed` → 岛里没有父本 →
+一个提案都产不出来**，读起来和「模型做不出来」一模一样。现在规则改成「声明之前
+除注释外全留」。
+
+---
+
+### P-1 · 成本探针 ⟨已有第一组真数字⟩
+
+**这些数比计划里的估计乐观得多，也比第一次测的悲观得多——差别全在页缓存。**
+
+| | 单次编译 |
+| --- | --- |
+| 核心 Lean（fixture，不 import Mathlib） | 1.3s |
+| Mathlib，**稳态热** | **3.9s** |
+| Mathlib，冷 / 半热 | **40–85s** |
+
+五道题连跑三遍：第一遍均 52.4s，第二遍仍均 46.0s，**第三遍才落到 3.9s**。6.8 GB 的
+olean 要跑满两遍才在页缓存里坐稳。
+
+**推论**：长跑的稳态成本是每次编译约 4 秒，但**新机器或被别的负载挤掉缓存之后，
+前几十次编译要按十倍算**。这条直接影响 P-5 的臂间比较——若两条臂一冷一热，量到的
+差异全是缓存而不是搜索。
+
+**仍然欠着的**：真实的单题 LLM 调用数与墙钟，那要在真题上跑完整循环才有。
 
 - [ ] 从 `lean_proof_bench_v2.csv` 的 `Lean Statement` 列取 **3–5 道**，复刻
       [etp_one](../tasks/authored/etp_one/task.json) 的任务目录形状。

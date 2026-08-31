@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .graph import GoalStatus
-from .sketch import ERROR_RE, SketchUnavailable, compile_lean, render
+from .sketch import ERROR_RE, LeanRunner, SketchUnavailable, render
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .store import ProofGraphStore
@@ -135,8 +135,7 @@ def verify(
     store: "ProofGraphStore",
     goal_id: str,
     *,
-    lean: str = "lean",
-    timeout_s: float = 300.0,
+    runner: LeanRunner | None = None,
 ) -> AssemblyResult:
     """Assemble, compile, and read Lean's axiom report.
 
@@ -151,7 +150,7 @@ def verify(
     text = text.rstrip() + f"\n\n#print axioms {name}\n"
 
     try:
-        returncode, output = compile_lean(text, lean=lean, timeout_s=timeout_s)
+        returncode, output = (runner or LeanRunner()).compile(text)
     except SketchUnavailable as exc:
         # Nothing was measured. Reporting ok=False would say the assembled
         # proof is wrong, which is a much stronger claim than "we could not

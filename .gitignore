@@ -38,3 +38,8 @@ experiments/modmul/shinka/smoke.log
 
 # Experiment workspaces stay local (datasets, seeds, certification bundles)
 experiments/
+
+# Mathlib build products: ~7 GB of downloaded oleans. What reproduces them is
+# committed (lean-toolchain, lakefile.toml, lake-manifest.json); the artifacts
+# are not.
+tasks/lean_env/.lake/

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "PB-Basic-001",
+    "level": "IMO-easy",
+    "category": "Algebra",
+    "source": "(Modified) IMO 2019, P1",
+    "name": "PBBasic001",
+    "preamble": "import Mathlib",
+    "signature": "theorem PBBasic001 :\n    {f : ℤ → ℤ | ∀ x y, f (2 * x) + 2 * f y = f (f (x + y))}\n      = {0} ∪ {(fun x ↦ 2 * x + c)| (c : ℤ)}"
+  },
+  {
+    "id": "PB-Basic-002",
+    "level": "pre-IMO",
+    "category": "Algebra",
+    "source": "(Modified)  All-Russian MO 2013, Grade 11, P6",
+    "name": "PBBasic002",
+    "preamble": "import Mathlib",
+    "signature": "theorem PBBasic002\n    (x y z t : ℝ)\n    (hx : 0 < x) (hy : 0 < y) (hz : 0 < z) (ht : 0 < t)\n    (H : x * y * z * t ≤ 2 * (x + y + z + t)) :\n    x * y * z * t ≤ x ^ 2 + y ^ 2 + z ^ 2 + t ^ 2"
+  },
+  {
+    "id": "PB-Basic-003",
+    "level": "IMO-easy",
+    "category": "Algebra",
+    "source": "(Modified) Balkan MO 2023, P1",
+    "name": "PBBasic003",
+    "preamble": "import Mathlib",
+    "signature": "theorem PBBasic003 :\n    {f : ℝ → ℝ | ∀ a b, (b - a) * f (f a) = a * f (a + f b)}\n      = {0} ∪ {(fun x ↦ - x + k) | (k : ℝ)}"
+  },
+  {
+    "id": "PB-Basic-004",
+    "level": "IMO-easy",
+    "category": "Algebra",
+    "source": "(Modified) VMO 2012, Day2 P3",
+    "name": "PBBasic004",
+    "preamble": "import Mathlib",
+    "signature": "theorem PBBasic004 :\n    {g : ℝ → ℝ | StrictMono g ∧ g.Surjective ∧ ∀ x, g (g x) = g x + 20 * x}\n      = {(fun x ↦ 5 * x)}"
+  },
+  {
+    "id": "PB-Advanced-001",
+    "level": "IMO-easy",
+    "category": "Algebra",
+    "source": "Novel Problem",
+    "name": "PBAdvanced001",
+    "preamble": "import Mathlib\nopen scoped Classical",
+    "signature": "theorem PBAdvanced001 (A : ℕ → ℕ)\n    (hA : ∀ n, A n = (Finset.Icc 1 n |>.filter fun m => ∃ b a, 0 < a ∧ 2 ≤ b ∧ m = a ^ b).card) :\n    {n : ℕ | 0 < n ∧ A n ∣ n + 2024}.Infinite"
+  }
+]

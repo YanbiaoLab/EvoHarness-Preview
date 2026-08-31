@@ -34,7 +34,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .graph import Goal
@@ -180,49 +180,80 @@ def render(
     )
 
 
+@dataclass(frozen=True)
+class LeanRunner:
+    """How to invoke Lean. One object rather than three threaded parameters.
+
+    Bare `lean` is enough for core-Lean goals. Anything importing Mathlib has
+    to go through `lake env lean` from a project that requires it: the search
+    path for Mathlib's oleans comes from the lake environment and nowhere
+    else, so a plain `lean` reads `import Mathlib` as an unknown module.
+    """
+
+    cmd: tuple[str, ...] = ("lean",)
+    cwd: Path | None = None
+    timeout_s: float = 120.0
+
+    @classmethod
+    def mathlib(cls, project: Path | str, timeout_s: float = 300.0) -> "LeanRunner":
+        return cls(
+            cmd=("lake", "env", "lean"),
+            cwd=Path(project),
+            timeout_s=timeout_s,
+        )
+
+    def compile(self, text: str) -> tuple[int, str]:
+        """Compile one file. Returns (returncode, combined output).
+
+        Raises `SketchUnavailable` only for faults on our side of the line: no
+        binary, a signal kill, a timeout on work that should take seconds. A
+        non-zero exit with diagnostics is a verdict about the file.
+        """
+
+        binary = shutil.which(self.cmd[0])
+        if not binary:
+            raise SketchUnavailable(f"no `{self.cmd[0]}` on PATH")
+        with tempfile.TemporaryDirectory() as workdir:
+            # Absolute path, because cwd is the lake project rather than the
+            # directory the file lives in.
+            path = Path(workdir) / "sketch.lean"
+            path.write_text(text, encoding="utf-8")
+            try:
+                done = subprocess.run(
+                    [binary, *self.cmd[1:], str(path)],
+                    cwd=str(self.cwd) if self.cwd else workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise SketchUnavailable(
+                    f"lean exceeded {self.timeout_s:g}s"
+                ) from exc
+            except OSError as exc:
+                raise SketchUnavailable(
+                    f"could not run `{self.cmd[0]}`: {exc}"
+                ) from exc
+        if done.returncode < 0:
+            raise SketchUnavailable(
+                f"`{self.cmd[0]}` was killed by signal {-done.returncode}"
+            )
+        return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
 def compile_lean(
     text: str, *, lean: str = "lean", timeout_s: float = 120.0
 ) -> tuple[int, str]:
-    """Run Lean over a rendered file. Returns (returncode, combined output).
+    """Back-compatible shim for the bare-`lean` case."""
 
-    Raises `SketchUnavailable` only for faults on our side of the line: no
-    binary, a signal kill, a timeout on work that should take a second. A
-    non-zero exit with diagnostics is a verdict about the file.
-    """
-
-    binary = shutil.which(lean)
-    if not binary:
-        raise SketchUnavailable(f"no `{lean}` on PATH")
-    with tempfile.TemporaryDirectory() as workdir:
-        path = Path(workdir) / "sketch.lean"
-        path.write_text(text, encoding="utf-8")
-        try:
-            done = subprocess.run(
-                [binary, path.name],
-                cwd=workdir,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise SketchUnavailable(
-                f"lean exceeded {timeout_s:g}s"
-            ) from exc
-        except OSError as exc:
-            raise SketchUnavailable(f"could not run `{lean}`: {exc}") from exc
-    if done.returncode < 0:
-        raise SketchUnavailable(
-            f"`{lean}` was killed by signal {-done.returncode}"
-        )
-    return done.returncode, (done.stdout or "") + (done.stderr or "")
+    return LeanRunner(cmd=(lean,), timeout_s=timeout_s).compile(text)
 
 
 @dataclass
 class LeanSketchValidator:
     """Compile the sketch and ask Lean the two questions."""
 
-    lean: str = "lean"
-    timeout_s: float = 120.0
+    runner: "LeanRunner" = field(default_factory=lambda: LeanRunner())
 
     def __call__(self, goal: Goal, sketch: Sketch) -> Validation:
         if sketch.parent_signature.strip() != goal.statement.strip():
@@ -232,9 +263,7 @@ class LeanSketchValidator:
             )
 
         rendered = render(sketch)
-        returncode, output = compile_lean(
-            rendered.text, lean=self.lean, timeout_s=self.timeout_s
-        )
+        returncode, output = self.runner.compile(rendered.text)
 
         if returncode != 0:
             errors = "\n".join(
@@ -275,6 +304,7 @@ class LeanSketchValidator:
 
 __all__ = [
     "ERROR_RE",
+    "LeanRunner",
     "LeanSketchValidator",
     "RenderedSketch",
     "Sketch",

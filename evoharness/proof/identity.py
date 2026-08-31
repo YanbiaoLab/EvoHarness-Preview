@@ -37,10 +37,10 @@ import hashlib
 import re
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
-from .sketch import SketchUnavailable, compile_lean
+from .sketch import LeanRunner, SketchUnavailable, compile_lean
 
 #: Erase binder names before serializing. Lean's own `Expr.hash` is already
 #: alpha-invariant -- de Bruijn indices see to that -- but it is a UInt64, and
@@ -127,8 +127,9 @@ class LeanExprHasher:
     and ruinous once per goal.
     """
 
-    lean: str = "lean"
-    timeout_s: float = 300.0
+    #: `import Lean` needs no lake project, so the bare runner is right by
+    #: default even when the goals themselves import Mathlib.
+    runner: LeanRunner = field(default_factory=lambda: LeanRunner(timeout_s=300.0))
     name: str = "lean-expr"
 
     def hash_many(self, statements: Sequence[str]) -> list[str]:
@@ -141,9 +142,7 @@ class LeanExprHasher:
         source = "\n".join(lines) + "\n"
 
         try:
-            _, output = compile_lean(
-                source, lean=self.lean, timeout_s=self.timeout_s
-            )
+            _, output = self.runner.compile(source)
         except SketchUnavailable:
             # The toolchain, not the statements. Every goal in the batch gets a
             # unique key: nothing merges, and nothing is wrongly merged.

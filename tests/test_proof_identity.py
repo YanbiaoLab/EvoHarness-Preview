@@ -9,13 +9,12 @@ import shutil
 
 import pytest
 
-from evoharness.proof import identity as identity_module
 from evoharness.proof.identity import (
     ExactTextHasher,
     LeanExprHasher,
     is_unresolved,
 )
-from evoharness.proof.sketch import SketchUnavailable
+from evoharness.proof.sketch import LeanRunner, SketchUnavailable
 
 ASSOC_ABC = "theorem h (a b c : Nat) : (a + b) + c = a + (b + c)"
 ASSOC_XYZ = "theorem h (x y z : Nat) : (x + y) + z = x + (y + z)"
@@ -95,14 +94,19 @@ def test_two_unelaborable_statements_do_not_merge_with_each_other():
     assert first != second
 
 
-def test_a_dead_toolchain_merges_nothing(monkeypatch):
-    """Lean 起不来的时候,整批都拿到独有 key——宁可一次复用都不做。"""
+class _DeadRunner:
+    timeout_s = 1.0
 
-    def explode(*args, **kwargs):
+    def compile(self, text):
         raise SketchUnavailable("no lean on PATH")
 
-    monkeypatch.setattr(identity_module, "compile_lean", explode)
-    keys = LeanExprHasher().hash_many([ASSOC_ABC, ASSOC_XYZ, ASSOC_ABC])
+
+def test_a_dead_toolchain_merges_nothing():
+    """Lean 起不来的时候,整批都拿到独有 key——宁可一次复用都不做。"""
+
+    keys = LeanExprHasher(runner=_DeadRunner()).hash_many(
+        [ASSOC_ABC, ASSOC_XYZ, ASSOC_ABC]
+    )
 
     assert all(is_unresolved(key) for key in keys)
     assert len(set(keys)) == 3
@@ -115,24 +119,28 @@ def test_the_whole_batch_costs_one_lean_process():
     """`import Lean` 要几秒。每个目标问一次会让图不可用,所以接口是批量的。"""
 
     calls = {"n": 0}
-    real = identity_module.compile_lean
+    real = LeanRunner()
 
-    def counted(*args, **kwargs):
-        calls["n"] += 1
-        return real(*args, **kwargs)
+    class Counted:
+        timeout_s = real.timeout_s
 
-    import unittest.mock
+        def compile(self, text):
+            calls["n"] += 1
+            return real.compile(text)
 
-    with unittest.mock.patch.object(identity_module, "compile_lean", counted):
-        keys = LeanExprHasher().hash_many([ASSOC_ABC, ASSOC_XYZ, DISTRIB])
+    keys = LeanExprHasher(runner=Counted()).hash_many(
+        [ASSOC_ABC, ASSOC_XYZ, DISTRIB]
+    )
 
     assert calls["n"] == 1
     assert len(keys) == 3
 
 
-def test_an_empty_batch_does_not_start_lean(monkeypatch):
-    def explode(*args, **kwargs):
-        raise AssertionError("should not have run lean")
+def test_an_empty_batch_does_not_start_lean():
+    class Explodes:
+        timeout_s = 1.0
 
-    monkeypatch.setattr(identity_module, "compile_lean", explode)
-    assert LeanExprHasher().hash_many([]) == []
+        def compile(self, text):
+            raise AssertionError("should not have run lean")
+
+    assert LeanExprHasher(runner=Explodes()).hash_many([]) == []
