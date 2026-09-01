@@ -388,6 +388,7 @@ class LLMResponse:
     cost: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_prompt_tokens: int = 0
     tool_calls: tuple[LLMToolCall, ...] = ()
     stop_reason: LLMStopReason = LLMStopReason.COMPLETED
 
@@ -403,9 +404,14 @@ class LLMResponse:
             self.cost,
             self.prompt_tokens,
             self.completion_tokens,
+            self.cached_prompt_tokens,
         )
         if any(value < 0 for value in accounting):
             raise ValueError("LLM response accounting cannot be negative")
+        if self.cached_prompt_tokens > self.prompt_tokens:
+            raise ValueError(
+                "cached_prompt_tokens cannot exceed prompt_tokens"
+            )
 
         call_ids = [call.call_id for call in self.tool_calls]
         if len(call_ids) != len(set(call_ids)):
@@ -583,6 +589,182 @@ def _parse_openai_tool_calls(
     return tuple(calls)
 
 
+
+
+def _responses_input(messages: tuple[LLMMessage, ...]) -> list[dict[str, object]]:
+    """Flatten a chat-shaped history into Responses `input` items.
+
+    Three shapes do not map one to one:
+
+    - An assistant tool call is a sibling item (`function_call`), not a field
+      on the message, so one assistant message with n calls becomes 1+n items.
+    - A tool result is a `function_call_output` item keyed by `call_id`, not a
+      message with role "tool".
+    - `system` is rewritten to `developer`. A gateway may override the
+      `instructions` field with its own prompt, which leaves `input` as the
+      only way in — and inside `input`, `system` loses to `instructions` in
+      the Responses instruction hierarchy while `developer` wins. Getting this
+      wrong dilutes the task prompt silently: every call still returns 200.
+    """
+    items: list[dict[str, object]] = []
+    for message in messages:
+        if message.role == "tool":
+            for result in message.tool_results:
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": result.content,
+                    }
+                )
+            continue
+        if message.content:
+            role = "developer" if message.role == "system" else message.role
+            items.append({"role": role, "content": message.content})
+        for call in message.tool_calls:
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    # Arguments travel as a JSON string, not an object, both ways.
+                    "arguments": json.dumps(call.arguments),
+                }
+            )
+    return items
+
+
+def _responses_tools(
+    tools: tuple[LLMToolDefinition, ...],
+) -> list[dict[str, object]]:
+    """Responses tool schemas are flat: no chat-style `function` nesting."""
+    return [
+        {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+            "strict": tool.strict,
+        }
+        for tool in tools
+    ]
+
+
+def _responses_tool_choice(choice: LLMToolChoice) -> str | dict[str, object]:
+    """Flat shape for a named tool; auto/none/required are spelled the same
+    in both protocols and are reused as-is."""
+    if choice.mode is LLMToolChoiceMode.SPECIFIC:
+        return {"type": "function", "name": choice.name}
+    return choice.mode.value
+
+
+def _responses_request(
+    *,
+    messages: tuple[LLMMessage, ...],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    tools: tuple[LLMToolDefinition, ...],
+    tool_choice: LLMToolChoice,
+    parallel_tool_calls: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "model": model,
+        "input": _responses_input(messages),
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+    }
+    if tools:
+        payload.update(
+            {
+                "tools": _responses_tools(tools),
+                "tool_choice": _responses_tool_choice(tool_choice),
+                "parallel_tool_calls": parallel_tool_calls,
+            }
+        )
+    return payload
+
+
+def _parse_responses_response(
+    response: dict[str, object],
+    *,
+    requested_model: str,
+    cost: float = 0.0,
+) -> LLMResponse:
+    if not isinstance(response, dict):
+        raise LLMProtocolError("provider response must be an object")
+
+    output = response.get("output")
+    if not isinstance(output, list):
+        # Transient, not a protocol error: a proxy that truncates the body can
+        # leave a prefix that still parses as JSON but has no `output`. Raising
+        # LLMProtocolError here ends the agent session and discards its work,
+        # while a genuine shape mismatch still surfaces after the retries are
+        # exhausted — with the body head carried in the message.
+        head = json.dumps(response, ensure_ascii=False)[:300]
+        raise LLMTransientError(
+            f"provider response has no output array: {head}"
+        )
+
+    chunks: list[str] = []
+    calls: list[LLMToolCall] = []
+    for index, item in enumerate(output):
+        if not isinstance(item, dict):
+            raise LLMProtocolError("provider output item must be an object")
+        kind = item.get("type")
+        if kind == "message":
+            for part in item.get("content") or ():
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    chunks.append(str(part.get("text") or ""))
+        elif kind == "function_call":
+            try:
+                raw_arguments = item.get("arguments")
+                if not isinstance(raw_arguments, str):
+                    raise ValueError("tool call arguments must be a JSON string")
+                calls.append(
+                    LLMToolCall(
+                        call_id=item.get("call_id", ""),
+                        name=item.get("name", ""),
+                        arguments=json.loads(raw_arguments),
+                    )
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise LLMToolCallFormatError(
+                    f"invalid tool call at index {index}: {exc}"
+                ) from exc
+        # `reasoning` items are dropped: LLMMessage cannot carry them, and
+        # omitting them from the echoed history is accepted by the provider.
+
+    usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
+
+    # Truncation is reported through status/incomplete_details rather than a
+    # finish_reason; missing it would pass a half-written body off as complete.
+    stop_reason = LLMStopReason.COMPLETED
+    if calls:
+        stop_reason = LLMStopReason.TOOL_CALLS
+    if response.get("status") == "incomplete":
+        incomplete = response.get("incomplete_details")
+        reason = (incomplete or {}).get("reason") if isinstance(incomplete, dict) else None
+        if reason == "max_output_tokens":
+            stop_reason = LLMStopReason.MAX_TOKENS
+        elif reason == "content_filter":
+            stop_reason = LLMStopReason.CONTENT_FILTER
+
+    return LLMResponse(
+        text="".join(chunks),
+        model=str(response.get("model") or requested_model),
+        cost=cost,
+        prompt_tokens=int(usage.get("input_tokens") or 0),
+        completion_tokens=int(usage.get("output_tokens") or 0),
+        cached_prompt_tokens=int(details.get("cached_tokens") or 0),
+        tool_calls=tuple(calls),
+        stop_reason=stop_reason,
+    )
+
+
 def _parse_openai_chat_response(
     response: dict[str, object],
     *,
@@ -664,6 +846,17 @@ def _parse_openai_chat_response(
         raise LLMProtocolError("provider usage must be an object")
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
+    # OpenAI-compatible providers report the prefix-cache hit here. Absent or
+    # malformed means "no cache reporting", not an error: this number informs
+    # a decision, it never gates one.
+    details = usage.get("prompt_tokens_details")
+    cached_prompt_tokens = 0
+    if isinstance(details, dict):
+        candidate = details.get("cached_tokens", 0)
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            cached_prompt_tokens = max(0, min(candidate, prompt_tokens
+                                              if isinstance(prompt_tokens, int)
+                                              else 0))
     token_counts = (prompt_tokens, completion_tokens)
     if any(
         isinstance(value, bool)
@@ -688,6 +881,7 @@ def _parse_openai_chat_response(
             cost=float(cost),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
         )
@@ -766,13 +960,120 @@ def _litellm_transport(
 _USER_AGENT = "EvoHarness/0.1"
 
 
+# `urlopen(timeout=)` is a **socket** timeout: it bounds the gap between two
+# reads, not the request. A server that trickles bytes resets it forever.
+#
+# Measured 2026-08-27 on run18: one call sat for 8,141 seconds — 2h16m, a single
+# attempt, no retries — against a 400s socket timeout, and only ended when the
+# agent session's own 9,000s budget expired. The session had done 16 healthy
+# turns in 859s (model calls: median 12s) and lost all of it. 449k input tokens,
+# zero output.
+#
+# So the read needs a deadline of its own. The factor is relative to the socket
+# timeout rather than absolute, so the two cannot drift apart: whoever tunes the
+# socket timeout to measured latency gets a proportional ceiling for free. 3x
+# leaves room for a genuinely slow-but-progressing response while capping a
+# trickle at minutes instead of hours.
+HARD_TIMEOUT_FACTOR = float(
+    os.environ.get("EVOHARNESS_LLM_HARD_TIMEOUT_FACTOR", "3.0")
+)
+
+
+def _read_within(resp, deadline_s: float) -> bytes:
+    """Read a response body under a total wall-clock deadline.
+
+    Chunked rather than one `resp.read()`: the whole point is to be able to
+    look at the clock between reads. Raising `LLMTransientError` puts a hung
+    call onto the path that already exists for a flaky provider — bounded
+    retries with backoff — instead of letting it consume the session.
+    """
+    import time as _time
+
+    end = _time.monotonic() + max(1.0, deadline_s)
+    chunks: list[bytes] = []
+    while True:
+        # Checked before the read, not after: the rule is "never start a wait
+        # we already know runs past the deadline".
+        #
+        # A body that *completed* on the read that crossed the deadline is
+        # discarded too, and that is deliberate — HTTP gives no way to tell
+        # "done" from "still trickling" without one more read, so the two are
+        # indistinguishable from in here. A response that needed longer than
+        # the ceiling is late whether or not its last chunk happened to finish
+        # it.
+        if _time.monotonic() >= end:
+            raise LLMTransientError(
+                f"response body exceeded {deadline_s:.0f}s wall clock after "
+                f"{sum(map(len, chunks))} bytes; treating as a hung call"
+            )
+        chunk = resp.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _read_sse_within(resp, deadline_s: float) -> dict:
+    """Consume a Responses SSE stream and return the terminal snapshot.
+
+    `response.completed` carries the whole `response` object — output items and
+    usage included — so the stream does not have to be reassembled from deltas
+    and the non-streaming parser can be reused unchanged.
+
+    Streaming exists here for delivery robustness, not for incremental output:
+    a proxy that cuts the body mid-flight yields a stream that simply ends
+    without its terminal event, which is a retryable transport fault rather
+    than an unparseable blob.
+    """
+    import time as _time
+
+    end = _time.monotonic() + max(1.0, deadline_s)
+    terminal: dict | None = None
+    seen = 0
+    for raw in resp:
+        if _time.monotonic() >= end:
+            raise LLMTransientError(
+                f"event stream exceeded {deadline_s:.0f}s wall clock after "
+                f"{seen} events; treating as a hung call"
+            )
+        seen += 1
+        if not raw.startswith(b"data:"):
+            continue  # `event:` lines and blank separators carry no payload
+        payload = raw[5:].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            # One malformed frame does not condemn the stream; the terminal
+            # event is what decides whether this call produced a result.
+            continue
+        if isinstance(event, dict) and event.get("type") == "response.completed":
+            terminal = event.get("response")
+
+    if not isinstance(terminal, dict):
+        raise LLMTransientError(
+            f"event stream ended after {seen} events without "
+            f"response.completed"
+        )
+    return terminal
+
+
 @dataclass(frozen=True)
 class _OpenAICompatTransport:
-    """Callable OpenAI-compatible transport with a fallback timeout."""
+    """Callable OpenAI-compatible transport with a fallback timeout.
+
+    The protocol only affects `build_request` and `parse_response`. The error
+    handling below (429 Retry-After, 5xx, challenge pages, truncated reads,
+    billing failures, routing faults) is shared by both, so it cannot drift
+    between them.
+    """
 
     url: str
     api_key: str
     default_timeout_s: float
+    build_request: Callable[..., dict] = _openai_chat_request
+    parse_response: Callable[..., LLMResponse] = _parse_openai_chat_response
+    stream: bool = False
 
     def __call__(
         self,
@@ -792,7 +1093,7 @@ class _OpenAICompatTransport:
         effective_timeout_s = (
             self.default_timeout_s if timeout_s is None else timeout_s
         )
-        request_data = _openai_chat_request(
+        request_data = self.build_request(
             messages=messages,
             model=model,
             temperature=temperature,
@@ -801,6 +1102,8 @@ class _OpenAICompatTransport:
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )
+        if self.stream:
+            request_data = dict(request_data, stream=True)
         payload = json.dumps(request_data).encode()
         req = urllib.request.Request(
             self.url,
@@ -808,6 +1111,7 @@ class _OpenAICompatTransport:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                **({"Accept": "text/event-stream"} if self.stream else {}),
                 # urllib sends "Python-urllib/3.x" and Cloudflare's default
                 # bot rules 403 it — an HTML challenge page, not JSON, so it
                 # surfaced as an unexplained hard failure on every single
@@ -823,7 +1127,12 @@ class _OpenAICompatTransport:
                 req,
                 timeout=effective_timeout_s,
             ) as resp:
-                body = json.loads(resp.read())
+                hard_deadline_s = effective_timeout_s * HARD_TIMEOUT_FACTOR
+                body = (
+                    _read_sse_within(resp, hard_deadline_s)
+                    if self.stream
+                    else json.loads(_read_within(resp, hard_deadline_s))
+                )
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 # Providers state their own cooldown in Retry-After; obeying
@@ -879,7 +1188,7 @@ class _OpenAICompatTransport:
             # Same cause seen from the other side — enough bytes arrived to
             # return, not enough to parse.
             raise LLMTransientError(f"unparseable response body: {exc}") from exc
-        return _parse_openai_chat_response(
+        return self.parse_response(
             body,
             requested_model=model,
         )
@@ -902,6 +1211,35 @@ def make_openai_compat_transport(
         url=api_base.rstrip("/") + "/chat/completions",
         api_key=api_key,
         default_timeout_s=timeout_s,
+    )
+
+
+def make_openai_responses_transport(
+    api_base: str, api_key: str, timeout_s: float = 120.0, *,
+    stream: bool = False,
+) -> LLMTransport:
+    """Build transport for an OpenAI **Responses** endpoint.
+
+    A separate constructor rather than autodetection: a gateway that serves
+    only one protocol rejects the other with the same 403 it uses for an
+    unauthorized token, so a silent fallback would pick a protocol nobody
+    chose and report nothing. The protocol is explicit configuration.
+    """
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(timeout_s)
+        or timeout_s <= 0
+    ):
+        raise ValueError("timeout_s must be positive and finite")
+
+    return _OpenAICompatTransport(
+        url=api_base.rstrip("/") + "/responses",
+        api_key=api_key,
+        default_timeout_s=timeout_s,
+        build_request=_responses_request,
+        parse_response=_parse_responses_response,
+        stream=stream,
     )
 
 

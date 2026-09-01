@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import functools
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -25,13 +26,22 @@ from evoharness import (
     RunSpec,
     spec_hashes,
 )
-from evoharness.core import LLMClient, make_openai_compat_transport
+from evoharness.core import (
+    LLMClient,
+    make_openai_compat_transport,
+    make_openai_responses_transport,
+)
 from evoharness.evaluation import evidence_manifest, make_evidence_grader
 from evoharness.guard import BudgetMeter, finalize_manifest, start_manifest
 from recipes.common import RecipeContext
 from tasks import get_task
 
 from .config import LaunchConfig, LaunchConfigError
+
+
+DEFAULT_LLM_API_BASE = (
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+)
 
 
 @dataclass
@@ -90,6 +100,11 @@ def build(cfg: LaunchConfig) -> BuiltRun:
         task_label = cfg.task
     if task.task_sys_msg and not search.task_sys_msg:
         search.task_sys_msg = task.task_sys_msg
+    # Same handoff as the line above: the task supplies it, an explicit
+    # setting overrides it. A task that knows what "solved" means should not
+    # need the caller to remember, and a caller who disagrees can still say so.
+    if search.stop_at_fitness is None and task.spec.criterion.solved_at is not None:
+        search.stop_at_fitness = task.spec.criterion.solved_at
 
     budget = None
     if cfg.budget_usd is not None:
@@ -102,22 +117,42 @@ def build(cfg: LaunchConfig) -> BuiltRun:
 
     transport = task.transport
     if cfg.live:
-        api_base = os.environ.get("EVOHARNESS_API_BASE")
-        api_key = os.environ.get("EVOHARNESS_API_KEY")
-        if not api_base or not api_key:
+        api_base = os.environ.get("EVOHARNESS_API_BASE", DEFAULT_LLM_API_BASE)
+        api_key = os.environ.get("ALIYUN_MAAS_API_KEY") or os.environ.get(
+            "EVOHARNESS_API_KEY"
+        )
+        if not api_key:
             # Raised rather than routed through `parser.error`: the assembly
             # has to run where there is no parser — a detached start, a
             # resume — and reaching back into argparse is the one line that
             # would keep it here.
             raise LaunchConfigError(
-                "--live requires EVOHARNESS_API_BASE and EVOHARNESS_API_KEY"
+                "--live requires ALIYUN_MAAS_API_KEY "
+                "(or legacy EVOHARNESS_API_KEY)"
             )
         # Reasoning models spend minutes before the first token, and this
         # task's prompt is large (task brief + research brief + a
         # multi-file genome). The 120s default timed out every proposal on
         # MiniMax-M3, which the proposer breaker correctly reads as a dead
         # proposer — a healthy model would be mistaken for a broken one.
-        transport = make_openai_compat_transport(
+        # The protocol is explicit, never autodetected: a gateway that serves
+        # only /responses rejects /chat/completions with the same 403 it uses
+        # for an unauthorized token, so a silent fallback would run the whole
+        # search on a protocol nobody chose and report nothing.
+        responses = os.environ.get("EVOHARNESS_LLM_PROTOCOL", "chat") == "responses"
+        make_transport = (
+            make_openai_responses_transport if responses
+            else make_openai_compat_transport
+        )
+        # Streaming is Responses-only and opt-in. It exists for delivery
+        # robustness: a proxy that cuts the body mid-flight ends the stream
+        # without its terminal event, which retries cleanly, instead of
+        # yielding a JSON prefix that may or may not parse.
+        if responses and os.environ.get("EVOHARNESS_LLM_STREAM") == "1":
+            make_transport = functools.partial(
+                make_openai_responses_transport, stream=True
+            )
+        transport = make_transport(
             api_base,
             api_key,
             # Sized to measured latency, remeasured after the prompt grew.
@@ -267,6 +302,9 @@ def build(cfg: LaunchConfig) -> BuiltRun:
         runner=task.runner,
         frozen_spec_hashes=frozen_hashes,
         agent_backend=agent_backend,
+        # 任务自带的活工具:要绑定任务自己的 ArtifactStore 与脱敏白名单,
+        # 只能由任务构造。
+        extra_agent_tools=tuple(getattr(task, "agent_tools", ())),
     )
     loop = recipe.build(ctx)
 

@@ -19,6 +19,7 @@ from evoharness.core.llm import (
     LLMMessage,
     LLMProtocolError,
     LLMStopReason,
+    LLMTransientError,
     LLMToolCall,
     LLMToolChoice,
     LLMToolChoiceMode,
@@ -26,6 +27,7 @@ from evoharness.core.llm import (
     LLMToolDefinition,
     LLMToolResult,
     _parse_responses_response,
+    _read_sse_within,
     _responses_request,
 )
 
@@ -285,3 +287,86 @@ def test_a_real_shape_disagreement_still_surfaces_as_protocol_error():
             {"model": "m", "status": "completed", "output": ["not-an-object"]},
             requested_model="m",
         )
+
+
+# --- streaming --------------------------------------------------------------
+
+
+class _FakeSSE:
+    """Minimal stand-in for the urllib response object: iterates raw lines."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def _sse(event: dict) -> bytes:
+    return b"data: " + json.dumps(event).encode() + b"\n"
+
+
+def test_stream_returns_the_terminal_snapshot():
+    """`response.completed` carries the whole response, deltas are ignored.
+
+    Reassembling from deltas would duplicate the parsing logic; taking the
+    terminal snapshot lets the streaming and non-streaming paths share one
+    parser, so they cannot disagree.
+    """
+    final = {
+        "model": "gpt-5.6-sol", "status": "completed",
+        "output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "done"}]}],
+        "usage": {"input_tokens": 10, "output_tokens": 2,
+                  "input_tokens_details": {"cached_tokens": 8}},
+    }
+    got = _read_sse_within(_FakeSSE([
+        b"event: response.created\n",
+        _sse({"type": "response.created", "response": {"status": "in_progress"}}),
+        _sse({"type": "response.output_text.delta", "delta": "do"}),
+        _sse({"type": "response.output_text.delta", "delta": "ne"}),
+        _sse({"type": "response.completed", "response": final}),
+        b"\n",
+    ]), 30.0)
+    assert got == final
+    parsed = _parse_responses_response(got, requested_model="gpt-5.6-sol")
+    assert parsed.text == "done"
+    assert parsed.cached_prompt_tokens == 8
+
+
+def test_stream_cut_before_the_terminal_event_is_retryable():
+    """A cut stream is a transport fault, not a protocol error.
+
+    This is the whole point of streaming here: a proxy that drops the body
+    mid-flight leaves a stream without its terminal event, which retries,
+    rather than a JSON prefix that may parse into a wrong-looking response.
+    """
+    with pytest.raises(LLMTransientError, match="without response.completed"):
+        _read_sse_within(_FakeSSE([
+            _sse({"type": "response.created", "response": {}}),
+            _sse({"type": "response.output_text.delta", "delta": "half"}),
+        ]), 30.0)
+
+
+def test_stream_tolerates_unparseable_frames():
+    """One malformed frame must not condemn a stream that still completes."""
+    final = {"model": "m", "status": "completed",
+             "output": [{"type": "message", "content": [
+                 {"type": "output_text", "text": "ok"}]}],
+             "usage": {}}
+    got = _read_sse_within(_FakeSSE([
+        b"data: {not json\n",
+        b"data: [DONE]\n",
+        _sse({"type": "response.completed", "response": final}),
+    ]), 30.0)
+    assert got == final
+
+
+def test_stream_request_sets_the_flag_and_accept_header():
+    from evoharness.core.llm import make_openai_responses_transport
+
+    t = make_openai_responses_transport("https://x/v1", "k", 10.0, stream=True)
+    assert t.url.endswith("/responses")
+    assert t.stream is True
+    plain = make_openai_responses_transport("https://x/v1", "k", 10.0)
+    assert plain.stream is False
