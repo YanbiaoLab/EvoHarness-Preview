@@ -198,13 +198,24 @@ def start_run(
 ) -> StartedRun:
     """Spawn `argv` as a detached run and return once it is confirmed alive.
 
+    :param run_dir: the directory the run writes its manifest, checkpoint and
+        log into. It is created if it does not exist.
+    :param argv: the command line to spawn, as an argument list.
+    :param cwd: working directory for the child process. Defaults to the
+        current working directory.
+    :param env: extra environment variables for the child, layered over the
+        parent's environment.
     :param launch: the settings the command was built from, recorded so the
         run directory describes itself. `python -m evoharness.launch` reads
         exactly this, which is what makes a resume the same command as the
         original start instead of a hand-reconstructed one.
+    :param handshake_s: how long to wait for the child to prove it is alive
+        before giving up.
     :param force: start even though the directory holds an unfinished run.
         Two live processes writing one checkpoint corrupt it, so this exists
         for the case where the previous process is known to be gone.
+    :param now: clock used for timing, injectable for tests. Defaults to
+        `time.time`.
     """
 
     run_dir = Path(run_dir).resolve()
@@ -219,7 +230,7 @@ def start_run(
 
     # Whether this directory already carries the identity a fresh start would
     # write. Decided before the spawn, because the child may write one at any
-    # moment afterwards and the handshake needs to know which evidence is its.
+    # moment afterward and the handshake needs to know which evidence is its.
     manifest = run_dir / "manifest.json"
     resuming = manifest.exists()
 

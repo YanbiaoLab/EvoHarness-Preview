@@ -38,6 +38,12 @@ class ResolvedTask:
     preflight_validators: tuple["PreflightValidator", ...] = ()
     runner: "Runner | None" = None
     extra_seeds: tuple[Workspace, ...] = ()
+    #: 任务自带的活工具对象(不是 ComponentSpec)。
+    #:
+    #: `spec.domain_tools` 是给清单和哈希用的描述,不可调用。而像
+    #: `InspectParentEvalTool` 这类工具要绑定任务自己的 ArtifactStore 和脱敏
+    #: 白名单,只能由任务构造,配方替不了。
+    agent_tools: tuple = ()
 
     @staticmethod
     def _component_config(value: object) -> dict:
@@ -77,6 +83,7 @@ class ResolvedTask:
         extra_seeds: tuple[Workspace, ...] = (),
         success_policy: ComponentSpec | None = None,
         domain_tools: tuple[ComponentSpec, ...] = (),
+        agent_tools: tuple = (),
         metadata_json: str = "{}",
     ) -> "ResolvedTask":
         grader_spec = ComponentSpec.for_object(
@@ -99,6 +106,23 @@ class ResolvedTask:
             for validator in preflight_validators
         )
         tool_specs = tuple(domain_tools)
+        # 活工具也要进清单:清单要能复现候选当时真正看得见的工具集。
+        tool_specs = (
+            *tool_specs,
+            *(
+                ComponentSpec.for_object(
+                    "domain_tool",
+                    tool,
+                    version=version,
+                    name=(
+                        f"{tool.__class__.__module__}."
+                        f"{tool.__class__.__qualname__}:"
+                        f"{getattr(getattr(tool, 'definition', None), 'name', 'tool')}"
+                    ),
+                )
+                for tool in agent_tools
+            ),
+        )
         if runner is not None:
             tool_specs = (
                 *tool_specs,
@@ -138,6 +162,7 @@ class ResolvedTask:
             preflight_validators=preflight_validators,
             runner=runner,
             extra_seeds=extra_seeds,
+            agent_tools=tuple(agent_tools),
         )
 
     @classmethod

@@ -197,6 +197,7 @@ def _build_proposer(
         ),
         timeout_s=ctx.proposal.timeout_s,
         max_cost_usd=ctx.proposal.max_cost_usd,
+        max_tokens=ctx.proposal.max_tokens_per_proposal,
     )
     preflight = ProposalPreflight(
         PreflightPipeline(ctx.preflight_validators)

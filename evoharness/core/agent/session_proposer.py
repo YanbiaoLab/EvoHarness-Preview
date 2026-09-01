@@ -173,11 +173,30 @@ class _ProposalUsage:
                     "proposal cost budget was exhausted",
                 )
 
+        # Tokens are accumulated a few lines up in `absorb` but were never
+        # spent against anything, so the one resource that actually scales
+        # with an agentic session had no ceiling. Turns do not stand in for
+        # it: each turn resends the whole context, and the context grows, so
+        # spend goes up faster than the turn count does. Measured 2026-08-28
+        # on run18: 2.48M and 2.46M tokens inside 110 turns / 600 tool calls /
+        # 150 minutes, every declared limit respected.
+        remaining_tokens: int | None = None
+        if total.max_tokens is not None:
+            spent = self.prompt_tokens + self.completion_tokens
+            remaining_tokens = total.max_tokens - spent
+            if remaining_tokens <= 0:
+                raise _ProposalLoopError(
+                    "token-limit",
+                    f"proposal token budget was exhausted "
+                    f"({spent} of {total.max_tokens})",
+                )
+
         return AgentSessionLimits(
             max_turns=remaining_turns,
             max_tool_calls=remaining_tools,
             timeout_s=remaining_timeout_s,
             max_cost_usd=remaining_cost,
+            max_tokens=remaining_tokens,
         )
 
 
@@ -454,11 +473,27 @@ def _budget_note(limits: AgentSessionLimits) -> str:
     """Turn-budget awareness for the system prompt. Smoke-run postmortem:
     deterministic sessions burned 11/12 turns on per-item trace inspection
     and never edited a file; the agent must know the ceiling it is under."""
+    # The wall clock has to be stated too. Measured 2026-08-27 on run18: a
+    # session was told "110 turns", planned against that, and was killed by the
+    # 9,000-second limit at turn 100 — a ceiling it had never been shown. From
+    # its own point of view it still had ten turns in hand, so it was still
+    # reading and editing when the clock ran out, with nothing submitted. An
+    # agent cannot reserve budget for a limit it does not know exists.
+    # Unconditional: AgentSessionLimits rejects a non-positive timeout, so
+    # there is no "no wall clock" case to guard against.
+    clock = (
+        f" The session is also capped at {limits.timeout_s / 60.0:.0f} "
+        "wall-clock minutes, and that ceiling usually binds before the turn "
+        "count does — long tool calls and retried model calls both spend it. "
+        "Check elapsed time as you go and submit while you still can: a "
+        "session that is cut off mid-edit produces nothing at all, which "
+        "scores worse than a small change that landed."
+    )
     return (
         "\n\n# Session budget\n"
         f"You have at most {limits.max_turns} turns and "
         f"{limits.max_tool_calls} tool calls; every tool call costs one "
-        "turn. Budget them: spend only the first few turns inspecting "
+        f"turn.{clock} Budget them: spend only the first few turns inspecting "
         "evaluation results (prefer batch/digest tool actions over reading "
         "items one by one), then use the remaining turns to read and EDIT "
         "the workspace. Always reserve enough turns to complete your edits "

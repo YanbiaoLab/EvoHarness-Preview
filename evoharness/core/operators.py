@@ -639,12 +639,33 @@ class PromptBuilder:
                     note=ctx.inspiration_notes.get(c.id),
                 )
             )
+        ledger = self._failed_attempts(ctx)
         if not sections:
-            return ""
+            return ledger
         header = "## Previously evaluated programs"
         if fetch:
             header += f"\nRead any of them with {fetch}(candidate_id, path)."
-        return header + "\n\n" + "\n\n".join(sections)
+        out = header + "\n\n" + "\n\n".join(sections)
+        return out + ledger
+
+    @staticmethod
+    def _failed_attempts(ctx: MutationContext) -> str:
+        """已试过而没涨分的改动:只列标题和分差,不列代码。
+
+        参考程序按分数选,分数持平的 run 里失败尝试因此不可见,同一类改动会
+        被反复提出。
+        """
+        if not ctx.failed_attempts:
+            return ""
+        lines = "\n".join(
+            f"- {title} — {delta:+.4f}" for title, delta in ctx.failed_attempts
+        )
+        return (
+            "\n\n## Already tried, no gain\n"
+            "Changes proposed earlier in this run that did not improve the "
+            "score. Proposing the same idea again costs a full evaluation and "
+            "returns the same number.\n\n" + lines
+        )
 
     def build(self, ctx: MutationContext) -> tuple[str, str]:
         multifile = (

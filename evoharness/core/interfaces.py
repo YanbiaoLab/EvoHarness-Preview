@@ -24,6 +24,12 @@ class MutationContext:
     operator: str
     generation: int
     inspiration_notes: dict[str, str] = field(default_factory=dict)
+    #: 已试过而没有涨分的改动:(标题, 相对父本的分差)。
+    #:
+    #: archive / top_k 两条参考通道都按分数选,于是分数长期持平的 run 里失败
+    #: 尝试对提案器不可见,同一类改动会被反复提出,每次付一整轮评测。
+    #: 只带标题和分差 —— 目的是不重复,要读代码有 inspect_candidate。
+    failed_attempts: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)

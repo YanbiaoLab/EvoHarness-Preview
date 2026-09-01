@@ -248,6 +248,21 @@ class AgentSessionLimits:
     max_tool_calls: int = 40
     timeout_s: float = 300.0
     max_cost_usd: float | None = None
+    #: Total tokens (prompt + completion) one proposal may spend across every
+    #: backend run, repairs included. None = no ceiling.
+    #:
+    #: Turns are a poor proxy for spend. An agentic turn resends the whole
+    #: context, so cost grows with turns TIMES context, and the context grows
+    #: as the session goes. Measured 2026-08-28 on run18: two proposals spent
+    #: 2.48M and 2.46M tokens while staying inside 110 turns / 600 tool calls /
+    #: 150 minutes — every declared limit respected, nothing to stop them.
+    #: `max_turns=110` at ~70k tokens a turn is really a 7.7M token budget,
+    #: and nobody had ever written that number down.
+    #:
+    #: Not max_cost_usd: that field is inert here because the provider is not
+    #: in any price table, so cost_usd stays 0.0 and the ceiling never binds.
+    #: Tokens are counted by the provider and always available; money is not.
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -277,6 +292,12 @@ class AgentSessionLimits:
             or self.max_cost_usd < 0
         ):
             raise ValueError("max_cost_usd must be nonnegative and finite")
+        if self.max_tokens is not None and (
+            isinstance(self.max_tokens, bool)
+            or not isinstance(self.max_tokens, int)
+            or self.max_tokens < 1
+        ):
+            raise ValueError("max_tokens must be a positive integer when set")
 
 
 @dataclass(frozen=True)

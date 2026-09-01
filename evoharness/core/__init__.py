@@ -50,6 +50,7 @@ from .interfaces import (
     SamplingWeightPolicy,
 )
 from .llm import (
+    make_openai_responses_transport,
     LLMClient,
     LLMMessage,
     LLMProtocolError,
@@ -195,6 +196,7 @@ __all__ = [
     "flatten",
     "load_json",
     "make_openai_compat_transport",
+    "make_openai_responses_transport",
     "make_parent_selector",
     "sample_operator",
     "validate_edit_markers",

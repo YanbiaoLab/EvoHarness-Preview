@@ -16,6 +16,13 @@ class CriterionSpec:
     direction: str = "maximize"
     description: str = ""
     version: str = "v1"
+    #: The fitness at which this criterion considers the problem solved, if it
+    #: has such a point at all. Most do not: a criterion measuring a speedup or
+    #: a byte count has no value that means "done", and naming one would end a
+    #: run at the first good generation. A criterion that either accepts or
+    #: does not — one problem, one judge — has exactly one, and declaring it
+    #: here rather than at launch makes it part of what the task IS.
+    solved_at: float | None = None
 
     def __post_init__(self) -> None:
         direction = self.direction.lower()
@@ -23,6 +30,17 @@ class CriterionSpec:
             raise ValueError(f"invalid criterion direction: {self.direction}")
         if not self.name.strip() or not self.version.strip():
             raise ValueError("criterion name and version must be non-empty")
+        if self.solved_at is not None and direction == "minimize":
+            # For a minimizing criterion the number a person would write here
+            # is a criterion value, and the loop compares it against fitness,
+            # which graders already orient so that higher is better. Accepting
+            # it would stop the run on the opposite condition to the one the
+            # task declared, and nothing downstream could tell.
+            raise ValueError(
+                "solved_at is a fitness threshold and only applies to a "
+                "maximizing criterion; a minimizing one must convert in its "
+                "grader"
+            )
         object.__setattr__(self, "direction", direction)
 
     def to_payload(self) -> dict[str, Any]:
@@ -31,6 +49,11 @@ class CriterionSpec:
             "direction": self.direction,
             "description": self.description,
             "version": self.version,
+            # Present only when declared, so adding this field left every
+            # existing task's hash byte-identical. Not a trick to keep old
+            # runs resumable: a criterion that names no solved point is the
+            # same criterion it was before there was a way to name one.
+            **({} if self.solved_at is None else {"solved_at": self.solved_at}),
         }
 
     @property

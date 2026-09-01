@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,51 @@ _MALFORMED_TOOL_CALL_RETRY = (
 # per run rather than per turn -- but it is bounded, because a model that keeps
 # emitting the same broken shape is not going to be argued out of it.
 _MAX_TOOL_CALL_RECOVERIES = 3
+
+#: Every per-turn budget note starts with this. Anything that reasons about the
+#: tail of the conversation must skip messages carrying it: the note rides on
+#: the request and is NOT part of the history, so "the last message" is no
+#: longer "the last thing that happened". Two test doubles dispatched on
+#: `messages[-1].role` and silently took the wrong branch when the note landed
+#: behind them; a named marker is what lets a consumer say so out loud.
+BUDGET_NOTE_PREFIX = "[budget]"
+
+#: Ceiling on a **single** model call, independent of how much session budget
+#: is left.
+#:
+#: The call used to be given `timeout_s=remaining_s` — "don't wait longer than
+#: the session has", which sounds right and is how the whole per-call ceiling
+#: got disabled. `timeout_s` is the socket timeout, and `llm.HARD_TIMEOUT_FACTOR`
+#: derives the body deadline from it; feeding in the remaining session budget
+#: overrides the tuned `EVOHARNESS_LLM_TIMEOUT_S` and makes the hard deadline
+#: 3x the remaining session, i.e. never binding. One hung call then owns
+#: everything that is left.
+#:
+#: Measured 2026-08-30 on the Austin run, two sessions of the same hour:
+#:
+#:     last healthy response 737s → nothing until the 3600s timeout (2863s dead)
+#:     last healthy response 905s → nothing until the 3600s timeout (2695s dead)
+#:
+#: Both had done 14 and 22 clean turns and were still reading code. Two of six
+#: generations produced zero edits and the logs show no error — the session just
+#: stops, which reads like a slow agent rather than a stuck socket.
+#:
+#: Defaulting to the same env var the transport uses keeps the two from
+#: drifting: whoever tunes the socket timeout to measured latency gets the
+#: per-call ceiling for free.
+MAX_CALL_SECONDS = float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", "400"))
+
+
+def strip_budget_note(messages) -> tuple[LLMMessage, ...]:
+    """The conversation as it would look without the ephemeral budget note."""
+    out = tuple(messages)
+    while (
+        out
+        and out[-1].role == "user"
+        and out[-1].content.startswith(BUDGET_NOTE_PREFIX)
+    ):
+        out = out[:-1]
+    return out
 
 
 def _new_session_id() -> str:
@@ -677,11 +723,13 @@ class NativeToolAgentBackend:
 
             try:
                 response = self.client.query_messages(
-                    messages=tuple(state.messages),
+                    messages=self._messages_with_budget(
+                        state, request, remaining_s
+                    ),
                     model=self.model,
                     tools=self.registry.definitions,
                     parallel_tool_calls=True,
-                    timeout_s=remaining_s,
+                    timeout_s=min(remaining_s, MAX_CALL_SECONDS),
                 )
             except LLMToolCallFormatError as exc:
                 recovered = self._recover_malformed_tool_call(state, run, exc)
@@ -1205,6 +1253,14 @@ class NativeToolAgentBackend:
                 "stop_reason": response.stop_reason.value,
                 "cost_usd": response.cost,
                 "prompt_tokens": response.prompt_tokens,
+                # The share the provider served from its prefix cache. Recorded
+                # per turn because that is the only resolution at which the
+                # compaction question can be answered: compaction rewrites the
+                # cache prefix, so it converts a large cheap prefix into one
+                # large expensive re-send. Without a per-turn cached/fresh
+                # split, "should we compact sooner" is an argument rather than
+                # a measurement.
+                "cached_prompt_tokens": response.cached_prompt_tokens,
                 "completion_tokens": response.completion_tokens,
                 "tool_call_count": len(response.tool_calls),
             },
@@ -1396,6 +1452,68 @@ class NativeToolAgentBackend:
                 "token_estimator must return a nonnegative integer"
             )
         return estimated
+
+    #: With this many turns left, stop exploring and start landing the change.
+    #: Sized from measurement, not taste: the self-check needs one turn to
+    #: start and two or three `wait` polls, an edit-and-recheck cycle is a few
+    #: more, and the final TITLE/SUMMARY is one. Twelve leaves room for one
+    #: round of "the probe found something, fix it".
+    BUDGET_WARN_TURNS = 12
+
+    def _messages_with_budget(
+        self,
+        state: _SessionState,
+        request: AgentSessionRequest,
+        remaining_s: float,
+    ) -> tuple[LLMMessage, ...]:
+        """The context, plus one ephemeral line at the tail telling the agent
+        how much budget is left.
+
+        Two properties matter and both come from where it is put.
+
+        **It is at the tail**, so it never disturbs the prompt cache. The
+        provider caches by prefix (measured 2026-08-28: same prefix with a
+        changed suffix still hits; a changed prefix loses everything), so
+        putting a per-turn counter in the system prompt would drop the cache on
+        EVERY turn — worse than not having the counter at all. Appended here,
+        the divergence sits after the whole history, and since the provider
+        caches in blocks the tail lands inside the last partial block, which
+        was never cached anyway.
+
+        **It is ephemeral** — not appended to `state.messages` — so 160 turns
+        do not leave 160 stale "115 turns left" notes in the history, each one
+        wrong by the time the next arrives.
+
+        Why it exists: the session budget is stated once, in the system prompt,
+        at the start. After that the agent has to count its own turns. Measured
+        on ETP run18: a session started its verification probe on turn 109 of
+        110 and was cut off before it could read the result — 75 minutes and 18
+        edits, submitted without ever seeing whether they worked. It was not
+        short of turns; it was short of knowing how many it had left.
+        """
+        limits = request.limits
+        used = state.lifetime_turns
+        left = max(0, limits.max_turns - used)
+        minutes_left = max(0.0, remaining_s / 60.0)
+        if left <= self.BUDGET_WARN_TURNS:
+            tail = (
+                f" STOP EXPLORING. Run your verification now and write the "
+                f"final TITLE/SUMMARY. A session cut off mid-edit produces "
+                f"nothing at all, which scores worse than a small change "
+                f"that landed."
+            )
+        else:
+            tail = (
+                f" Reserve about {self.BUDGET_WARN_TURNS} turns at the end "
+                f"for verification and the final TITLE/SUMMARY."
+            )
+        note = (
+            f"[budget] turn {used + 1} of {limits.max_turns}; "
+            f"{left} left, {minutes_left:.0f} wall-clock minutes left.{tail}"
+        )
+        return tuple(state.messages) + (
+            LLMMessage(role="user", content=note),
+        )
 
     @staticmethod
     def _compacted_tool_content(is_error: bool) -> str:

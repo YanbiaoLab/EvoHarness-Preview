@@ -71,7 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="the provider route the dsh config declares; a model is resolved "
         "against that route's catalog, so a mismatch fails every request",
     )
-    parser.add_argument("--set", dest="overrides", nargs="*", default=[])
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="the model to ask for. It has to be a name the --dsh-provider "
+        "route's catalog holds: the runtime resolves the request against that "
+        "catalog, and a name it does not know fails every call rather than "
+        "falling back to something it has",
+    )
+    # `action="extend"` rather than a bare `nargs="*"`: without it a second
+    # --set REPLACES the first instead of adding to it, and nothing reports
+    # the loss — the dropped settings quietly take their defaults, and the
+    # run records those defaults as what was asked for.
+    parser.add_argument(
+        "--set", dest="overrides", action="extend", nargs="*", default=[]
+    )
     parser.add_argument(
         "--cwd",
         type=Path,
@@ -89,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     run_dir = args.run_dir.resolve()
+    overrides = list(args.overrides)
+    if args.model is not None:
+        # Prepended, not appended: these are the flag's expansion, so an
+        # explicit --set on the same key is a deliberate override of it and
+        # has to win. load_experiment_config applies them in order.
+        overrides[:0] = [
+            f"proposal.model={args.model}",
+            f"search.llm_models={json.dumps([args.model])}",
+        ]
     try:
         # Built here rather than in the child so a bad combination is rejected
         # while there is still someone to tell. The child validates it again
@@ -105,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             dsh_config=args.dsh_config,
             dsh_runtime=args.dsh_runtime,
             dsh_provider=args.dsh_provider,
-            overrides=tuple(args.overrides),
+            overrides=tuple(overrides),
         )
         started = start_run(
             run_dir,

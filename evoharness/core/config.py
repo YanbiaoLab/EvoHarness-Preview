@@ -29,6 +29,17 @@ class ProposalConfig:
     max_tool_calls: int = 120
     timeout_s: float = 5400.0
     max_cost_usd: float | None = None
+    # Total tokens one proposal may spend across every backend run, repairs
+    # included. Off by default so existing runs keep their behaviour.
+    #
+    # Turns do not stand in for this. An agentic turn resends the whole
+    # context and the context grows, so spend rises faster than the turn
+    # count. Measured 2026-08-28 on ETP run18: two proposals spent 2.48M and
+    # 2.46M tokens while staying inside 110 turns / 600 tool calls / 150
+    # minutes — every declared limit respected, nothing to stop them. At ~70k
+    # tokens a turn, `max_turns=110` is really a 7.7M token budget that
+    # nobody had written down.
+    max_tokens_per_proposal: int | None = None
     max_repair_rounds: int = 3
     max_input_tokens: int = 131_072
     max_parallel_tools: int = 4
@@ -95,6 +106,14 @@ class ProposalConfig:
         ):
             raise ValueError(
                 "proposal run_timeout_cap_s must be positive and finite"
+            )
+        if self.max_tokens_per_proposal is not None and (
+            isinstance(self.max_tokens_per_proposal, bool)
+            or not isinstance(self.max_tokens_per_proposal, int)
+            or self.max_tokens_per_proposal < 1
+        ):
+            raise ValueError(
+                "max_tokens_per_proposal must be a positive integer when set"
             )
         if self.max_cost_usd is not None and (
             isinstance(self.max_cost_usd, bool)
@@ -170,6 +189,15 @@ class SearchConfig:
     """Main loop configuration (subset of upstream EvolutionConfig)."""
 
     num_generations: int = 150
+    # Stop as soon as the population holds a candidate at least this good.
+    # Off by default, and it has to be: on an open-ended search there is no
+    # such number, and a wrong one ends the run at the first lucky
+    # generation. Set it where the task has a ceiling that means "solved" —
+    # a single problem the judge either accepts or does not — because past
+    # that point the remaining generations can only spend money re-solving
+    # something already solved. An authored task that declares
+    # `criterion.solved_at` fills this in for its own runs.
+    stop_at_fitness: float | None = None
     task_sys_msg: str = ""
     language: str = "python"
     llm_models: list[str] = field(default_factory=lambda: ["gpt-5.1"])

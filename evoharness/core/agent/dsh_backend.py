@@ -18,6 +18,7 @@ rather than silently dropped; see `UNSUPPORTED_LIMITS`.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import tempfile
 import time
@@ -34,6 +35,8 @@ from .contracts import (
     AgentSessionResult,
     AgentTermination,
 )
+
+logger = logging.getLogger(__name__)
 
 # The complete `turn/end` reason vocabulary, mirroring dsh's merge-extensible
 # `TurnEndReasonMap`. These are harness turn outcomes, NOT provider finish
@@ -480,6 +483,11 @@ class DshAgentBackend:
 
             import evoharness
 
+            if evoharness.__file__ is None:
+                raise DshBackendError(
+                    "cannot locate the evoharness package root: "
+                    "evoharness.__file__ is None"
+                )
             env["EVO_RUN_DIR"] = str(self.spec.run_dir)
             env["EVO_PYTHON"] = sys.executable
             env["EVO_HARNESS_ROOT"] = str(
@@ -612,6 +620,14 @@ class DshAgentBackend:
         model_responses = 0
         tool_calls = 0
         dropped: dict[str, int] = {}
+        # What the runtime said went wrong, if it said anything. A `turn/end`
+        # is not translated into an AgentEvent — it becomes the termination —
+        # so its payload was counted in `dropped` and discarded, taking the
+        # provider's own message with it. Run etp_one_run1 failed five
+        # generations in a row on a model name the route's catalog did not
+        # hold, and the entire durable record of that was the word
+        # "backend-error": the cause was legible nowhere.
+        failure: dict[str, Any] = {}
 
         for raw in events:
             if not isinstance(raw, Mapping):
@@ -665,6 +681,20 @@ class DshAgentBackend:
                 )
             elif kind.startswith("compaction/"):
                 add(AgentEventKind.CONTEXT_COMPACT, turn=turn)
+            elif kind == "turn/end":
+                reason = data.get("reason")
+                # DSH's TurnEndReasonMap names this field ``error``. The
+                # lower-level provider finish event uses ``failure``; accepting
+                # that shape here would hide a wire-contract mismatch.
+                detail = (
+                    reason.get("error") if isinstance(reason, Mapping) else None
+                )
+                if isinstance(detail, Mapping):
+                    failure = dict(detail)
+                # Still counted below as untranslated: reading one field out
+                # of it does not make the translation lossless, and a tally
+                # that quietly stopped counting it would hide the rest.
+                dropped[kind] = dropped.get(kind, 0) + 1
             else:
                 # Unmapped session events are counted rather than translated:
                 # forcing them into a neighbouring kind would put invented
@@ -691,8 +721,24 @@ class DshAgentBackend:
                 # distinction has to be readable from the trace so nobody reads
                 # an absent price as a cheap session.
                 "cost_priced": price is not None,
+                # The log line below is for whoever is watching; this is for
+                # whoever reads the trace afterwards, which is the only one of
+                # the two that still exists a day later.
+                **({"failure": failure} if failure else {}),
             },
         )
+
+        if termination is AgentTermination.BACKEND_ERROR:
+            # Logged as well as recorded. A dead proposer costs one generation
+            # per attempt and the breaker allows five, so the operator finds
+            # out from the run log long before anyone opens a trace — and the
+            # run log is exactly where the model being asked for was missing.
+            logger.error(
+                "dsh session %s failed on model %r: %s",
+                session_id,
+                self.spec.model,
+                failure.get("message") or "the runtime reported no message",
+            )
 
         return AgentSessionResult(
             termination=termination,

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -231,12 +233,51 @@ class SearchLoop:
         report = RunReport(**ckpt["run_report"])
         return report, int(ckpt["generation"]) + 1
 
+    #: 失败账本最多列几条:这一节的作用是不重提,不是完整档案。
+    FAILED_ATTEMPTS_SHOWN = 12
+
+    def _failed_attempts(self, parent) -> tuple[tuple[str, float], ...]:
+        """已试过而没涨分的改动:(标题, 相对父本的分差)。
+
+        判据是「没有严格超过父本」而非「分数低」—— 分数持平才是停滞的 run 里
+        的主要失败形态。种子和无标题的不列。
+        """
+        try:
+            everyone = self.store.all_candidates()
+        except Exception:                                    # noqa: BLE001
+            # 账本是诊断信息,取不到不该拖垮一次提案。
+            return ()
+        out = []
+        for c in everyone:
+            if c.operator == "seed" or not c.change_title:
+                continue
+            delta = (c.fitness or 0.0) - (parent.fitness or 0.0)
+            if delta > 0:
+                continue          # 涨了分的走参考程序那条通道,不进这里
+            out.append((c.change_title, delta))
+        return tuple(out[-self.FAILED_ATTEMPTS_SHOWN:])
+
     def _config_fingerprint(self) -> str:
         return config_fingerprint(
             self.cfg,
             self.pop_cfg,
             *self.checkpoint_configs,
         )
+
+    def _target_reached(self) -> bool:
+        """Whether the population already holds a good-enough candidate.
+
+        Read from the store rather than from `report.best_fitness`: the batch
+        path and the serial path update that field on different lines, and a
+        check agreeing with only one of them would be a stop condition that
+        works in one lane and silently does nothing in the other.
+        """
+
+        target = self.cfg.stop_at_fitness
+        if target is None:
+            return False
+        best = self.store.best()
+        return best is not None and best.fitness >= target
 
     # -- seeding ---------------------------------------------------------------
 
@@ -280,7 +321,7 @@ class SearchLoop:
             operator="seed",
             change_title="initial program",
         )
-        seed.report = self._grade(seed, report)
+        seed.report = self._grade_seed(seed, report)
         for observer in self.observers:
             observer.on_candidate_graded(seed, self.store)
         self.store.insert(seed)
@@ -312,7 +353,7 @@ class SearchLoop:
                 operator="seed",
                 change_title=f"initial program variant {i + 1}",
             )
-            variant.report = self._grade(variant, report)
+            variant.report = self._grade_seed(variant, report)
             for observer in self.observers:
                 observer.on_candidate_graded(variant, self.store)
             self.store.insert(variant)
@@ -339,6 +380,45 @@ class SearchLoop:
         if barren and seed.passed:
             self.store.seed_all_islands(seed, islands=barren)
         self.store.refresh_archive()
+
+    #: How long to wait before re-grading a seed that failed on infrastructure.
+    #: Minutes, not seconds: the failures this covers are a saturated evaluation
+    #: pool or a service outage, and those recover on a human timescale. Retrying
+    #: immediately just spends the attempt budget inside the same bad window.
+    SEED_INFRA_RETRY_WAIT_S = 300.0
+
+    def _grade_seed(self, cand: Candidate, report: RunReport):
+        """Grade the seed, retrying while the failure is infrastructure.
+
+        Every other candidate can be dropped when its evaluation fails: the loop
+        counts it into `infra_streak` and moves on. The seed cannot. It is the
+        only ancestor, so losing it leaves every island barren and the run dies
+        several generations later wearing a different failure's name.
+
+        Retrying is safe here in a way it would not be for a child: the seed is
+        a fixed, already-measured artifact. Re-running it cannot launder a bad
+        candidate into a good score, because there is no candidate yet.
+
+        Measured 2026-08-28 (ETP run18): the pool degraded overnight, the seed
+        evaluation ran five hours, tripped the trustworthiness gate, and took
+        the whole run with it. Seven hours, zero generations.
+        """
+        attempts = max(1, self.cfg.max_consecutive_infra_failures)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._grade(cand, report)
+            except EvalInfraError as exc:
+                if attempt == attempts:
+                    logger.error(
+                        "seed evaluation failed on infrastructure %d times; "
+                        "giving up: %s", attempts, exc)
+                    raise
+                logger.warning(
+                    "seed evaluation hit infrastructure failure "
+                    "(attempt %d/%d), waiting %.0fs: %s",
+                    attempt, attempts, self.SEED_INFRA_RETRY_WAIT_S, exc)
+                time.sleep(self.SEED_INFRA_RETRY_WAIT_S)
+        raise AssertionError("unreachable")            # pragma: no cover
 
     def _grade(self, cand: Candidate, report: RunReport):
         gen_dir = self.workdir / f"gen_{cand.generation}_{cand.id}"
@@ -554,6 +634,7 @@ class SearchLoop:
                 inspiration_notes=inspirations.notes,
                 operator=operator,
                 generation=generation,
+                failed_attempts=self._failed_attempts(parent),
             )
             system, user = lane.prompt_builder.build(ctx)
 
@@ -1006,10 +1087,22 @@ class SearchLoop:
             report, start_generation = self._restore_checkpoint(ckpt)
             logger.info("resuming from generation %d", start_generation)
         elif self.store.count() > 0:
-            raise RuntimeError(
-                "population store is non-empty but no checkpoint was found; "
-                "refusing to guess — start a fresh run dir or restore "
-                "checkpoint.json"
+            # 换提案模型会改掉配置指纹,于是接续被指纹闸拦下、删 checkpoint
+            # 又撞上这一条。第三条路:保留种群、重开日程。分界线是两者性质
+            # 不同 —— run.db 里的分数由求解器测出,与提案模型无关;checkpoint
+            # 里的 RNG 和组件状态只对那一次日程有意义。显式开,默认仍拦住。
+            if os.environ.get("EVOHARNESS_KEEP_POPULATION") != "1":
+                raise RuntimeError(
+                    "population store is non-empty but no checkpoint was found; "
+                    "refusing to guess — start a fresh run dir, restore "
+                    "checkpoint.json, or set EVOHARNESS_KEEP_POPULATION=1 to "
+                    "keep the measured population and restart the schedule"
+                )
+            logger.warning(
+                "EVOHARNESS_KEEP_POPULATION=1: keeping %d measured candidates "
+                "and restarting the schedule from generation 1 (RNG and "
+                "component state are NOT carried over)",
+                self.store.count(),
             )
         if self.store.count() == 0:
             # Checkpoints are written every generation; without this, a
@@ -1061,6 +1154,9 @@ class SearchLoop:
                     break
                 if propose_streak >= self.cfg.max_consecutive_infra_failures:
                     report.stopped_reason = "proposer_dead"
+                    break
+                if self._target_reached():
+                    report.stopped_reason = "target_reached"
                     break
                 continue
 
@@ -1140,6 +1236,9 @@ class SearchLoop:
             )
             report.generations_completed = generation
             self._save_checkpoint(generation, report)
+            if self._target_reached():
+                report.stopped_reason = "target_reached"
+                break
 
         if report.stopped_reason == "running":   # natural end of the loop
             report.stopped_reason = "completed"
