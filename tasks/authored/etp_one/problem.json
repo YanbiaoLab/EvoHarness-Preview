@@ -1,0 +1,39 @@
+{
+  "goldfalse_0001": {
+    "eq1_id": 24666,
+    "eq2_id": 56872,
+    "equation1": "x = ((y ◇ z) ◇ z) ◇ ((y ◇ x) ◇ y)",
+    "equation2": "x ◇ (y ◇ y) = (z ◇ (x ◇ y)) ◇ z",
+    "id": "goldfalse_0001",
+    "label": false,
+    "label_source": "lean_certificate",
+    "order": 4,
+    "src_corpus": "wrong-book-2500",
+    "src_file": "candidate-2500.jsonl",
+    "src_id": "residual_after_easy_v1_benchmark_v1_20260629_006560",
+    "stratum": "v97_accepted_false",
+    "v97_reference": {
+      "lean_code_length": 256,
+      "lean_code_sha256": "28154ce5b7f3920764fb03900ad627288914f56aebf641ccd893a7f959a2fe8a",
+      "solver_sha256": "b48147f11410346dd64d8da97f49016db1ae6711f953e4b3b67cca09fa450e97",
+      "source_run_id": "candidate2500-v2-v97-full-evaluation-runsolver-20260723-021420-w64",
+      "stage_tag": "stage3_cheap_counterexample_families",
+      "status": "accepted",
+      "verdict": "false"
+    }
+  },
+  "core_0203": {
+    "eq1_id": 30737,
+    "eq2_id": 39906,
+    "equation1": "x = (y ◇ (z ◇ ((y ◇ y) ◇ z))) ◇ z",
+    "equation2": "x = (((x ◇ (y ◇ z)) ◇ x) ◇ y) ◇ y",
+    "id": "core_0203",
+    "label": true,
+    "label_source": "sair_answer",
+    "order": 5,
+    "src_corpus": "baseline_sair",
+    "src_file": "baseline_sair",
+    "src_id": "evaluation_order5_0192",
+    "stratum": "order5_normal"
+  }
+}

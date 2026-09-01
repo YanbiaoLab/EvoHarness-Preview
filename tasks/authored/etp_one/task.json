@@ -1,0 +1,40 @@
+{
+  "task_id": "authored_etp_one",
+  "version": "v1",
+  "problem_id": "goldfalse_0001",
+  "prompt": "prompt.md",
+  "knowledge": [
+    "knowledge"
+  ],
+  "criterion": {
+    "name": "judge_accepts",
+    "direction": "maximize",
+    "description": "1.0 when the Lean judge accepts the submitted certificate under the official Stage-2 proof policy, 0.0 otherwise. Nothing here judges correctness itself.",
+    "solved_at": 1.0
+  },
+  "measurement": {
+    "name": "etp-single-problem",
+    "version": "v1",
+    "universe_hash": "goldfalse_0001",
+    "planned_units": 1
+  },
+  "seed": {
+    "dir": "seed",
+    "main_file": "submission.lean"
+  },
+  "grade": {
+    "module": "grade.py",
+    "entry": "grade"
+  },
+  "preflight": [
+    {
+      "name": "submission_present",
+      "argv": [
+        "python",
+        "-c",
+        "import pathlib,sys; p=pathlib.Path('submission.lean'); sys.exit(0 if p.is_file() and p.stat().st_size > 0 else 'submission.lean is missing or empty')"
+      ],
+      "timeout_s": 20
+    }
+  ]
+}
