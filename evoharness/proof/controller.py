@@ -95,6 +95,22 @@ def select_first_open(goals: Sequence[Goal]) -> Goal | None:
 
 
 @dataclass(frozen=True)
+class DecompositionOutcome:
+    """What happened to one proposed route.
+
+    `deferred` is its own answer rather than a flavour of rejection. A sketch
+    check that could not RUN has said nothing about the sketch, and reporting
+    that as "rejected" would let one Lean timeout look identical to a genuinely
+    unsound decomposition.
+    """
+
+    accepted: int = 0
+    rejected: int = 0
+    cycles: int = 0
+    deferred: int = 0
+
+
+@dataclass(frozen=True)
 class SolveReport:
     root_proved: bool
     stopped_reason: str
@@ -176,11 +192,19 @@ class ProofController:
         the goal toward exhaustion, which is the whole point -- a crash is not
         evidence that a lemma is hard.
 
+        It also rechecks decompositions still sitting at PROPOSED. One of those
+        is a sketch whose check could not RUN -- a Lean timeout, a toolchain
+        that was down -- and leaving it alone was a wedge rather than a
+        kindness: PROPOSED counts as a live route, so the parent stops being
+        attacked directly, while nothing was ever scheduled to reach a verdict
+        on the route itself. The goal shut for good, quietly, off one timeout.
+
         Returns the goal ids recovered, so a resumed run can say how much it
         inherited rather than presenting itself as a fresh start.
         """
 
         recovered: list[str] = []
+        self.revalidate_proposed()
         for goal in self.store.stale_leases(now):
             self.store.record_attempt(
                 goal.id,
@@ -196,6 +220,66 @@ class ProofController:
             )
             recovered.append(goal.id)
         return recovered
+
+    def revalidate_proposed(self) -> DecompositionOutcome:
+        """Reach a verdict on every decomposition still awaiting one.
+
+        Cheap to retry and unbounded to skip: a sketch check is one compile,
+        while an unresolved PROPOSED row costs the parent every future attempt.
+        A check that fails again simply stays PROPOSED for the next round --
+        that is the loop the deferred case always needed and never had.
+        """
+
+        totals = DecompositionOutcome()
+        for decomposition in self.store.proposed_decompositions():
+            sketch = self.store.sketch_of(decomposition.id)
+            if sketch is None:
+                # Nothing to recheck it against. Not a verdict either, but it
+                # can never become one, so say so rather than retrying forever.
+                self.store.set_decomposition_status(
+                    decomposition.id,
+                    DecompositionStatus.REJECTED_BY_VERIFIER,
+                    reason="the decomposition was recorded without a sketch",
+                )
+                totals = DecompositionOutcome(
+                    totals.accepted, totals.rejected + 1, totals.cycles,
+                    totals.deferred,
+                )
+                continue
+            goal = self.store.goal(decomposition.goal_id)
+            try:
+                verdict = self.validate_sketch(goal, sketch)
+            except SketchUnavailable:
+                totals = DecompositionOutcome(
+                    totals.accepted, totals.rejected, totals.cycles,
+                    totals.deferred + 1,
+                )
+                continue
+            self.store.set_decomposition_status(
+                decomposition.id,
+                (
+                    DecompositionStatus.ACCEPTED if verdict.ok
+                    else DecompositionStatus.REJECTED_BY_VERIFIER
+                ),
+                reason=verdict.reason,
+            )
+            self.store.propagate(
+                goal.id,
+                max_capability_attempts=self.max_capability_attempts,
+                budget_spent=self.store.total_cost(),
+                solver_level=self.solver.level,
+            )
+            totals = (
+                DecompositionOutcome(
+                    totals.accepted + 1, totals.rejected, totals.cycles,
+                    totals.deferred,
+                ) if verdict.ok else
+                DecompositionOutcome(
+                    totals.accepted, totals.rejected + 1, totals.cycles,
+                    totals.deferred,
+                )
+            )
+        return totals
 
     # -- the loop -------------------------------------------------------------
 
@@ -213,6 +297,7 @@ class ProofController:
         accepted = 0
         rejected = 0
         cycles = 0
+        deferred = 0
         consecutive_infra = 0
         stopped = "max_iterations"
 
@@ -262,10 +347,11 @@ class ProofController:
                 ):
                     counted = self._maybe_decompose(goal)
                     scope = self.store.reachable_from(root_goal_id)
-                    accepted += counted[0]
-                    rejected += counted[1]
-                    cycles += counted[2]
-                    if counted[0]:
+                    accepted += counted.accepted
+                    rejected += counted.rejected
+                    cycles += counted.cycles
+                    deferred += counted.deferred
+                    if counted.accepted:
                         continue
 
                 result = self.solver.attack(goal, budget=budget - spent)
@@ -309,9 +395,10 @@ class ProofController:
                 # A decomposition that just landed added subgoals; they belong
                 # to this root's scope or the loop would never attack them.
                 scope = self.store.reachable_from(root_goal_id)
-                accepted += outcome[0]
-                rejected += outcome[1]
-                cycles += outcome[2]
+                accepted += outcome.accepted
+                rejected += outcome.rejected
+                cycles += outcome.cycles
+                deferred += outcome.deferred
             finally:
                 self.store.release(goal.id, self.owner)
 
@@ -330,15 +417,17 @@ class ProofController:
 
     # -- decomposition --------------------------------------------------------
 
-    def _maybe_decompose(self, goal: Goal) -> tuple[int, int, int]:
+    def _maybe_decompose(self, goal: Goal) -> DecompositionOutcome:
         """Ask for a route and validate it. Returns (accepted, rejected, cycles)."""
 
         sketch = self.decompositions.propose(goal)
         if sketch is None:
-            return (0, 0, 0)
+            return DecompositionOutcome()
         return self.record_decomposition(goal, sketch)
 
-    def record_decomposition(self, goal: Goal, sketch: Sketch) -> tuple[int, int, int]:
+    def record_decomposition(
+        self, goal: Goal, sketch: Sketch
+    ) -> DecompositionOutcome:
         """Validate a sketch someone else built, and record the verdict.
 
         Split out from `_maybe_decompose` so a caller who already has a sketch
@@ -358,16 +447,17 @@ class ProofController:
             # Refused at the store, so nothing landed and there is no row to
             # mark rejected -- only a count, so it shows up in the report
             # rather than vanishing.
-            return (0, 0, 1)
+            return DecompositionOutcome(cycles=1)
 
         try:
             verdict = self.validate_sketch(goal, sketch)
         except SketchUnavailable:
             # Not a verdict on the sketch. Marking it rejected-by-verifier is
             # terminal and never revisited, so a dead toolchain would delete a
-            # viable route from the graph for good. Leave it PROPOSED and let a
-            # later round check it.
-            return (0, 0, 0)
+            # viable route from the graph for good. It stays PROPOSED, and
+            # `recover()` is what comes back to it -- leaving it here with
+            # nothing scheduled to recheck it is what wedged the parent shut.
+            return DecompositionOutcome(deferred=1)
 
         self.store.set_decomposition_status(
             decomposition.id,
@@ -384,7 +474,10 @@ class ProofController:
             budget_spent=self.store.total_cost(),
             solver_level=self.solver.level,
         )
-        return (1, 0, 0) if verdict.ok else (0, 1, 0)
+        return (
+            DecompositionOutcome(accepted=1) if verdict.ok
+            else DecompositionOutcome(rejected=1)
+        )
 
 
 __all__ = [

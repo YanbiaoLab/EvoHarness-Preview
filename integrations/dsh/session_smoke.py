@@ -3,7 +3,6 @@
 
     export EVO_PYTHON=$(cd /path/to/EvoHarness && uv run which python)
     export EVO_HARNESS_ROOT=/path/to/EvoHarness
-    export EVO_PROOF_WORK=/tmp/dsh_proof
     export EVO_LEAN_PROJECT=/path/to/EvoHarness/tasks/lean_env
     export EVOHARNESS_API_BASE=... EVOHARNESS_API_KEY=... DSH_MODEL=gpt-5.6-sol
     uv run python integrations/dsh/session_smoke.py
@@ -61,9 +60,15 @@ Do not call proof_attack. Report each tool's raw json.
 """
 
 REQUIRED = (
-    "EVO_PYTHON", "EVO_HARNESS_ROOT", "EVO_PROOF_WORK",
+    "EVO_PYTHON", "EVO_HARNESS_ROOT",
     "EVOHARNESS_API_BASE", "EVOHARNESS_API_KEY",
 )
+
+#: Mirrors `WORK_DIR` in `proof.ts`: the tools put the graph under the
+#: session's own workspace, so the cross-check has to look there and nowhere
+#: else. A smoke reading a different directory would report an empty board
+#: about a session that worked, and pass a broken one that shared a default.
+WORK_DIR = ".evo"
 
 
 def tool_traffic(events: list[dict]) -> list[dict]:
@@ -97,11 +102,12 @@ def tool_traffic(events: list[dict]) -> list[dict]:
     return traffic
 
 
-def graph_state() -> dict:
+def graph_state(work: Path) -> dict:
     """Ask the CLI directly. The graph is the fact; the transcript is a story."""
 
     done = subprocess.run(
-        [os.environ["EVO_PYTHON"], "-m", "evoharness.proof.cli", "status"],
+        [os.environ["EVO_PYTHON"], "-m", "evoharness.proof.cli",
+         "--work", str(work), "status"],
         cwd=os.environ["EVO_HARNESS_ROOT"], capture_output=True, text=True,
         env=os.environ,
     )
@@ -160,7 +166,8 @@ def main() -> int:
         print(f"  {item['tool']:16s} {json.dumps(summary, ensure_ascii=False)[:180]}")
 
     print("\n--- the graph, asked directly ---")
-    print(json.dumps(graph_state(), ensure_ascii=False, indent=2)[:1500])
+    print(json.dumps(graph_state(workspace / WORK_DIR),
+                     ensure_ascii=False, indent=2)[:1500])
 
     print("\n--- final response ---")
     print(result.final_response[:1500])

@@ -20,21 +20,20 @@
  * @module evoharness/integrations/dsh/proof
  */
 
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { HARNESS_ENV, callHarness, requireEnv } from './cli.ts'
 
 export const name = 'evo-proof'
 export const inject = ['tools']
 
-/** On top of the shared interpreter variables. */
-const REQUIRED_ENV: ReadonlyArray<readonly [string, string]> = [
-  ['EVO_PROOF_WORK', 'the workspace holding graph.db and every run directory'],
-  ...HARNESS_ENV,
-]
-
 /** Set only when goals import Mathlib; absent means a bare `lean`. */
 const LEAN_PROJECT = 'EVO_LEAN_PROJECT'
+
+/** The session workspace subdirectory holding `graph.db` and every run. */
+const WORK_DIR = '.evo'
 
 const MODULE = 'evoharness.proof.cli'
 
@@ -52,17 +51,48 @@ const passthrough = {
  * naming what to set, and the session carries on.
  */
 function harness(): { python: string, root: string } {
-  const env = requireEnv(REQUIRED_ENV)
+  const env = requireEnv(HARNESS_ENV)
   return {
     python: env['EVO_PYTHON'] as string,
     root: env['EVO_HARNESS_ROOT'] as string,
   }
 }
 
-/** Flags every subcommand accepts, from the environment rather than the model. */
-function commonFlags(): string[] {
+/**
+ * Where THIS session's graph lives: `<session workspace>/.evo`.
+ *
+ * The workspace is the session's own, read per call from its header, the way
+ * `tool-bash`, `tool-lsp` and the filesystem tools read it. It is deliberately
+ * not an environment variable: one web server process serves many sessions
+ * with different workspaces, so a process-level value cannot express this and
+ * `DSH_CWD` is simply absent on that path.
+ *
+ * **A session without a workspace is refused, not defaulted.** The sandbox
+ * falls back to a configured root because writing a file in the wrong place is
+ * visible. This is not that: a fallback would silently open a SECOND graph,
+ * then spend real money filling it while `proof_status` in the intended
+ * directory keeps answering `no goals`. Refusing costs one turn; the fallback
+ * costs the run and says nothing.
+ */
+function workspace(exec: ToolRunContext): string {
+  const cwd = exec.agent?.session.header.cwd
+  if (cwd === undefined || cwd === '') {
+    throw new Error(
+      'this session has no workspace directory, so there is nowhere to keep '
+      + `the proof graph (it lives in <workspace>/${WORK_DIR}). Start the `
+      + 'session in the directory the proof belongs to and call again.',
+    )
+  }
+  return join(cwd, WORK_DIR)
+}
+
+/** Flags every subcommand accepts, from the session and the deployment. */
+function commonFlags(exec: ToolRunContext): string[] {
   const project = process.env[LEAN_PROJECT]
-  return project === undefined || project === '' ? [] : ['--lean-project', project]
+  return [
+    '--work', workspace(exec),
+    ...project === undefined || project === '' ? [] : ['--lean-project', project],
+  ]
 }
 
 export function apply(ctx: Context) {
@@ -83,7 +113,7 @@ export function apply(ctx: Context) {
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(),
-      ['-m', MODULE, ...commonFlags(), 'open',
+      ['-m', MODULE, ...commonFlags(exec), 'open',
         '--statement', String(args.statement),
         ...(args.preamble ? ['--preamble', String(args.preamble)] : []),
         ...(args.label ? ['--label', String(args.label)] : [])],
@@ -104,7 +134,7 @@ export function apply(ctx: Context) {
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(),
-      ['-m', MODULE, ...commonFlags(), 'status',
+      ['-m', MODULE, ...commonFlags(exec), 'status',
         ...(args.goal_id ? ['--goal', String(args.goal_id)] : [])],
       exec.signal, 'reading the board',
     ),
@@ -129,7 +159,7 @@ export function apply(ctx: Context) {
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(),
-      ['-m', MODULE, ...commonFlags(), 'sketch',
+      ['-m', MODULE, ...commonFlags(exec), 'sketch',
         '--goal', String(args.goal_id),
         '--proposal', String(args.proposal)],
       exec.signal, 'validating a decomposition',
@@ -146,7 +176,10 @@ export function apply(ctx: Context) {
       + 'outcome comes from the run itself: `proved`, `task-failed` (tried and '
       + 'could not), or one of `infra-failed` / `budget-exhausted` / '
       + '`interrupted`, which say nothing about the goal and are not evidence '
-      + 'that it is hard.',
+      + 'that it is hard. Read `warnings` in the result BEFORE spending again: '
+      + 'attacking a subgoal whose route Lean has not accepted is allowed on '
+      + 'purpose -- a proved lemma is an asset whatever asked for it -- but it '
+      + 'closes nothing upstream until that route is accepted.',
     parameters: {
       goal_id: { type: 'string', description: 'The goal to solve.', required: true },
       budget: { type: 'number', description: 'Ceiling for this call. Default 10.' },
@@ -154,14 +187,21 @@ export function apply(ctx: Context) {
         type: 'string',
         description: 'L1 one-shot, or L2 (default) an agent session that can call Lean.',
       },
+      allow_unaccepted_route: {
+        type: 'boolean',
+        description:
+          'Spend even though no accepted route uses this goal. Say why in the '
+          + 'conversation before setting it.',
+      },
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(),
-      ['-m', MODULE, ...commonFlags(), 'attack',
+      ['-m', MODULE, ...commonFlags(exec), 'attack',
         '--goal', String(args.goal_id),
         ...(args.budget === undefined ? [] : ['--budget', String(args.budget)]),
-        ...(args.level ? ['--level', String(args.level)] : [])],
+        ...(args.level ? ['--level', String(args.level)] : []),
+        ...(args.allow_unaccepted_route ? ['--allow-unaccepted-route'] : [])],
       exec.signal, 'attacking a goal',
     ),
   }))
@@ -182,7 +222,7 @@ export function apply(ctx: Context) {
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(),
-      ['-m', MODULE, ...commonFlags(), 'assemble',
+      ['-m', MODULE, ...commonFlags(exec), 'assemble',
         '--goal', String(args.goal_id),
         ...(args.out ? ['--out', String(args.out)] : []),
         ...(args.show_text ? ['--show-text'] : [])],

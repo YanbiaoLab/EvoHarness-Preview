@@ -339,6 +339,38 @@ class ProofGraphStore:
         raw = row["sketch_json"]
         return Sketch.from_json(json.loads(raw)) if raw else None
 
+    def decompositions_containing(self, goal_id: str) -> list[Decomposition]:
+        """Every route that has this goal as one of its subgoals.
+
+        Used to answer "if I prove this, does anything upstream close?" -- a
+        subgoal whose routes are all unaccepted can be proved perfectly well
+        and still shut nothing, because only an ACCEPTED decomposition may
+        complete.
+        """
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT decomposition_id FROM decomposition_subgoals"
+            " WHERE subgoal_id = ?",
+            (goal_id,),
+        ).fetchall()
+        return [self.decomposition(row["decomposition_id"]) for row in rows]
+
+    def proposed_decompositions(self) -> list[Decomposition]:
+        """Decompositions nobody ever reached a verdict on.
+
+        A sketch check that could not run leaves one of these: not rejected,
+        because a dead toolchain is no verdict, but not accepted either. They
+        have to be findable, because PROPOSED counts as a live route -- so an
+        unchecked one both blocks its parent from being attacked directly AND
+        never gets checked, which wedges the goal shut for good.
+        """
+
+        rows = self._conn.execute(
+            "SELECT id FROM decompositions WHERE status = ? ORDER BY created_at",
+            (DecompositionStatus.PROPOSED.value,),
+        ).fetchall()
+        return [self.decomposition(row["id"]) for row in rows]
+
     def set_decomposition_status(
         self,
         decomposition_id: str,

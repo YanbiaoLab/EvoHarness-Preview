@@ -35,7 +35,7 @@ from pathlib import Path
 from .assembly import AssemblyError, verify
 from .controller import ProofController
 from .grade import make_grader
-from .graph import GoalStatus
+from .graph import DecompositionStatus, GoalStatus
 from .identity import ExactTextHasher, LeanExprHasher
 from .propose import ProposalError, parse_proposal
 from .run_solver import ApiRunSolver, declaration_name
@@ -192,9 +192,9 @@ def cmd_sketch(args) -> dict:
         )
 
         controller = _controller(args, store, solver_needed=False)
-        accepted, rejected, cycles = controller.record_decomposition(goal, sketch)
+        outcome = controller.record_decomposition(goal, sketch)
         view = _goal_view(store, store.goal(goal.id))
-        if cycles:
+        if outcome.cycles:
             return {
                 "accepted": False,
                 "stage": "acyclicity",
@@ -204,15 +204,96 @@ def cmd_sketch(args) -> dict:
                 ),
                 "goal": view,
             }
+        if outcome.deferred:
+            # Its own stage, never `lean`. The checker did not run, so nothing
+            # has been said about this route: a caller told "rejected" would
+            # abandon a decomposition that may be perfectly sound, and would
+            # read a Lean outage as evidence about the mathematics.
+            return {
+                "accepted": False,
+                "stage": "deferred",
+                "reason": (
+                    "the Lean check could not run, so this route has NOT been "
+                    "judged -- retry it rather than proposing differently"
+                ),
+                "goal": view,
+            }
         latest = view["decompositions"][-1] if view["decompositions"] else {}
         return {
-            "accepted": bool(accepted),
+            "accepted": bool(outcome.accepted),
             "stage": "lean",
             "reason": latest.get("reason", ""),
             "goal": view,
         }
     finally:
         store.close()
+
+
+def _attack_warnings(store, goal) -> list[str]:
+    """What the caller should know before spending on this goal.
+
+    Warnings rather than refusals, on purpose. A proved lemma is an asset
+    whatever asked for it -- the graph is memoized by identity, so it can serve
+    another route or another problem entirely -- and refusing to prove one
+    because of a bookkeeping state upstream would throw that away. It is the
+    same category error as letting an infra fault decide a goal is hard.
+
+    But silence is worse: an unaccepted route is exactly where budget goes in
+    and nothing ever closes.
+    """
+
+    warnings: list[str] = []
+    if goal.status is GoalStatus.PROVED:
+        warnings.append("this goal is already proved; attacking it spends for nothing")
+    if goal.status is GoalStatus.EXHAUSTED:
+        warnings.append(
+            "this goal was ruled exhausted at budget "
+            f"{goal.exhausted_at_budget} with solver "
+            f"{goal.exhausted_at_solver!r}; attacking it again only helps if "
+            "something about that has changed"
+        )
+    warnings.extend(_route_note(store, goal)[0])
+    return warnings
+
+
+def _route_note(store, goal) -> tuple[list[str], str | None]:
+    """(warnings, refusal) about the routes this goal serves.
+
+    The two ways a route can be unaccepted carry very different risk, and
+    saying the same thing about both was too blunt:
+
+    - PROPOSED means nobody has judged it yet, usually because the checker was
+      down. The sketch may be perfectly good and its subgoals perfectly real.
+    - REJECTED_BY_VERIFIER means Lean has judged it and refused. Its subgoals
+      may be statements the model invented that do not hold at all.
+
+    A goal with NO routes is not covered here: nothing referencing it is not
+    the same as only bad things referencing it. Roots live there.
+    """
+
+    routes = store.decompositions_containing(goal.id)
+    if not routes or any(
+        route.status is DecompositionStatus.ACCEPTED for route in routes
+    ):
+        return [], None
+
+    statuses = {route.status.value for route in routes}
+    if statuses == {DecompositionStatus.REJECTED_BY_VERIFIER.value}:
+        return [], (
+            "every route that uses this goal was rejected by Lean, so this "
+            "lemma is the leftover of a sketch that does not hold together. "
+            "It may not even be true. Propose a route Lean accepts first, or "
+            "pass --allow-unaccepted-route if you want it proved for its own "
+            "sake."
+        )
+    return [], (
+        "no route using this goal has been judged yet (routes are: "
+        + ", ".join(sorted(statuses))
+        + "). Proving it cannot close its parent -- only an ACCEPTED "
+        "decomposition completes -- and the checker is not answering, so the "
+        "route cannot be settled right now. Retry when it is, or pass "
+        "--allow-unaccepted-route."
+    )
 
 
 def cmd_attack(args) -> dict:
@@ -222,6 +303,26 @@ def cmd_attack(args) -> dict:
     try:
         goal = store.goal(args.goal)
         controller = _controller(args, store)
+
+        # Settle any route awaiting a verdict BEFORE deciding to refuse. A
+        # route sits at PROPOSED because the checker was down, not because
+        # anything is wrong with it, so refusing without trying again would
+        # let one old timeout block work that is fine now. After this, a
+        # refusal means the checker is down at this moment, not that it once
+        # was.
+        controller.revalidate_proposed()
+        goal = store.goal(goal.id)
+
+        warnings = _attack_warnings(store, goal)
+        _, refusal = _route_note(store, goal)
+        if refusal and not args.allow_unaccepted_route:
+            return {
+                "refused": True,
+                "reason": refusal,
+                "goal": _goal_view(store, goal),
+                "warnings": warnings,
+            }
+
         report = controller.solve(
             goal.id, budget=args.budget, max_iterations=args.max_iterations
         )
@@ -235,6 +336,8 @@ def cmd_attack(args) -> dict:
                 "cycles_refused": report.cycles_refused,
             },
             "goal": _goal_view(store, store.goal(goal.id)),
+            "warnings": warnings,
+            "refused": False,
         }
     finally:
         store.close()
@@ -401,6 +504,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--budget", type=float, default=10.0)
     p.add_argument("--max-iterations", type=int, default=4)
     p.add_argument("--preamble", default="")
+    # Refusing is the default. Budget spent on a goal no accepted route uses
+    # buys a lemma that cannot close anything, and in a long autonomous run
+    # nobody reads the warning that used to be all this said.
+    p.add_argument("--allow-unaccepted-route", action="store_true")
     _solver_flags(p)
     p.set_defaults(func=cmd_attack)
 

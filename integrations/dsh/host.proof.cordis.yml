@@ -12,15 +12,21 @@
 # one holding `proof_sketch` would be inside the loop that is supposed to be
 # judging it.
 #
-# No llm row: the session's model is whatever your dsh profile already
-# configures. This patch adds tools and nothing else.
+# The llm row below OVERRIDES the profile's `llm-pi-ai` entry by id. The base
+# profile mounts that plugin with no providers configured, so without this the
+# session would answer from whatever other route the profile happens to carry
+# -- which is not the endpoint the proof tools spend against, and telling them
+# apart afterwards is guesswork.
 #
 # Required in the launching environment:
 #
 #   EVO_PYTHON         interpreter EvoHarness is installed in
 #   EVO_HARNESS_ROOT   the EvoHarness checkout
-#   EVO_PROOF_WORK     workspace holding graph.db and every run directory
 #   EVO_LEAN_PROJECT   lake project providing Mathlib (omit for core-Lean goals)
+#
+# Where the graph goes is NOT among them: it is `.evo/` under the session's own
+# workspace, read from the session header per call. A session with no workspace
+# is refused rather than defaulted -- see `workspace()` in proof.ts.
 #
 # And, for `proof_attack` only:
 #
@@ -29,3 +35,35 @@
 - insert:
     - id: evo-proof
       name: '../src/proof.ts'
+
+# `dsh-llm-pi-ai` is already mounted by @deepseek-ai/dsh-base with an empty
+# config; this fills in the provider rather than adding a second plugin.
+#
+# `api: openai-responses`, and it is not a preference. This base URL ends in
+# `/codex/v1`, which serves the Responses protocol ONLY: a POST to
+# /chat/completions there answers 403 `your token is not authorized for any
+# channel serving this model` -- for every model, including ones /models
+# lists. That message reads like a credential or entitlement problem and is
+# neither, which is why it is written down here rather than rediscovered.
+- id: llm-pi-ai
+  config:
+    providers:
+      krill:
+        displayName: Krill AI gateway
+        # The proof tools read EVOHARNESS_API_KEY for `proof_attack`; using the
+        # same name here keeps one credential rather than two that can drift
+        # into disagreeing about which endpoint a run was billed to.
+        apiKeyEnv: EVOHARNESS_API_KEY
+        api: openai-responses
+        baseURL: !!js process.env.EVOHARNESS_API_BASE ?? 'https://api.krill-ai.net/codex/v1'
+        streamIdleTimeoutMs: 172800000
+        models:
+          # Three GPT-5.6 variants exist on this gateway and no bare `gpt-5.6`.
+          # `sol` first because it is the one this pipeline has actually been
+          # run against end to end.
+          - id: gpt-5.6-sol
+            contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 262144)
+          - id: gpt-5.6-terra
+            contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 262144)
+          - id: gpt-5.6-luna
+            contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 262144)
