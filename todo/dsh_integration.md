@@ -1,8 +1,14 @@
 # EvoHarness 接 dsh:Agent Backend 实现与外壳可选倒置(DH-0..DH-6)
 
-> 状态:**v5(2026-08-18 晚)—— DH-1 已落地并跑通一次真实进化**。相对 v4 的三处改判都由实测或用户决定驱动:①`cost_usd` 的价目表方案**作废**(用户决定:成本统计是次要信号,不得写死在代码里、不得变成阻断项);②`finish_reason` 的词表 v4 猜错了,真实取值是 dsh 的 `TurnEndReasonMap` 六个成员;③三个不可强制的 limit 的风险被**下调**——`_ProposalUsage.absorb` 在调用方一侧 fail-closed。架构与接缝不变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证)。v3.1 的两层架构图与决定六原样保留。整篇取代 v4、v3.2、v3.1、v2.1 与 v1。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview,rc.5)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)。
+> 状态:**v8(2026-08-27)—— 带 Lean 的单题闭环已跑通,上游 854 个提交已合入**。架构与接缝自 v1 未变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证,且在跨 854 个提交的合并后复验)。逐版进度见下面几段。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)、[DSH 集成.md](DSH%20集成.md)(两张架构图)。
 >
-> **当前进度一句话(v6,2026-08-20)**:DH-0、DH-1 完成;**身份已进 `spec_hashes`,决定四成立**——换 cordis 配置或换 runtime 入口再 resume 旧 run 目录会被现有指纹不符路径拒掉,换机器路径不会被误拒。DH-2 只剩对拍与断路器语义,DH-3 只剩真实链路的四项验证。**当前最大的未清项回到 DH-0.5:守卫判据仍是错的**(候选是根 agent,按深度写的判据对它不生效)。治理层人类入口的空缺已部分补上:`evoharness/readout/` 提供只读读出,`evoharness/launch/` 提供不阻塞的起跑,DH-5 第一、二层因此有了可调用的 Python 面。
+> **v5(2026-08-18 晚)** 的三处改判仍然有效,不再重复陈述:①`cost_usd` 的价目表方案**作废**(成本统计是次要信号,不得写死在代码里、不得变成阻断项);②`finish_reason` 的词表是 dsh 的 `TurnEndReasonMap` 六个成员,不是 provider 的 finish reason;③三个不可强制的 limit 风险**下调**——`_ProposalUsage.absorb` 在调用方一侧 fail-closed。整篇取代 v4 及更早。
+>
+> **当前进度一句话(v8,2026-08-27)**:**跟上了上游 854 个提交,零冲突**——「dsh preview 破坏性变更」这条风险第一次被真实检验,结论是接缝选对了(见 §5 的 DH-4 合并记录)。同一批改动里补上了 DH-4 欠了最久的那张证据:沙箱边界这次是**真的从沙箱里写了一次**,而不是读 `writableRoots` 的代码推出来的;顺带发现**候选的编辑器从来就没在沙箱里**。仍未清的两项:候选的读那一侧完全没堵;`evo_start` 只能起进化跑。
+>
+> **v7(2026-08-25)**:**带 Lean 的单题闭环真的跑通了**——run `etp_one_dsv4` 第 1 代 fitness 1.0,`judge_cached: false`、6.9 秒,Lean 真的编译了那份证书。DH-0..DH-3 承重项全部闭合,DH-4 的对抗测试与审批循环已补,DH-5 第一、二层可用、第三层仍未做。v7 记的是这次演示暴露的四条缺陷(其中一条经核查**不成立**,记为更正)与随之挖出的第五条:**`turn/end` 的失败原文一直被丢掉,五代失败只留下一个词**。
+>
+> **v6(2026-08-20)**:DH-0、DH-1 完成;**身份已进 `spec_hashes`,决定四成立**——换 cordis 配置或换 runtime 入口再 resume 旧 run 目录会被现有指纹不符路径拒掉,换机器路径不会被误拒。治理层人类入口的空缺已部分补上:`evoharness/readout/` 提供只读读出,`evoharness/launch/` 提供不阻塞的起跑,DH-5 第一、二层因此有了可调用的 Python 面。
 >
 > 一句话定位:**dsh 执行一次 Agent 循环,Python 驱动搜索与裁决**。dsh 出运行时——模型、工具、沙箱、会话日志;EvoHarness 出算法与裁决——种群搜索、修复策略、证据契约、研究治理。二者之间是 `AgentBackend` 这一个方法,不是嵌套控制流。
 
@@ -142,6 +148,26 @@ flowchart TD
 `InboxStore.answer()` 的实际保护只有三条:`actor` 在 store 的白名单里、`action` 在这张卡的 `allowed_actions` 里、写一次即锁死;`require_decision()` 再绑 kind / experiment_id / **subject_hash**。**保护不在 store 里,在"谁被允许调它"**——能调 `answer()` 的进程就能以白名单里任何一个人的名义签字。旧 evoweb 服务端因此把 actor 绑在服务端,请求体里带 `actor` 直接 400。任何新的答复入口都必须沿用这个形状。
 
 **决定六:copilot 建议,不判定。** 研究 copilot 可以在目标澄清、假设分解、实验设计与证据解读上出力,产物是叙述、Finding 与 DecisionRequest 草案。但 **verdict 不归它**:supported / contradicted / unknown 三态只能由带 `assessor_hash` 的 `AssessmentGuard` 产出,信念更新与 Inbox 卡片一律挂在判定之后(§2.1)。理由不是防 agent 说谎,是防**判定标准悄悄漂移**:LLM 每次解读的隐含阈值都不一样,而现行 assessor 的噪声下限有具体来历——IMO 终选在 12 题上取 argmax,validation 到 test 掉 0.206,点估计比较会把幸运种子当成优势。方向与 research_layer.md 的 I-7 约束一致。
+
+**决定七:"什么时候算解开了"归任务,不归启动命令(v7 新增)。** 演示第 1 代就拿到 1.0,循环照常跑完五代,最后是人手动 kill 的。加早停容易,难的是那个数字该住在哪。
+
+第一版写在 `evo_start` 的 argv 里(`search.stop_at_fitness=1.0`)——**这等于让启动器替任务断言它的分数上限**。ETP 这道题恰好是"判题器收或不收",满分就是 1.0;而一个 fitness 是加速比的任务,12x 才刚开始,1.0 会在第一代就把它停掉。**启动器不知道一个任务有没有天花板,任务知道。**
+
+现在分两层:
+
+- `SearchConfig.stop_at_fitness: float | None`,通用旋钮,缺省关。开放式搜索没有这样一个数,写错了就是在第一个走运的代结束运行。
+- `CriterionSpec.solved_at: float | None`,判据自己声明的解开点。它进 `criterion.hash` → 任务 hash → 运行身份,所以**"这道题 1.0 就是解开了"成了实验身份的一部分**,而不是启动时随手带的参数。
+- 交接和 `task_sys_msg` 那一行同形:任务给默认值,显式 `--set` 说了算。
+
+两处刻意的收窄:
+
+**`to_payload` 只在声明时才写这个键**,所以加这个字段没有让任何既有任务换身份。这不是为了让旧 run 能续跑而做的手脚——**一个没有"解开点"的判据,和有办法声明它之前是同一个判据**。对照钉住两个方向:不声明时 payload 里没有这个键,声明了必须换 hash(否则前一条就是靠"这字段谁也不影响"混过去的)。
+
+**`solved_at` 配 `direction="minimize"` 直接拒。** 那种情况下人写下的是判据值,而循环拿去比的是 fitness(grader 已经调成越大越好)。照单全收会让运行停在与任务声明**相反**的条件上,而且下游没有任何东西能看出来。
+
+早停要在**串行和批量两条路径上各写一次**。只写一条是那种"测过了"的缺陷:套件默认走串行,而真正的长跑几乎都开着 `eval_batch_size`。两条各有独立用例,变异对照确认互不覆盖。
+
+⚠️ **`SearchConfig` 进 `config_fingerprint`,所以加这个字段改变了指纹**:v7 之前建的 run 目录只能读,不能续跑。这正是那条拒绝链该有的行为(配置形状真的变了),但要说在前面。
 
 ## 4. 接缝与两个 backend
 
@@ -299,6 +325,47 @@ Python SearchLoop
 
   同配置复跑:`completed`、6/6 代、`best_fitness: 1.0`、`evaluations: 5`,四个候选带 `limit_overruns`,其中三个 fitness 1.0——**全是原来会被丢掉的工作**。审计的 `turn budget` 也跟着改了:只数 `termination == turn_limit` 在这种后端下永远是 0,现在读候选身上的 `limit_overruns`。
 
+### DH-3.5:带 Lean 的单题闭环 —— 已跑通(2026-08-25,v7 新增)
+
+目标是把 dsh 后端放进一个**分数不由自己说了算**的任务里:一道 ETP 竞赛题,候选写 `submission.lean`,判题器编译,收或不收。任务在 `tasks/authored/etp_one/`,启动脚本 `scripts/dsh_demo.sh`。
+
+**结果(run `etp_one_dsv4`)**:
+
+```
+32444631708c  seed      fitness 0.0   BANNED_PLACEHOLDER: sorry
+791f00d32407  gen 1     fitness 1.0   accepted   judge_cached: false   6.9s
+```
+
+`judge_cached: false` 加 6.9 秒是这条记录里最要紧的两个数:**Lean 真的编译了**,不是从缓存里翻出来的旧结论。种子交 `sorry` 得 0,子代被收,分差来自判题器而不是来自任何能被说服的东西。交上去的是 `finOpTable` 五阶乘法表加 `decideFin!`。
+
+`grade.py` **刻意不做离线兜底**,和 `experiments/etp_stage2/grade.py` 相反。长跑里退到纯 Python 代理是对的(判题器每份几秒);这里是错的——**退化之后的输出和正常输出长得一模一样**,同样的形状、同样的数字、同样的绿。判题器不在就报错停跑。测试 `tests/test_task_etp_one.py`,含"缺文件是候选答错、不该惊动判题器"这条反向对照(只测"缺判题器要炸"的话,一个凡事都炸的实现全绿)。
+
+#### 演示暴露的四条,其中一条不成立
+
+**其一,模型名有两个来源(真缺陷,已修)。** `candidate.cordis.yml` 的 catalog 从 `process.env.DSH_MODEL` 建,而 EvoHarness 取 `proposal.model or search.llm_models[0]`,缺省 `gpt-5.1`。**没有任何东西保证这两个名字相等。** 物证在前一次跑 `etp_one_run1`:overrides 恰好是 `evo_start` 发出的那一组(`proposal.mode=agentic` + `search.num_generations=5`,没有模型),`agent_sessions/*/summary.json` 写着 `"model": "gpt-5.1"`,五代在 5 秒内全败,断路器报 `proposer_dead`——**一个关于提议器的判决,而提议器是好的**。
+
+修法:`launch/start.py` 加 `--model`(展开成 `proposal.model=` 与 `search.llm_models=`,插在 overrides 最前面,显式 `--set` 仍然赢);`evo_start` 把 `DSH_MODEL` 列进 `REQUIRED_ENV` 并原样转发。**读同一个变量,两边就不可能再不一致**——这比再加一个 `EVO_DSH_MODEL` 好,后者只是把同一个不一致换个地方发生。
+
+**其二,"沙箱拒绝创建 run 目录"—— 核查后不成立(更正)。** 沙箱只作用于 shell 工具:只有 `packages/shell/{bash,pwsh}-sandbox` 这一族 import `dsh-sandbox-local`,而 `evo_start` 走的是插件里的 `execFile`,不经过它。反证很直接:**`etp_one_run1` 确实建在了 `~/evoharness-runs` 下,而它就是 `evo_start` 启的**。
+
+当时撞到的应该是模型用 bash 去看那个目录被拒——而那**拒得对**,宿主会话的 shell 本就不该写工作区外。真正的问题在别处:**模型被拒之后会以为 run 不存在**,然后把剩下的轮次花在猜路径上。这一条不改代码,归到工具描述里说清"run 目录在 shell 沙箱之外,只能用 `evo_status` 这些工具读"。
+
+**其三,`--set` 多次出现互相覆盖(真缺陷,已修)。** `nargs="*"` 的语义是每次出现整体替换。为了可读把设置分几行写的调用者,实际只有最后一组生效,**而且没有任何声音**——丢掉的那些悄悄取默认值,运行记录再把那些默认值写成"这就是当初要的"。改 `action="extend"`。
+
+变异对照里有一条专门防那个看起来对的错修:`action="append"` 同样能让"两次 `--set` 都留下"变绿,但会把一次 `--set a b` 套进一层列表,再让 `load_experiment_config` 在一个 list 上做 partition —— 4 条用例同时红。
+
+**其四,拿到满分仍跑满代数(真缺陷,已修)。** 见下面 §3 决定七。
+
+#### 顺带挖出的第五条:失败原因一直在被丢掉
+
+`etp_one_run1` 五代全败,而 `run.log` 里只有五行 `plan gen=N`,候选记录里只有一个词 `backend-error`。**五代预算换回零条可读线索。**
+
+原因:`turn/end` 不翻译成 `AgentEvent`(它变成 termination),所以它整个载荷落进 `untranslated_event_types` 计数然后被丢弃——**provider 自己的报错文字就在那个载荷里**(`data.reason.failure.message`)。
+
+修法:`_normalize` 捞出 `reason.failure`,①写进 termination 事件的 `data.failure`,②`BACKEND_ERROR` 时 `logger.error` 带上模型名与原文。两处都要:**日志给正在看着它失败的人,trace 给第二天才来读的人,而只有后者第二天还在**。`turn/end` **仍然计入**有损翻译的计数——从一个事件里读走一个字段不等于翻译无损,一个悄悄不再计数的统计会把仍在丢弃的 trace 报成完整的。
+
+对照包括"没失败的轮次里 `failure` 键按构造不存在"(一个永远写这个键的实现会让每次正常会话看起来都有话要说)和"报了错但没给话时,日志说的是**这件事本身**而不是空字符串"(空串读起来像日志坏了,会把人送去查日志)。
+
 **v5 观测到的翻译损耗**(未译事件按类计数):`assistant/chunk` 586、`step/start`/`step/end` 各 16、`turn/start`/`turn/end` 各 2、`user/message` 2、`session/title` 2、`request/header` 2、`request/context` 2、`agent/inbox/spliced` 4。chunk 是流式碎片,不进冷 trace 是对的;但 **turn/step 边界丢了**,后果是从冷 trace 里重建不出"哪几次模型调用属于同一轮",下钻只能看到平铺事件。要不要补映射取决于下钻时想不想要轮次结构。
 
 ### DH-4:安全加固(**已按决定跳过,条件保留**)
@@ -315,7 +382,9 @@ Python SearchLoop
 
   而这个项目历史上**每一次跑的 run 目录都是 `/tmp/evo_*`**。
 
-  ⚠️ **证据的强度要说准**:我验的是 `writableRoots` 对我们的真实路径返回什么(下表),**不是**真的从沙箱里写成功过一次。模型驱动的写探针跑了两次都没跑成——第一次环境变量没传进去,第二次端点余额空了。**对照组也一起失败**(工作区内那次写也没成),所以那次输出"四项全部未被改写"什么都不能证明。这里的结论来自 dsh 自己的文档与代码,不是一次执行:
+  ⚠️ **v7 之前证据的强度**:当时验的是 `writableRoots` 对我们的真实路径返回什么(下表),**不是**真的从沙箱里写成功过一次。模型驱动的写探针跑了两次都没跑成——第一次环境变量没传进去,第二次端点余额空了。**对照组也一起失败**(工作区内那次写也没成),所以那次输出"四项全部未被改写"什么都不能证明。当时的结论来自 dsh 自己的文档与代码,不是一次执行:
+
+  ✅ **v8 已补上执行证据**,见本节末尾的编辑器条目——那条用例真的做了写操作,而且直接推翻了下表隐含的一个假设。下表本身仍然成立:
 
   ```
   ⚠️ /private/tmp/evo_dsp2/run.db            种群库(自己和所有对手的分数)
@@ -333,8 +402,39 @@ Python SearchLoop
 
   ⚠️ **遗留:临时区可写这一条本身没堵。** 候选仍可写 `/tmp` 下的任何东西,只是 run 目录不再在那儿。要真堵得把候选的 mode 收到 `read-only` 再单开工作区写权,或者用 dsh 的 bwrap/Landlock 方言——未做。
   ⚠️ **读那一侧完全没堵**,这是 `workspace-write` 的设计:候选照样读得到仓库、读得到别的 run 目录。已实测候选会**自发**去找(`find / -iname '*harness*'`,还显式排除自己的工作区)。
-- [ ] 对抗测试:诱导候选挂插件、联网、改评测配置、用 `tools/pre-execute` 翻案、经嵌套子 agent 逃逸,断言全部被拒且留痕;
-- [ ] 审批答复循环:白名单内 allowed-once,名单外 rejected 并落审计。
+- [x] **对抗测试(2026-08-23)** —— `packages/examples/evo-harness/tests/adversarial.spec.ts`:七个禁用能力 × 四种调用方,外加一个抢在最前、不调 `next()` 的强制放行监听器。**不需要模型**,所以它进常规套件而不是 e2e——一套只有拿到 key 才跑的对抗测试,等于没有对抗测试。
+- [x] **审批答复循环(2026-08-23)** —— `evo_start` 走 `ctx.approval.request`,只在 `allowed-once` 时起跑,其余四种结局**各自照实报**。把它们合并成一句"被拒"会告诉模型"没有答复者"和"人说了不"是同一回事,于是它去重试错的那一个。`inject = ['tools', 'approval']`:没有审批服务这个插件根本挂不上,**没配答复者的部署是起不了跑,而不是无人值守地起跑**。测试 `tests/start.spec.ts`。
+
+- [x] **候选的编辑器根本不在沙箱里(2026-08-27,承重)** —— 比"临时区可写"严重得多的一条,而它躲过了前面每一轮检查。
+
+  `candidate.cordis.yml` 挂的是 `fs-local`,**裸文件系统**。旁边的注释写着 workspace-write 把改动限制在 `DSH_CWD` 里——那句话对 persistent Bash 是真的,**对编辑器一个字都不适用**,因为编辑器从不咨询那份策略。候选一句 `str_replace` 就能改写自己的评分函数,中间没有任何沙箱。
+
+  **注释声称的边界和实际生效的边界是两回事,而前面几轮我读的一直是注释。** 这和守卫判据那次同构:代码在那儿,写着一件它不做的事。
+
+  改法:换成 `fs-sandbox`,编辑器进同一份策略。
+
+  测试**放在 `packages/fs/tool-str-replace-editor/tests/tools.spec.ts` 而不是这个包里**——那是编辑器的边界,不是我们的。四步:工作区外的评分函数可读、直接写被拒(`FS_SANDBOX_DENIED`)、**经工作区内的软链写也被拒**、工作区内写成功。
+
+  两个细节是这条用例能证伪的原因:①评分函数建在 **home 底下而不是 `tmpdir()` 底下**——建在临时区里的话它按策略本来就可写,那个反例根本不可能失败;②最后那步工作区内写是前三步的活性对照。**这是这个项目第一次真的从沙箱里执行写操作,而不是读策略代码推结论。**
+
+- [x] **跟上上游 854 个提交(2026-08-27)** —— 「dsh preview 破坏性变更」这条风险的第一次真实检验。
+
+  ```
+  合并前:领先 7、落后 854        合并后:零冲突
+  dsh 插件 + llm + 编辑器:431 passed(合并前 243,上游加了 188)
+  tsc --noEmit:exit 0
+  EvoHarness 全量:945 passed
+  ```
+
+  **接缝选对了。** `python/sdk` 的 `run()` 签名一字未改,`RunResult` 只增不减(多了 `session_root`)。决定一那句"二者之间是 `AgentBackend` 这一个方法,不是嵌套控制流"在 854 个提交的跨度上兑现了——我们贴着的是 SDK 的返回结构,不是它的内部。
+
+  ⚠️ **`llm-deepseek` 的流式解析缺陷在上游仍然存在**:`origin/master` 的 `translate.ts` 与合并前逐字节相同。我们的修复现在是这个分支独有的,**没有回上游就意味着下次合并要重新面对它**。
+
+  ⚠️ **合并即换身份**:候选运行时的世界变了,`run_hash` 跟着变。`etp_one_dsv4` 那个跑通的演示现在只能读、不能 resume。这是决定四该有的行为,但要说在前面。
+
+- [x] **配置不再钉死在一台机器上(2026-08-27)** —— 四份 cordis 里的插件行原本写的是某个人 home 底下的绝对路径,**换台机器全部作废**。现在源文件写相对路径,`scripts/render-config.mjs` 在启动时渲染成本 checkout 的绝对路径。
+
+  这层间接不是装饰:**Cordis 的 patch 文件贡献配置,但不改变 profile 的模块基准**,所以一个相对名字直接交给 `--patch`,解析的是 profile 的目录而不是它自己所在的目录。渲染器在**一次替换都没发生时报错退出**,而不是写出一份原样保留相对名的配置——后者会在加载器那里失败,报的是一个谁也没写过的模块名。
 
 **常设条件:在对抗测试通过前不无人值守运行。** 有人盯着跑没问题,别让它悄悄变成常态。
 
@@ -366,7 +466,9 @@ Python SearchLoop
 
 若要做,只有一种形态成立:
 
-> **⚠️ 第三层仍未做,而且第一、二层的落地让它更容易被误以为做了。** 会话现在能显示卡片、能起草回复;它**不能签字**。TS 侧有一条断言钉死了工具集(`evo_decided` / `evo_decisions` / `evo_status` / `evo_trajectory`),加任何工具都得先改那个断言。
+> **⚠️ 第三层仍未做,而且第一、二层的落地让它更容易被误以为做了。** 会话现在能显示卡片、能起草回复;它**不能签字**。TS 侧有一条断言钉死了工具集(v7 起五个:`evo_decided` / `evo_decisions` / `evo_status` / `evo_task_check` / `evo_trajectory`),加任何工具都得先改那个断言。
+>
+> 那条断言已经挡过一次:`evo_task_check` 是**先改断言再进 host.ts** 的——它加载一个任务目录、报告读到了什么,什么都不启动。**能动手的一律归 `start.ts`,在审批接缝后面。**
 >
 > 那条断言第一版是按名字匹配 `/answer|approve|veto|decide|sign/`,**当场就把 `evo_decided` 误伤了**——而它只是读审计记录。改成精确清单:**决定一个工具危不危险的是它做什么,按名字既冤枉好人,也放得过一个叫 `evo_confirm` 的。**
 
@@ -423,7 +525,9 @@ Python SearchLoop
 | `peer_fetch_tool` 声明与实际不符 | 只进了 fingerprint,**没有探测**。指错配置提示词仍会撒谎 |
 | 用小任务验证后误判"限制不成问题" | v5 已发生一次:默认 48/120 而实测 10/15,预测的 `absorb` 硬失败没被触发。逼洞要显式压低 `max_turns` |
 | 每候选一个运行时太贵 | 实测约 1 秒,先按这个方案做;真成瓶颈再考虑复用,但复用会牺牲"一个运行时=一个候选沙箱" |
-| dsh preview 破坏性变更 | 身份含 cordis 配置哈希,升级即新实验 |
+| dsh preview 破坏性变更 | 身份含 cordis 配置哈希,升级即新实验。**v8 实测**:跨 854 个提交零冲突,SDK 的 `run()` 签名不变、`RunResult` 只增不减。仍存的边界:我们的 `llm-deepseek` 修复没回上游,**下次合并要重新面对它** |
+| **`evo_start` 只能起进化跑** | `launch/build.py` 无条件构造 `EvolutionSearchProfile`,`BasicSearchProfile` 只有 `evoharness.api.run()` 一个入口、没有任何 CLI。用 `--set population.parent_strategy=seed_only` 能把行为掰过去,但 **manifest 上写的仍是 `kind: evolution`**。所以从会话里起不了对照基线跑 |
+| 注释声称的边界不等于生效的边界 | **v8 又中一次**:`fs-local` 旁边的注释说 workspace-write 管着编辑器,而编辑器从不咨询那份策略。和守卫判据那次同构。**读注释不算验证,得让它执行一次** |
 | dsh 运行时进程泄漏 | `release()` 幂等且必调;DH-1 加僵尸进程检查 |
 | 跨语言调试成本 | 接缝是现有 `AgentBackend`;Python 侧保留 fake backend,两侧可独立对拍 |
 | 判题被拖进 agent 进程 | 决定二 + DH-3:判题留在 Python 进程内经 evoserve |
@@ -432,6 +536,11 @@ Python SearchLoop
 | 治理闭环当前是断的 | **v5 实测**:`evoharness/evoweb/` 已删,没有任何人类入口。DH-5 第二层是最便宜的补救 |
 | 决定的来源不可区分 | `ResearchDecision` 无来源字段,evoweb 签的与会话签的事后分不开;做第三层前必须补 |
 | 跳过安全测试后无人值守跑 | DH-4 的常设条件;audit 无法覆盖此项,只能靠纪律 |
+| **同一个模型名有两个来源** | **v7 已修**:`evo_start` 转发的就是 `candidate.cordis.yml` 读的那个 `DSH_MODEL`。**仍存的边界**:`candidate.cordis.yml` 里 `?? 'gpt-5.6'` 那个兜底还在,绕开 `dsh_demo.sh` 且不设 `DSH_MODEL` 时两边仍会分叉 |
+| **后端失败原文被丢弃** | **v7 已修**:`turn/end` 的 `reason.failure` 进 termination 事件与 run.log。**仍存的边界**:只捞了 `failure`,`turn/step` 的轮次结构照旧丢 |
+| **设置在命令行上静默消失** | **v7 已修**(`--set` 改 `extend`)。同形的风险在别处也可能有:任何 `nargs="*"` 且允许多次出现的参数都是这个形状 |
+| 早停把开放式搜索砍成一代 | 决定七:`stop_at_fitness` 缺省关,数字只能由任务的 `criterion.solved_at` 给。`minimize` 判据禁止声明 |
+| **演示任务悄悄不带 Lean 也能出分** | `tasks/authored/etp_one/grade.py` **没有离线兜底**,判题器不在就报错停跑。反例是 `experiments/etp_stage2/grade.py`——它的兜底对长跑是对的,搬到这里就变成"看起来跑通了" |
 
 ## 7. 明确不做
 
@@ -450,6 +559,8 @@ Python SearchLoop
 - 不给候选开放插件挂载、`tool-ask-user`、`tool-web`;
 - ~~不在 `cost_usd` 无法换算时返回 0~~ —— **v5 反转**:未配价就返回 0,但必须同时标 `cost_priced: false`;不得让缺价成为构造失败或运行阻断;
 - 不为次要指标建会变成阻断项的机制;可配置的数据不进代码常量(价目表即为此删除);
+- 不给演示任务加"判题器不在就退到离线代理"的兜底:退化后的输出与正常输出不可区分;
+- 不在 dsh 那边重写 run 目录的读取:TS 起子进程调 Python,表结构只有一处知道;
 - 不在替换 backend 后仍让 manifest 列出候选没见过的工具;
 - 不在对抗测试通过前无人值守运行;
 - 不让任何 agent(含研究 copilot)产生或改写 `ClaimAssessment`;
@@ -459,7 +570,9 @@ Python SearchLoop
 ## 8. 停止线
 
 ```text
-DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍) → DH-3(半) → [DH-4 已跳过] → DH-5 → DH-6
+DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍)
+  → DH-3(承重项已闭合,余成本对账) → DH-3.5(done,带 Lean 的单题闭环)
+  → DH-4(对抗测试与审批循环已补,沙箱遗留未堵) → DH-5(一、二层 done,三层未做) → DH-6
 ```
 
 - ~~DH-0 守卫拦不住插件挂载能力~~ —— **已通过**,含嵌套穿透与抗翻案;
@@ -470,10 +583,14 @@ DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍
 - ~~DH-2 身份未进 `spec_hashes`~~ —— **v6 解除**。仍存的边界:`fingerprint()` 只哈希 cordis 文件本身与 runtime 入口文件本身,**插件包内部按版本区间升级不会被发现**(`identity()` 的 v1 近似,原样继承)。锁文件或 `dsh --dump-config` 才能补上,尚未做;
 - DH-2 对拍不过:不得进入**用于产生结论的**真实进化(demo_counter 这种验证性跑不受此限,已跑);
 - DH-3 候选不可回溯:不得用于产生对外结论;
+- ~~DH-4 沙箱边界只有代码推论、没有执行证据~~ —— **v8 解除**:编辑器那条用例真的从沙箱里写了,四步含软链绕行与活性对照。仍存的边界:**读那一侧完全没堵**(`workspace-write` 的设计如此),且临时区仍可写——只是 run 目录不再在那儿;
+- **不得从 dsh 会话里起对照基线跑**:`evo_start` 走的 launch 路径表达不了 `BasicSearchProfile`。要 best-of-N 基线,当前只能写 Python 调 `evoharness.api.run()`;
 - DH-4 对抗测试未通过期间:不得无人值守运行(常设);
 - DH-5 反向断言不过(agent 的解读能变成 verdict):copilot 不得接入证据解读环节;
 - **DH-5 第三层未满足四项前提**(签字由人发起、`actor` 进程侧绑定、决定记来源、存在不依赖活会话的答复路径):dsh 会话不得具备任何答复卡片的能力,只做第一、二层;
 - ~~治理闭环当前仍是断的~~ —— **2026-08-23 解除**:`python -m evoharness.research answer` 是耐久签署入口,读在 `readout`、写在 `research`,两边分开。仍存的边界:**会话里签不了字**(DH-5 第三层未做),而且 actor 靠的是操作系统用户——**同机多人或共享账号下这不构成鉴权**;
+- **不得让启动器决定一个任务的分数上限**(决定七)。`stop_at_fitness` 可以由调用方显式设,但那个数字的来源只能是任务的 `criterion.solved_at`,不能是 `evo_start` 这类通用入口里的常量;
+- **不得声称候选运行时用的是哪个模型,除非那个名字和 cordis catalog 读的是同一个变量**。指纹只保证两次声明不同的跑不会被当成同一实验,不保证声明是真的;
 - 任何阶段:判题不得进 dsh 进程,候选不得触达守卫拒绝清单上的能力,换 cordis 配置不得 resume 旧 run 目录,判定不得由 agent 产出。
 
 ## 9. 一句话主张

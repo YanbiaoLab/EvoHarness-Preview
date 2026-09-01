@@ -701,7 +701,8 @@ evoharness/research/
 - [x] 实现 ExperimentOutcome 和 append-only ResearchDecision；
 - [x] `ExperimentCompiler` v1 为校验模式:领域构建三元组,runner 以 hash 相等强制确定性（生成模式待 Registry 能存领域构建配方）；
 - [x] ExperimentSpec 启动前冻结 prediction、control、falsification、stopping rule 和预算（改任一项 = 新实验身份）；
-- [x] 首版复用 run directory 和原子 JSON/JSONL，不先引入服务端数据库；
+- [x] 首版复用 run directory 和原子 JSON/JSONL；I-5 为解决并发回答与双写，
+  将 DecisionRequest/ResearchDecision 升级为同一份本地 SQLite 事务账本（不引入服务端）；
 - [x] 将 `experiment_id`、`hypothesis_id` 和所有 Spec hash 写入 manifest（`experiment_ref` section）；
 - [ ] 将实验引用写入 Candidate metadata、Evidence 和 RunReport（v1 追溯链为 Candidate → manifest → experiment,字段级引用待 I-4 信封被 Claim 消费时）；
 - [x] resume 时验证三个 Spec hash（checkpoint 指纹已含之,ExperimentSpec 冻结同一组 hash,传递性覆盖）；
@@ -711,12 +712,12 @@ evoharness/research/
 
 ```text
 research/
+  research.sqlite3              # Inbox request + ResearchDecision 原子账本
   goals/
   hypotheses/
   experiments/<experiment_id>/
     spec.json
-    outcomes/
-    decisions.jsonl
+    outcomes.jsonl
 ```
 
 验收：任何 Candidate 都能追溯到 Hypothesis、Experiment 和评测协议；Outcome 与 Decision
@@ -757,17 +758,33 @@ evoharness/research/
 evoharness/research/
   routing.py
   inbox.py
+  gate.py
 ```
 
-- [ ] 将现有 proposal JSON 升级为类型化 DecisionRequest；
-- [ ] 支持 approve、branch、veto、revise、request-more-evidence 和
-  approve-protocol-change；
-- [ ] 每个动作都生成 append-only ResearchDecision；
-- [ ] 只自动执行已冻结协议、预先批准预算和低风险复评内的动作；
-- [ ] 将突破、证据冲突、协议变更、关键排名翻转和高预算扩展送入人工队列；
-- [ ] UI 展示 claim、assessment、coverage、cost、alternatives 和 consequence of waiting；
-- [ ] UI 不提供原地修改 ExperimentSpec 的能力；
-- [ ] 建立 Core 与 Research 两张独立 Scorecard。
+- [x] 建立类型化 DecisionRequest（research/inbox.py,卡片自足回答四问；
+  kind 通过中心策略固定 allowed actions/default/approval，调用者不能自行降级）；
+- [x] 支持 approve、branch、veto、revise、request-more-evidence 和
+  approve-protocol-change（动作与卡片类型绑定；动作效果执行器仍待各领域接入）；
+- [x] 每个 Inbox 动作都在 SQLite 事务中生成唯一、append-only ResearchDecision
+  （带 request_id/actor/reason/timestamp；并发回答只有一个胜者）；
+- [x] 将 AUTO_EXECUTABLE 从封闭白名单升级为真实执行门（research/gate.py）：
+  白名单只回答"原则上要不要人"，门再验冻结协议、可信总成本账本与预先批准
+  预算；会花钱的动作（SPENDS_BUDGET）三条全过才放行，记录与隔离类动作只
+  验协议冻结。门在 ResearchRouter 上常开，被拒即 AutoExecutionDenied，
+  不静默降级。总成本只认 BudgetMeter 的 budget.json（含提案 LLM 花费）；
+  只有 ExperimentOutcome 的评测成本即判账本不可信；
+- [x] 将 breakthrough/conflict/ranking-flip/budget-expansion 的工厂接入
+  Assessment/Runner 事件流并自动提交 Inbox（ResearchRouter.route_run 在
+  run_experiment 出 outcome 后执行；PromotionPolicy 换冠军时出排名翻转卡）；
+  protocol-change 仍由 establish_baseline 显式提交。卡片提交不阻塞 run；
+  自动执行也写进 routing.jsonl，scripts/audit.py --research 判其活性；
+- [x] UI 展示 claim、assessment、coverage、cost、alternatives 和 consequence of waiting
+  （evoweb 研究收件箱；coverage 由 evidence_refs 回到 run 目录解析，
+  解析不到的引用如实标注而不是省略）；
+- [x] UI 不提供原地修改 ExperimentSpec 的能力；批准人来自服务端 --actor，
+  请求体带 actor 即 400——卡片不能提名自己的批准人；
+- [x] 建立 Core 与 Research 两张独立 Scorecard（Core 终态以 finalized manifest
+  为准；Research 成本明确只统计 Outcome 中已记录的 eval cost；发现延迟置 None）。
 
 验收：研究者不阅读完整 Agent transcript，也能回答“发生了什么、证据够不够、需要决定
 什么、继续要花多少”；每次人工决定都有 actor、reason、timestamp 和 evidence refs。

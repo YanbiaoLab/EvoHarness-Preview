@@ -68,11 +68,12 @@ The console binds to `127.0.0.1:7861` by default.
 
 ## Using a real model
 
-The experiment driver accepts any OpenAI-compatible endpoint:
+The experiment driver defaults to the Aliyun Model Studio OpenAI-compatible
+endpoint. Supply the credential through the environment; never put it in a
+tracked file:
 
 ```bash
-export EVOHARNESS_API_BASE="https://your-endpoint.example/v1"
-export EVOHARNESS_API_KEY="your-api-key"
+export ALIYUN_MAAS_API_KEY="your-api-key"
 
 uv run python -m experiments.run_evolution \
   --recipe e3r \
@@ -81,6 +82,9 @@ uv run python -m experiments.run_evolution \
   --budget-usd 5 \
   --run-dir results/live-demo
 ```
+
+Set `EVOHARNESS_API_BASE` to override the default endpoint, or use the legacy
+`EVOHARNESS_API_KEY` credential name for an existing deployment.
 
 Never commit API keys. Use `--budget-usd` and task-specific evaluation limits
 before starting a live run.
