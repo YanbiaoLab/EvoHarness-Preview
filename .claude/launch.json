@@ -2,10 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "evoweb",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "evoharness.evoweb", "results", "--port", "7861"],
-      "port": 7861
+      "name": "dsh-web",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/zhangkang/Documents/Projects/deepseek-harness && exec node --import tsx/esm apps/cli/src/bin.ts --profile web"
+      ],
+      "port": 3080
     }
   ]
 }

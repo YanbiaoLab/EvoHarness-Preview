@@ -116,6 +116,34 @@ def test_live_keeps_the_existing_endpoint_and_key_overrides(tmp_path, monkeypatc
     }
 
 
+def test_live_prefers_the_project_credential_over_the_vendor_one(tmp_path, monkeypatch):
+    """Both set, and the project name wins.
+
+    Not a tie-break for its own sake: the endpoint comes from
+    `EVOHARNESS_API_BASE`, so the key sharing that prefix is the one known to
+    be good there. Reading the vendor name first sent an Aliyun credential to
+    whatever gateway the base pointed at, which fails as an authorization
+    error and reads as an expired key.
+    """
+    captured = {}
+    original = launch_build_module.make_openai_compat_transport
+
+    def recording_transport(api_base, api_key, timeout_s=120.0):
+        captured.update(api_base=api_base, api_key=api_key)
+        return original(api_base, api_key, timeout_s=timeout_s)
+
+    monkeypatch.setenv("EVOHARNESS_API_BASE", "https://override.example/v1")
+    monkeypatch.setenv("EVOHARNESS_API_KEY", "project-test-key")
+    monkeypatch.setenv("ALIYUN_MAAS_API_KEY", "vendor-test-key")
+    monkeypatch.setattr(
+        launch_build_module, "make_openai_compat_transport", recording_transport
+    )
+
+    build(make_config(tmp_path, live=True))
+
+    assert captured["api_key"] == "project-test-key"
+
+
 def test_live_without_any_key_fails_before_a_run_starts(tmp_path, monkeypatch):
     monkeypatch.delenv("ALIYUN_MAAS_API_KEY", raising=False)
     monkeypatch.delenv("EVOHARNESS_API_KEY", raising=False)

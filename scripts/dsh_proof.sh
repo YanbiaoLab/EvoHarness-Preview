@@ -59,9 +59,6 @@ fi
 if [ -f "$HARNESS_ROOT/.env" ]; then
   set -a; . "$HARNESS_ROOT/.env"; set +a
 fi
-if [ -f "$DSH_ROOT/.env.moved-by-demo.bak" ]; then
-  set -a; . "$DSH_ROOT/.env.moved-by-demo.bak"; set +a
-fi
 
 if [ -z "${EVO_PYTHON:-}" ]; then
   if [ -x "$HARNESS_ROOT/.venv/bin/python" ]; then
@@ -74,23 +71,25 @@ fi
   "no Python interpreter found: set EVO_PYTHON or create $HARNESS_ROOT/.venv"
 export EVO_PYTHON
 
-# The same credential under both names: the dsh catalog reads the Aliyun one,
-# EvoHarness's own transport reads its own. Never reinterpret an existing
-# non-Aliyun credential as an Aliyun one.
+# One name for one credential: `EVOHARNESS_API_KEY`, which is what every
+# cordis config, the proof CLI and the launch builder now read. A machine
+# configured before the endpoint moved off Aliyun still supplies the old name,
+# so it is adopted here — in this direction only.
+#
+# The reverse copy used to be here too, and its own comment forbade it: a key
+# adopted INTO `ALIYUN_MAAS_API_KEY` is a credential relabelled as belonging to
+# a vendor it does not belong to, and the config reading that name then says
+# Aliyun while spending against somewhere else.
 if [ -z "${EVOHARNESS_API_KEY:-}" ] && [ -n "${ALIYUN_MAAS_API_KEY:-}" ]; then
   export EVOHARNESS_API_KEY="$ALIYUN_MAAS_API_KEY"
-fi
-if [ -z "${ALIYUN_MAAS_API_KEY:-}" ] && [ -n "${EVOHARNESS_API_KEY:-}" ]; then
-  export ALIYUN_MAAS_API_KEY="$EVOHARNESS_API_KEY"
 fi
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$DSH_ROOT/python/sdk/src"
 
 [ -f "$DSH_EVO_ROOT/fixtures/host.proof.cordis.yml" ] || fail \
   "proof patch missing: $DSH_EVO_ROOT/fixtures/host.proof.cordis.yml
-copy integrations/dsh/host.proof.cordis.yml and integrations/dsh/proof.ts into
-that package first"
+run scripts/install_dsh_presets.sh, which copies the authored package there"
 [ -f "$DSH_EVO_ROOT/src/proof.ts" ] || fail \
-  "proof plugin missing: $DSH_EVO_ROOT/src/proof.ts"
+  "proof plugin missing: $DSH_EVO_ROOT/src/proof.ts — run scripts/install_dsh_presets.sh"
 [ -f "$DSH_EVO_ROOT/scripts/render-config.mjs" ] || fail \
   "cordis renderer missing: $DSH_EVO_ROOT/scripts/render-config.mjs"
 "$EVO_PYTHON" -c 'import evoharness' 2>/dev/null || fail \

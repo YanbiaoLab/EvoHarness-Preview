@@ -118,8 +118,16 @@ def build(cfg: LaunchConfig) -> BuiltRun:
     transport = task.transport
     if cfg.live:
         api_base = os.environ.get("EVOHARNESS_API_BASE", DEFAULT_LLM_API_BASE)
-        api_key = os.environ.get("ALIYUN_MAAS_API_KEY") or os.environ.get(
-            "EVOHARNESS_API_KEY"
+        # `EVOHARNESS_API_KEY` first, and the pairing with `EVOHARNESS_API_BASE`
+        # above is the reason: a key and the endpoint it is good at belong to
+        # the same gateway, and only one of these two names says which gateway
+        # without naming a vendor. That mattered the moment the endpoint moved
+        # off Aliyun — `ALIYUN_MAAS_API_KEY` then held a credential for
+        # somewhere else, and every config reading it described the wrong
+        # provider. It stays accepted so a machine configured before the move
+        # keeps running; it is no longer what anything is named after.
+        api_key = os.environ.get("EVOHARNESS_API_KEY") or os.environ.get(
+            "ALIYUN_MAAS_API_KEY"
         )
         if not api_key:
             # Raised rather than routed through `parser.error`: the assembly
@@ -127,8 +135,8 @@ def build(cfg: LaunchConfig) -> BuiltRun:
             # resume — and reaching back into argparse is the one line that
             # would keep it here.
             raise LaunchConfigError(
-                "--live requires ALIYUN_MAAS_API_KEY "
-                "(or legacy EVOHARNESS_API_KEY)"
+                "--live requires EVOHARNESS_API_KEY "
+                "(ALIYUN_MAAS_API_KEY is still read for older deployments)"
             )
         # Reasoning models spend minutes before the first token, and this
         # task's prompt is large (task brief + research brief + a

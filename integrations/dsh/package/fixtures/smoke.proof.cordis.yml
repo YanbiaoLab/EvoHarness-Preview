@@ -1,0 +1,130 @@
+# GENERATED for the proof smoke -- derived from candidate.cordis.yml so the
+# service composition cannot drift, with the candidate-only rows (the DH-0
+# guard and the peer reader) replaced by the proof tools. Not for a real
+# session: use `scripts/dsh_proof.sh`, which patches your own dsh profile.
+
+- id: evo-proof
+  name: '../src/proof.ts'
+
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+  config:
+    maxTokensAsSuccess: false
+
+# A hand-declared OpenAI-compatible route rather than `dsh-llm-deepseek`.
+# That adapter parses DeepSeek's own streaming shape, where a continuation
+# tool-call delta OMITS id and name; an OpenAI-compatible gateway sends them
+# as "" and null instead, which its `!== undefined` guards accept and write
+# over the real values. Every tool call then arrives named "" and the
+# candidate can do nothing at all. See translate.ts:163.
+- id: llm
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      evo-gateway:
+        displayName: EvoHarness model gateway
+        apiKeyEnv: EVOHARNESS_API_KEY
+        api: openai-responses
+        baseURL: !!js process.env.EVOHARNESS_API_BASE ?? 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+        streamIdleTimeoutMs: 172800000
+        models:
+          - id: !!js process.env.DSH_MODEL ?? 'gpt-5.6'
+            contextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 262144)
+
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+
+# The minimal SDK template ships `danger-full-access`, which is wrong for an
+# untrusted candidate: it could leave its workspace and edit the evaluator that
+# scores it. `workspace-write` confines file modification to DSH_CWD, which is
+# the per-candidate workspace.
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: workspace-write
+    workspaceRoot: !!js process.env.DSH_CWD ?? process.cwd()
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+- id: pty
+  name: '@deepseek-ai/dsh-terminal'
+
+- id: terminal-bash
+  name: '@deepseek-ai/dsh-terminal-bash'
+  config:
+    timeoutMs: 300000
+
+# The editor and persistent Bash share the workspace-write policy.
+# Reads outside DSH_CWD remain allowed. Mutations are confined to DSH_CWD
+# and the platform temp roots granted by the sandbox policy.
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+  config:
+    cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a helpful software engineer assistant.'
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+
+# The template's description claimed "You don't have access to the internet via
+# this tool", and that line is gone because it was not true. dsh's sandbox seam
+# states its own scope plainly: "File effects are the whole policy vocabulary —
+# the seam expresses no network, process, syscall, device, or credential
+# restrictions." Nothing here confines the network, so the claim was a promise
+# in a prompt with no mechanism behind it, and a candidate that tested it would
+# have found that out before anyone reading the config did.
+#
+# It is not replaced with a different unenforceable claim. Until confinement
+# exists (bwrap can `--unshare-net`; this profile does not), no task whose
+# answers are reachable over a network may be run here. See DH-4 in the
+# integration plan.
+- id: persistent-bash
+  name: '@deepseek-ai/dsh-tool-bash-persistent'
+  config:
+    timeoutMs: 300000
+    description: |-
+      Run commands in a bash shell
+      * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+      * You do have access to a mirror of common linux and python packages via apt and pip.
+      * State is persistent across command calls and discussions with the user.
+      * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+      * Please avoid commands that may produce a very large amount of output.
+      * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+
+- id: str-replace-editor
+  name: '@deepseek-ai/dsh-tool-str-replace-editor'
+  config:
+    maxOutputChars: 16000
+
+# The candidate may delegate; the guard has to cover its descendants too, so
+# the capability stays mounted rather than being removed to simplify the smoke.
+- id: subagent
+  name: '@deepseek-ai/dsh-subagent'
+
+- id: subagent-spawn-in-process
+  name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+  config:
+    providerName: spawn
+
+- id: tool-subagent
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent
+    enableRunInBackground: false
+    backgroundMode: one-shot
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+    compression: none

@@ -1,8 +1,10 @@
 /**
  * Five tools that let a dsh session drive EvoHarness's proof graph.
  *
- * Copy or symlink this next to the other evo-harness example plugins and add a
- * row for it to the host cordis config; see `host.proof.cordis.yml` beside it.
+ * Copy or symlink this next to the other evo-harness example plugins, then
+ * either add a row for it to the host cordis config (`host.proof.cordis.yml`
+ * beside this file) or install the agent preset that mounts it
+ * (`presets/proof/`, installed by `scripts/install_dsh_presets.sh`).
  *
  * Every tool shells out to `python -m evoharness.proof.cli`, for the reason
  * `peer.ts` already gives: the schema lives in Python, and a second reader
@@ -20,11 +22,18 @@
  * @module evoharness/integrations/dsh/proof
  */
 
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { HARNESS_ENV, callHarness, requireEnv } from './cli.ts'
+import {
+  HARNESS_SETTINGS,
+  type Harness,
+  callHarness,
+  modelCredential,
+  optionalSetting,
+  resolveSettings,
+} from './cli.ts'
 
 export const name = 'evo-proof'
 export const inject = ['tools']
@@ -37,25 +46,71 @@ const WORK_DIR = '.evo'
 
 const MODULE = 'evoharness.proof.cli'
 
+/**
+ * Ceiling on one `proof_attack`, which runs a solver rather than a query.
+ *
+ * Bounded from both sides. Below it, the work itself: a solver edits Lean and
+ * compiles it repeatedly, so minutes are its normal shape. Above it, the
+ * session's own request timeout — a tool call that outlives the turn takes the
+ * conversation with it — and that number belongs to the deployment, which is
+ * what `attackTimeoutMs` is for.
+ */
+const ATTACK_TIMEOUT_MS = 900_000
+
+/**
+ * Ceiling on a call that compiles: `proof_sketch` and `proof_assemble`.
+ *
+ * Must stay above the Python side's own `--lean-timeout`. Whichever ceiling
+ * fires first decides what the caller is told, and only Lean's timeout
+ * produces a verdict about the proof; this one firing first severs a call that
+ * was about to answer and leaves an unjudged decomposition on the board.
+ *
+ * Sized for a Mathlib import, which alone costs tens of seconds before the
+ * goal is even read. What a call costs in money says nothing about what it
+ * costs in time: these two spend no model budget and are the slowest in the
+ * set after an attack.
+ */
+export const LEAN_TIMEOUT_MS = 360_000
+
+/**
+ * Where this deployment keeps EvoHarness, and how long it may spend.
+ *
+ * Every field is optional and every one has an environment variable behind
+ * it: a runtime launched by `scripts/dsh_proof.sh` sets those variables, and
+ * an agent preset — mounted by a dsh the launcher never touched — sets these
+ * instead. Config wins where both are present.
+ *
+ * No runtime schema, unlike a first-party plugin row: this package carries no
+ * schema dependency, and a wrong path fails the first call with the path in
+ * the message rather than silently doing something else.
+ */
+export interface Config {
+  /** Interpreter EvoHarness is installed in. Env: `EVO_PYTHON`. */
+  readonly python?: string
+  /** Checkout `evoharness` imports from. Env: `EVO_HARNESS_ROOT`. */
+  readonly harnessRoot?: string
+  /** Lake project providing Mathlib; omit for core-Lean goals. Env: `EVO_LEAN_PROJECT`. */
+  readonly leanProject?: string
+  /** Ceiling on one `proof_attack`, in milliseconds. */
+  readonly attackTimeoutMs?: number
+  /**
+   * Ceiling on a call that compiles (`proof_sketch`, `proof_assemble`), in
+   * milliseconds. Keep it above the Python side's `--lean-timeout` so a slow
+   * compile comes back as Lean's verdict rather than as a severed call.
+   */
+  readonly leanTimeoutMs?: number
+}
+
 /** Render whatever the CLI printed, unchanged. It is already one json object. */
 const passthrough = {
   schema: { type: 'string' as const },
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-/**
- * Resolve the environment at CALL time, as `peer.ts` does.
- *
- * Doing it in `apply` would fail plugin load when a variable is missing, which
- * takes the whole runtime down; doing it here fails one tool with a message
- * naming what to set, and the session carries on.
- */
-function harness(): { python: string, root: string } {
-  const env = requireEnv(HARNESS_ENV)
-  return {
-    python: env['EVO_PYTHON'] as string,
-    root: env['EVO_HARNESS_ROOT'] as string,
-  }
+/** The interpreter and checkout, from the row or the environment. */
+function harness(config: Config): Harness {
+  const resolved = resolveSettings(config, HARNESS_SETTINGS)
+  return { python: resolved.python as string, root: resolved.harnessRoot as string }
 }
 
 /**
@@ -74,7 +129,7 @@ function harness(): { python: string, root: string } {
  * directory keeps answering `no goals`. Refusing costs one turn; the fallback
  * costs the run and says nothing.
  */
-function workspace(exec: ToolRunContext): string {
+function sessionDir(exec: ToolRunContext): string {
   const cwd = exec.agent?.session.header.cwd
   if (cwd === undefined || cwd === '') {
     throw new Error(
@@ -83,19 +138,53 @@ function workspace(exec: ToolRunContext): string {
       + 'session in the directory the proof belongs to and call again.',
     )
   }
-  return join(cwd, WORK_DIR)
+  return cwd
 }
 
+/** Where THIS session's graph lives: `<session workspace>/.evo`. */
+function workspace(exec: ToolRunContext): string {
+  return join(sessionDir(exec), WORK_DIR)
+}
+
+
+function resolveOut(exec: ToolRunContext, name: string): string {
+  if (name === '' || name === '.' || name === '..') {
+    throw new Error('out must be the name of a file')
+
+  }
+  if (isAbsolute(name) || /[/\\]/.test(name)) {
+    throw new Error(
+      `out must be a plain file name, not a path: ${name}. The assembled `
+      + "proof is written into this session's own directory.",
+    )
+  }
+  const dir = sessionDir(exec)
+  const resolved = join(dir, name)
+  const inside = relative(dir, resolved)
+
+  if (inside.startsWith('..') || isAbsolute(inside)) {
+    throw new Error(`out resolves outside the session workspace: ${name}`)
+  }
+  return resolved
+
+}
+
+
 /** Flags every subcommand accepts, from the session and the deployment. */
-function commonFlags(exec: ToolRunContext): string[] {
-  const project = process.env[LEAN_PROJECT]
+function commonFlags(exec: ToolRunContext, config: Config): string[] {
+  const project = optionalSetting(config.leanProject, LEAN_PROJECT)
   return [
     '--work', workspace(exec),
-    ...project === undefined || project === '' ? [] : ['--lean-project', project],
+    ...project === undefined ? [] : ['--lean-project', project],
   ]
 }
 
-export function apply(ctx: Context) {
+/**
+ * Register the five tools.
+ * @param ctx - the mounting context; under a preset, one agent's scope.
+ * @param config - this deployment's binding, empty when it uses the variables.
+ */
+export function apply(ctx: Context, config: Config = {}) {
 
   ctx.tools.register(defineTool({
     name: 'proof_open',
@@ -112,8 +201,8 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness(),
-      ['-m', MODULE, ...commonFlags(exec), 'open',
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'open',
         '--statement', String(args.statement),
         ...(args.preamble ? ['--preamble', String(args.preamble)] : []),
         ...(args.label ? ['--label', String(args.label)] : [])],
@@ -133,8 +222,8 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness(),
-      ['-m', MODULE, ...commonFlags(exec), 'status',
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'status',
         ...(args.goal_id ? ['--goal', String(args.goal_id)] : [])],
       exec.signal, 'reading the board',
     ),
@@ -158,11 +247,12 @@ export function apply(ctx: Context) {
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness(),
-      ['-m', MODULE, ...commonFlags(exec), 'sketch',
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'sketch',
         '--goal', String(args.goal_id),
         '--proposal', String(args.proposal)],
       exec.signal, 'validating a decomposition',
+      { timeoutMs: config.leanTimeoutMs ?? LEAN_TIMEOUT_MS },
     ),
   }))
 
@@ -195,14 +285,18 @@ export function apply(ctx: Context) {
       },
     },
     output: passthrough,
-    execute: (args, exec) => callHarness(
-      harness(),
-      ['-m', MODULE, ...commonFlags(exec), 'attack',
+    execute: async (args, exec) => callHarness(
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'attack',
         '--goal', String(args.goal_id),
         ...(args.budget === undefined ? [] : ['--budget', String(args.budget)]),
         ...(args.level ? ['--level', String(args.level)] : []),
         ...(args.allow_unaccepted_route ? ['--allow-unaccepted-route'] : [])],
       exec.signal, 'attacking a goal',
+      {
+        timeoutMs: config.attackTimeoutMs ?? ATTACK_TIMEOUT_MS,
+        env: await modelCredential(ctx),
+      },
     ),
   }))
 
@@ -216,17 +310,23 @@ export function apply(ctx: Context) {
       + 'compiled and which axioms Lean says it depends on.',
     parameters: {
       goal_id: { type: 'string', description: 'The root goal.', required: true },
-      out: { type: 'string', description: 'Where to write the assembled proof.' },
+      out: {
+        type: 'string',
+        description:
+          "File NAME to write the assembled proof to, in this session's own "
+          + 'directory. A name, not a path.',
+      },
       show_text: { type: 'boolean', description: 'Include the proof in the reply.' },
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
-      harness(),
-      ['-m', MODULE, ...commonFlags(exec), 'assemble',
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'assemble',
         '--goal', String(args.goal_id),
-        ...(args.out ? ['--out', String(args.out)] : []),
+        ...(args.out ? ['--out', resolveOut(exec, String(args.out))] : []),
         ...(args.show_text ? ['--show-text'] : [])],
       exec.signal, 'assembling the proof',
+      { timeoutMs: config.leanTimeoutMs ?? LEAN_TIMEOUT_MS },
     ),
   }))
 }

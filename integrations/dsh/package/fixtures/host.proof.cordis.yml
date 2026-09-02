@@ -1,10 +1,13 @@
 # The proof tools, as a PATCH onto whatever configuration your dsh already runs.
 #
-# Not a deployment. `demo.cordis.yml` beside this one says the same thing and
-# says why: patch files resolve modules from the selected dsh profile rather
-# than from this directory, so a launcher has to render these portable relative
-# source paths to checkout-local absolute paths before boot. Do not pass this
-# source file to `--patch` directly -- use `scripts/dsh_proof.sh`.
+# Not a deployment, and not the usual way in: `scripts/install_dsh_presets.sh`
+# installs 证明模式 as an agent preset, which needs no patch file at all.
+#
+# This route remains for a session started by `scripts/dsh_proof.sh`. Patch
+# files resolve modules from the selected dsh profile rather than from this
+# directory, so that launcher renders these portable relative source paths to
+# checkout-local absolute paths before boot. Do not pass this source file to
+# `--patch` directly.
 #
 # This is the HOST side: a person and an agent working on a proof together. It
 # must never be merged into a CANDIDATE's config. A candidate holding
@@ -50,9 +53,12 @@
     providers:
       krill:
         displayName: Krill AI gateway
-        # The proof tools read EVOHARNESS_API_KEY for `proof_attack`; using the
-        # same name here keeps one credential rather than two that can drift
-        # into disagreeing about which endpoint a run was billed to.
+        # `EVOHARNESS_API_KEY` is the ONE credential name across this project:
+        # the proof CLI, the launch builder, the candidate runtime and this
+        # session all read it, and it pairs with `EVOHARNESS_API_BASE` below.
+        # Two names for one credential drift into disagreeing about which
+        # endpoint a run was billed to, and a name carrying a vendor
+        # (`ALIYUN_MAAS_API_KEY`) became wrong the moment the endpoint moved.
         apiKeyEnv: EVOHARNESS_API_KEY
         api: openai-responses
         baseURL: !!js process.env.EVOHARNESS_API_BASE ?? 'https://api.krill-ai.net/codex/v1'

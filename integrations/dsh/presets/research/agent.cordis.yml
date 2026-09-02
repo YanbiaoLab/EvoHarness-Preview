@@ -1,0 +1,152 @@
+# The `research` agent preset — dsh's Research Mode, mounted per session.
+#
+# A TEMPLATE, not an installable preset: the `@...@` tokens below name this
+# machine's EvoHarness, and `scripts/install_dsh_presets.sh` fills them in on
+# the way to `$DSH_HOME/.agent-presets/research/`.
+#
+# Reading a run, reading the decision queue and starting a run with a person's
+# approval are the governance surface, not a demonstration of it. Mounting them
+# as a preset is what lets a session have them without a launcher configuring
+# nine variables around it.
+#
+# This is the HOST side and it must never be merged into a CANDIDATE's config.
+# `evo_trajectory` answers about the whole population, so a candidate holding
+# it would see every rival's score and bypass the inspiration selection the
+# search is tuning.
+#
+# What the model may name is a NAME, never a path. Every root below is the
+# deployment's choice: a cordis config named by the model would be the model
+# choosing the candidate's whole capability set, and a task directory named by
+# the model would be the model choosing the function that scores it.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      You help run and read EvoHarness experiments. The run directories and the
+      decision ledger are the record; this conversation is not.
+
+      Read before you conclude. evo_status says where a run got to, and
+      evo_trajectory says what each generation actually tried — a run that
+      stopped is not the same as a run that failed, and `proposer_dead`,
+      `budget-exhausted` and an infrastructure fault say nothing about whether
+      the idea was any good.
+
+      Starting a run spends hours of compute and real money, and it keeps
+      running after this session ends. evo_start therefore ASKS a person; it
+      does not launch. Check the task with evo_task_check first — a task that
+      fails to load wastes the approval — and say in `purpose` what the run is
+      meant to find out, because that sentence is what the person is deciding
+      on and it goes into the audit.
+
+      You cannot answer a decision request. evo_decisions shows the queue and
+      the cards; you may summarise one and draft a reply for a person to
+      consider, and saying you have answered one is false. Signing is
+      `python -m evoharness.research answer`, run by a person.
+
+      Nothing here adjudicates. A verdict on whether a claim is supported comes
+      from the assessor, not from your reading of a trajectory.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── reading runs and the ledger ─────────────────────────────────────────────
+
+# Relative specifiers, resolved against THIS directory: the installer puts
+# links to the plugins beside this file rather than absolute paths in it. The
+# links point into the dsh checkout on purpose — the modules import
+# `@deepseek-ai/dsh-tools`, which resolves from where a file really lives, and
+# nothing under `$DSH_HOME` can reach the harness's own dependencies.
+- id: evo-host
+  name: './host.ts'
+  config:
+    python: '@EVO_PYTHON@'
+    harnessRoot: '@EVO_HARNESS_ROOT@'
+    # NOT under a temp root: a workspace-write candidate may write there, and
+    # run directories are what its own score is read from.
+    runsRoot: '@EVO_RUNS_ROOT@'
+    tasksRoot: '@EVO_TASKS_ROOT@'
+    # Governance only. Empty leaves evo_decisions and evo_decided reporting
+    # what to set, while reading runs keeps working — a deployment may want
+    # runs without a ledger, and demanding both would fail the common case.
+    researchRoot: '@EVO_RESEARCH_ROOT@'
+
+# Starting a run. Its own row, and its own plugin, because a deployment that
+# wants people to watch runs without being able to launch them mounts only the
+# row above and deletes this one.
+#
+# `evo_start` asks `ctx.approval.request` and launches only on `allowed-once`.
+# It injects `approval`, so it will not mount at all without that service, and
+# with no answerer configured the seam fails closed and every attempt is
+# refused as `unavailable`. Both are intended: a deployment that cannot ask a
+# person cannot launch.
+- id: evo-start
+  name: './start.ts'
+  config:
+    python: '@EVO_PYTHON@'
+    harnessRoot: '@EVO_HARNESS_ROOT@'
+    runsRoot: '@EVO_RUNS_ROOT@'
+    tasksRoot: '@EVO_TASKS_ROOT@'
+    dshConfig: '@EVO_DSH_CONFIG@'
+    dshRuntime: '@EVO_DSH_RUNTIME@'
+    dshProvider: '@EVO_DSH_PROVIDER@'
+    # The same name the candidate config builds its model catalog from. A
+    # catalog holding one name answers 404 to every request for another, and
+    # the run then stops as a dead proposer — a verdict about a proposer that
+    # was working.
+    model: '@DSH_MODEL@'
+
+# ── reading and running things ──────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# A trajectory read is large and gets re-read as a run moves, so the
+# transcript grows faster than the work does. `tokenMeter` stays on the host
+# plane; these rows resolve that one instance.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024

@@ -182,12 +182,12 @@ flowchart TD
 | 后端 | `evoharness/core/agent/dsh_backend.py` | 起运行时、翻译事件流、算 token、映射终止原因 |
 | 读出面 | `evoharness/readout/` | `peer.py` 给候选的窄视图；`status.py` / `detail.py` / `governance.py` 给宿主 |
 | 起跑 | `evoharness/launch/` | `evo_start` 最终调的是 `start.py` |
-| 启动脚本 | `scripts/dsh_demo.sh` | 配齐环境变量、自检、探判题器，然后拉起 `dsh web` |
+| 安装器 | `scripts/install_dsh_presets.sh` | 渲染两个 agent preset 进 `$DSH_HOME/.agent-presets/`，路径写进插件行而不是 export |
 | 桥 | `deepseek-harness/python/sdk/src/deepseek_harness/` | 挂在 `PYTHONPATH` 上，**不是 pip 装的** |
 | 插件 | `deepseek-harness/packages/examples/evo-harness/src/` | `index.ts` 守卫、`peer.ts` 候选侧、`host.ts` 只读、`start.ts` 审批起跑 |
 | 配置 | 同上 `fixtures/*.cordis.yml` | 四份，**每份是一条信任边界，合并即边界消失** |
 
-**跨机器路径已经收拢。** 候选配置使用相对插件路径，因此进入运行身份的内容哈希不含 checkout 位置；宿主 patch 保存稳定包名，由 `dsh_demo.sh` 根据唯一的 `DSH_ROOT` 渲染为临时的机器本地路径。两个仓库同级时脚本自动发现 DSH，否则只需显式设置 `DSH_ROOT`，不再修改 Cordis 源文件。
+**跨机器路径已经收拢。** 候选配置使用相对插件路径，因此进入运行身份的内容哈希不含 checkout 位置；宿主侧由 `install_dsh_presets.sh` 根据唯一的 `DSH_ROOT` 把插件符号链接进 preset 目录，组合文件里没有绝对路径。两个仓库同级时脚本自动发现 DSH，否则只需显式设置 `DSH_ROOT`，不再修改 Cordis 源文件。
 
 ---
 

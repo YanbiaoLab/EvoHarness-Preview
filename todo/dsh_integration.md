@@ -1,6 +1,6 @@
 # EvoHarness 接 dsh:Agent Backend 实现与外壳可选倒置(DH-0..DH-6)
 
-> 状态:**v8(2026-08-27)—— 带 Lean 的单题闭环已跑通,上游 854 个提交已合入**。架构与接缝自 v1 未变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证,且在跨 854 个提交的合并后复验)。逐版进度见下面几段。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)、[DSH 集成.md](DSH%20集成.md)(两张架构图)。
+> 状态:**v10(2026-09-01)—— dsh 包归属收进 EvoHarness(DH-3.8);研究模式取代 demo 外壳、demo 已删(DH-3.7);证明模式已做成 dsh agent preset(DH-3.6);v8(2026-08-27)—— 带 Lean 的单题闭环已跑通,上游 854 个提交已合入**。架构与接缝自 v1 未变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证,且在跨 854 个提交的合并后复验)。逐版进度见下面几段。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)、[DSH 集成.md](DSH%20集成.md)(两张架构图)。
 >
 > **v5(2026-08-18 晚)** 的三处改判仍然有效,不再重复陈述:①`cost_usd` 的价目表方案**作废**(成本统计是次要信号,不得写死在代码里、不得变成阻断项);②`finish_reason` 的词表是 dsh 的 `TurnEndReasonMap` 六个成员,不是 provider 的 finish reason;③三个不可强制的 limit 风险**下调**——`_ProposalUsage.absorb` 在调用方一侧 fail-closed。整篇取代 v4 及更早。
 >
@@ -327,7 +327,7 @@ Python SearchLoop
 
 ### DH-3.5:带 Lean 的单题闭环 —— 已跑通(2026-08-25,v7 新增)
 
-目标是把 dsh 后端放进一个**分数不由自己说了算**的任务里:一道 ETP 竞赛题,候选写 `submission.lean`,判题器编译,收或不收。任务在 `tasks/authored/etp_one/`,启动脚本 `scripts/dsh_demo.sh`。
+目标是把 dsh 后端放进一个**分数不由自己说了算**的任务里:一道 ETP 竞赛题,候选写 `submission.lean`,判题器编译,收或不收。任务在 `tasks/authored/etp_one/`;当时的启动脚本 `scripts/dsh_demo.sh` 已于 DH-3.7 删除,同一条链现在从「研究模式」preset 的 `evo_start` 起跑。
 
 **结果(run `etp_one_dsv4`)**:
 
@@ -367,6 +367,87 @@ Python SearchLoop
 对照包括"没失败的轮次里 `failure` 键按构造不存在"(一个永远写这个键的实现会让每次正常会话看起来都有话要说)和"报了错但没给话时,日志说的是**这件事本身**而不是空字符串"(空串读起来像日志坏了,会把人送去查日志)。
 
 **v5 观测到的翻译损耗**(未译事件按类计数):`assistant/chunk` 586、`step/start`/`step/end` 各 16、`turn/start`/`turn/end` 各 2、`user/message` 2、`session/title` 2、`request/header` 2、`request/context` 2、`agent/inbox/spliced` 4。chunk 是流式碎片,不进冷 trace 是对的;但 **turn/step 边界丢了**,后果是从冷 trace 里重建不出"哪几次模型调用属于同一轮",下钻只能看到平铺事件。要不要补映射取决于下钻时想不想要轮次结构。
+
+### DH-3.6:证明模式做成 agent preset —— 已落地(2026-09-01,v9 新增)
+
+**dsh 里「模式」不是要发明的概念,它就是 agent preset。** `apps/cli/config/agent-presets/code/agent.cordis.yml` 第一行自称 "presented as **Code Mode**"。preset 是一个装着 `agent.cordis.yml` 的目录,roster 按 preset 挂载一次、每个点名它的会话按 scope 父子关系加入,工具与 prompt 段只落进这一个会话的层;`$DSH_HOME/.agent-presets` 是可写的用户根,运行时新建即刻可见。所以证明模式**不需要新控制流**,只是一份组合。
+
+落地物:模板在 `integrations/dsh/presets/proof/`,`scripts/install_dsh_presets.sh` 渲染进 `$DSH_HOME/.agent-presets/proof/`。roster 里显示为「证明模式」。
+
+**三处刻意的形状:**
+
+**其一,preset 不带模型路由。** 主机组合(`base` + `web`)保留 preset 不得拥有的东西,模型路由是其中一项。`host.proof.cordis.yml` 那个 `llm-pi-ai` 覆盖是**给 `--patch` 路径**用的——那条路上没有别的路由。preset 路径上路由归部署,会话用主机已经配好的那个。
+
+**其二,插件路径靠符号链接,不靠绝对路径写进组合。** preset 里的相对 specifier 解析基准是组合文件所在目录,而**包名**解析基准是主机的 base——`$DSH_HOME` 底下向上找 `node_modules` 永远走不到 dsh 自己的依赖,所以 `proof.ts` 必须真身留在 dsh 包里(它 import `@deepseek-ai/dsh-tools`)。安装器在 preset 目录里放一个指过去的链接,Node 先解析真实路径再解析模块自身的 import,于是组合文件里一个绝对路径都没有。`render-config.mjs` 那套预渲染在 preset 路径上因此不需要。
+
+**其三,路径从插件行的 config 进来,环境变量降为兜底。** 原来 `requireEnv` 是唯一来源,而 preset 挂进的是一个 EvoHarness 启动器从没碰过的 dsh 进程——那里一个变量都没有。现在 `Config` 收 `python` / `harnessRoot` / `leanProject` / `attackTimeoutMs`,config 优先、环境兜底,`dsh_proof.sh` 的 patch 路径原样可用。**报错同时点名两处**(``设成行上的 `python`,或者 export EVO_PYTHON``):只说变量名会把一个 preset 用户送去找不存在的启动器。
+
+**其四(2026-09-01 补),`proof_attack` 的模型凭证走 dsh 的凭证服务,环境变量降兜底。** 这一条是配置 API key 时挖出来的:`base` bundle 挂 `credentials-local` 那一行的注释自己写着「Models 页只写托管文档,**该文档从不materialize 进进程环境**」。而 proof 工具是 shell out 到 Python 的,子进程只继承 `process.env`——**于是按 dsh 的方式配好的 key,Python 那侧一个字都看不到**。preset 路径上尤其致命:没有启动器 export 过任何东西。
+
+现在 `proof_attack` 用 `ctx.get('credentials')`(不是 `inject`,理由和整份文件的晚解析一致:没有凭证服务的运行时照样挂载)按调用解析 `EVOHARNESS_API_BASE` / `EVOHARNESS_API_KEY`,交给子进程的 env **叠加**在继承环境之上——`execFile` 的 `env` 是**整个**环境,直接替换会把 `PATH` 一起换掉。三条边界:①只有 attack 解析,`proof_status` 这类不碰模型的调用不把密钥塞进用不上它的子进程;②store 里没有就交空的,**拒绝留给 Python 那侧**(它已经会说清楚要哪两个变量,这边再发明一句措辞就是同一件事两种说法);③没有凭证服务时退回继承环境,也就是 `dsh_proof.sh` 一直以来的形状。
+
+顺带,这条路比 export 到启动 shell **更收敛**:密钥不进 dsh 自己的 `process.env`,同一会话里的 `tool-bash` 跑 `env` 打不出来。
+
+**顺带修掉一个从没被执行过的缺陷:`proof_attack` 一直挂在 30 秒的天花板上。** `callHarness` 的 `TIMEOUT_MS = 30_000` 是给「读 run 目录、读板子」这类数据库查询定的,而 proof.ts 复用了同一个函数。attack 跑的是一个反复编辑 Lean 再编译的求解器,Python 那侧光 `--lean-timeout` 缺省就是 300 秒。**这条从来没被测出来,因为 `session_smoke.py` 明写着不叫 `proof_attack`。** 现在 attack 走自己的 `attackTimeoutMs`(缺省 900 秒,刻意留在 repl 那条 1800 秒请求超时之下——工具调用活得比这一轮长会把会话一起带走),超时消息也改成说明「被切断的是这次调用,它启动的东西可能还在跑」。
+
+**验到哪一步:**
+
+- roster 列出且不 broken;`mountPreset` 下 `evo-proof` 行激活(未激活的八行全是最小 harness 没提供的主机面服务:`shell` / `fs` / `web` / `tokenMeter` 一类);
+- **删掉全部 `EVO_*` 环境变量**后,只靠组合里的 config,`proof_open` 真的开出了目标、`proof_status` 读了回来、`proof_sketch` 真的调起 Lean 并拿回编译器的拒绝理由;图落在会话工作区的 `.evo/graph.db`;
+- 新增 `packages/examples/evo-harness/tests/proof.spec.ts`(14 例):config/env 两条来源与优先级、两处都没有时报错点名两处、`leanProject` 空串按未设处理、**attack 与 status 不共用天花板**(同一个慢解释器,只有带自己天花板的那个被切断)、凭证从 store 到子进程且 `PATH` 仍在、store 空时交空、无 store 时退回环境、`proof_status` 不解析凭证、无工作区拒绝。该包 89 例全绿,类型检查干净。
+
+**2026-09-01 晚补:真实浏览器会话跑过了,并且当场又抓出一个同类缺陷。**
+
+题目取自 `superhuman/leap/solutions/LEAN-IMO-Bench/Basic/PBBasic002`(LEAP 解过,所以失败一定是我们的管线而不是题目——**首跑必须让题目不成为混淆项**)。只给签名不给解答文件。
+
+**当场抓到的缺陷:`proof_sketch` 也一直挂在 30 秒天花板上。** DH-3.6 只给 `proof_attack` 换了上限,因为它的工具描述写着「花钱」;`proof_sketch` 写的是「costs one Lean compile and no model budget」,被读成了「便宜」。**便宜不等于快**:实测一个只有 `import Mathlib` 加一句 `positivity` 的文件编译要 **28 秒**,而上限是 30 秒——所有带 Mathlib 的分解校验都在 Lean 开口之前被切断,板子上留下一份永远不会被判定的 `proposed` 分解。
+
+修法:编译类调用(`proof_sketch` / `proof_assemble`)拿自己的 `LEAN_TIMEOUT_MS`(360 秒),**且必须高于 Python 那侧的 `--lean-timeout`(缺省 300 秒)**——两个上限谁先响谁决定调用方看到什么,而只有 Lean 自己的超时会产出关于证明的**判定**;我们这侧先响就是把一个正要回答的调用切断。用例钉的是这个**次序**而不是数字。
+
+**超时消息起了作用。** 模型的原话:「这次不是 Lean 拒绝分解,而是检查在 30 秒窗口内没有返回;任务可能仍在后台完成」——它没有把超时当成数学上的反例,也没有重复提交同一份分解。
+
+**修完重跑,闭环成立:** 提议 → Lean 拒(两次,真编译错误:实数幂消去的 elaboration 问题)→ 读理由改用 `nlinarith` → **Lean 接受**(`2 lemmas, parent closed`)。全程由浏览器会话里的模型驱动,判定权一次都没离开 Lean。会话的收尾自己写明「目前只是分解路线被认证,PBBasic002 尚未证明」——persona 里那条「只有 assemble 通过才能说证明了」守住了。
+
+**仍未验:**
+
+- **`proof_attack` 经这条 TS 通道一次都没跑成过。** 这一轮是刻意不调的(它花钱),不是跑不了。「修好了」和「跑过了」必须分开。
+- **两个叶子引理仍是 open,根目标未证。** 分解被接受只说明路线合法。
+- **`tool-bash` 在这个 preset 下报 `sandbox escalation to "workspace-write" is not strictly wider than this call's current "workspace-write" mode`**,连报三次触发了 repeat-tool-reminder。模型自己绕开了,但这是 dsh 侧一个待查的缺陷。
+
+### DH-3.7:研究模式取代 demo 外壳,demo 删除(2026-09-01,v10 新增)
+
+**用户判断:`.env.moved-by-demo.bak` 这样的实现不专业,demo 相关的东西删掉。** 核对之后同意,但要点得说准:`demo.cordis.yml` 挂的是 `evo-host`(五个只读工具)与 `evo-start`(带审批的起跑),**那是 DH-5 第一、二层已交付的治理面,不是演示**。不专业的是把一个能力包装成 demo 脚本、并且为了让 dsh 能启动而把它自己的 `.env` 改名藏起来。所以先改造,再删壳。
+
+**改造**:`integrations/dsh/presets/research/` —— 「研究模式」,和证明模式同一形状。`host.ts` / `start.ts` 加 `Config`,九个变量改从插件行进来,环境变量降为兜底;`dsh_demo.sh` 那些缺省值(runs / tasks / research 根、候选 cordis、runtime 入口、provider)搬进 `scripts/install_dsh_presets.sh`,一个安装器装两个 preset。
+
+三处新东西:
+
+- **`config` 与环境两条来源的解析规则收进 `cli.ts` 一处**(`Setting` + `resolveSettings`),三个插件各自只声明字段表。报错同时点名配置键与变量名。
+- **`evo_start` 把凭证与 `DSH_MODEL` 一起交给子进程**。前者的理由同 `proof_attack`;后者是因为 `DSH_MODEL` 原来靠 `dsh_demo.sh` export,候选 cordis 的 catalog 和 `--model` 才对得上——preset 路径上没有任何 export,catalog 会静默退回自己的默认值,那正是 v7 修过的那个五代 `proposer_dead`。**删一个脚本差点把它带回来。**
+- **`DSH_MODEL` 安装时没有缺省值**。它必须是候选 catalog 真的提供的名字,而安装器无从知道;写错就是每个请求 404。留空则 `evo_start` 在调用时报出来,只读工具照常。
+
+**删除**:`scripts/dsh_demo.sh`、`packages/examples/evo-harness/fixtures/demo.cordis.yml`、`scripts/install_proof_preset.sh`(被合并的安装器取代)。两个脚本对 `.env.moved-by-demo.bak` 的 source 也一并删掉——凭证统一之后那两个 `DEEPSEEK_*` 在这边本来就没有读者(全仓 grep 零引用)。
+
+**验到哪一步**:两个 preset 都进 roster 且不 broken;**删掉全部 `EVO_*` 环境变量**后,只靠组合里的 config,`evo_status` 列出了真实的 run、`evo_task_check` 加载了 `etp_one`、`evo_decisions` 读出空队列。新增用例覆盖:路径全从行上来、缺失时点名两处、无 ledger 也能读 run、凭证与模型名进入被启动的运行且 `PATH` 仍在。该包 96 例全绿,EvoHarness 侧全绿。
+
+**仍未验**:和 DH-3.6 一样,没有从真实浏览器会话里驱动过,`evo_start` 经 preset 这条路一次都没真起过跑。
+
+### DH-3.8:归属线统一 —— 整个 dsh 包收进 EvoHarness(2026-09-01,v10 新增)
+
+DH-3.6/3.7 之后有条线画得不一致:`proof.ts` 归 EvoHarness 并按次拷进 dsh 包,而 `host.ts` / `start.ts` / `peer.ts` / `cli.ts` / `index.ts` 与八个 spec 只存在于 dsh 那边。查证之后这不是审美问题:
+
+- **`packages/examples/` 在 dsh 的 `origin/master` 里根本不存在**——整个 `evo-harness` 包是本地新增;
+- **它待的分支 `evo-harness-spike` 没有上游、从没推送过**。
+
+也就是说七个插件模块和八个 spec 只存在于一台机器的一个本地分支上,离没有只差一次 `rm -rf`。EvoHarness 有 remote。方向由这条定,不由「谁写的」定。
+
+**做法**:`integrations/dsh/package/` 是 dsh 那个包的**逐字节镜像**(源码、spec、fixtures、`package.json`、`tsconfig.json`;不含 `node_modules` 与 `lib`)。安装器把它整体拷进 dsh checkout。EvoHarness 侧原来那两份零散副本(`proof.ts`、`host.proof.cordis.yml`)删除,它们现在是镜像里的普通文件。
+
+**为什么必须是拷贝而不是链接**:每个插件都 import `@deepseek-ai/dsh-tools`,Node 解析裸 specifier 是从文件**真实路径**向上找 `node_modules`,从 EvoHarness 里怎么走都到不了 dsh 的依赖;符号链接先被解成目标,救不了这一条。所以文件必须物理待在 dsh 包里才能编译、类型检查、跑 vitest。
+
+**防漂移**:`package/tests/mirror.spec.ts` 跑在 dsh 那边——**诱惑在哪就放哪**:测试在那边跑,人已经在那边开着终端,而文件本身不写任何「我是生成的」。它比对文件清单与逐字节内容,失败时点名是哪个文件、该把改动挪回哪里。找不到 EvoHarness checkout 时**判失败而不是跳过**:一个看不见原件就悄悄通过的镜像检查,恰好在它存在的理由发生时报绿。变异对照做过:往 `src/peer.ts` 追加一行,该用例立刻红并点名 `src/peer.ts`;还原后转绿。
+
+**不镜像的**:`presets/` 与两个 Python 入口——dsh 包里没有任何东西消费它们(preset 渲染进 `$DSH_HOME`,`proof_repl.py` 以 EvoHarness 身份跑),各自只有一份。
 
 ### DH-4:安全加固(**已按决定跳过,条件保留**)
 
@@ -525,6 +606,7 @@ Python SearchLoop
 | `peer_fetch_tool` 声明与实际不符 | 只进了 fingerprint,**没有探测**。指错配置提示词仍会撒谎 |
 | 用小任务验证后误判"限制不成问题" | v5 已发生一次:默认 48/120 而实测 10/15,预测的 `absorb` 硬失败没被触发。逼洞要显式压低 `max_turns` |
 | 每候选一个运行时太贵 | 实测约 1 秒,先按这个方案做;真成瓶颈再考虑复用,但复用会牺牲"一个运行时=一个候选沙箱" |
+| **dsh checkout 里的东西没有备份** | **DH-3.8 已修**:`packages/examples/` 不在上游、`evo-harness-spike` 分支从没推过,七个模块八个 spec 只在一台机器上。现镜像在 `integrations/dsh/package/`,漂移由 `mirror.spec.ts` 挡 |
 | dsh preview 破坏性变更 | 身份含 cordis 配置哈希,升级即新实验。**v8 实测**:跨 854 个提交零冲突,SDK 的 `run()` 签名不变、`RunResult` 只增不减。仍存的边界:我们的 `llm-deepseek` 修复没回上游,**下次合并要重新面对它** |
 | **`evo_start` 只能起进化跑** | `launch/build.py` 无条件构造 `EvolutionSearchProfile`,`BasicSearchProfile` 只有 `evoharness.api.run()` 一个入口、没有任何 CLI。用 `--set population.parent_strategy=seed_only` 能把行为掰过去,但 **manifest 上写的仍是 `kind: evolution`**。所以从会话里起不了对照基线跑 |
 | 注释声称的边界不等于生效的边界 | **v8 又中一次**:`fs-local` 旁边的注释说 workspace-write 管着编辑器,而编辑器从不咨询那份策略。和守卫判据那次同构。**读注释不算验证,得让它执行一次** |
@@ -536,10 +618,12 @@ Python SearchLoop
 | 治理闭环当前是断的 | **v5 实测**:`evoharness/evoweb/` 已删,没有任何人类入口。DH-5 第二层是最便宜的补救 |
 | 决定的来源不可区分 | `ResearchDecision` 无来源字段,evoweb 签的与会话签的事后分不开;做第三层前必须补 |
 | 跳过安全测试后无人值守跑 | DH-4 的常设条件;audit 无法覆盖此项,只能靠纪律 |
-| **同一个模型名有两个来源** | **v7 已修**:`evo_start` 转发的就是 `candidate.cordis.yml` 读的那个 `DSH_MODEL`。**仍存的边界**:`candidate.cordis.yml` 里 `?? 'gpt-5.6'` 那个兜底还在,绕开 `dsh_demo.sh` 且不设 `DSH_MODEL` 时两边仍会分叉 |
+| **同一个模型名有两个来源** | **v7 已修**,**v10 差点复发**:靠 `dsh_demo.sh` export `DSH_MODEL` 让两边一致,而 preset 路径没有任何 export。现 `evo_start` 把 `model` 连同凭证一起放进子进程的 env,候选 catalog 与 `--model` 因此仍读同一个值。**仍存的边界**:`candidate.cordis.yml` 里 `?? 'gpt-5.6'` 那个兜底还在 |
 | **后端失败原文被丢弃** | **v7 已修**:`turn/end` 的 `reason.failure` 进 termination 事件与 run.log。**仍存的边界**:只捞了 `failure`,`turn/step` 的轮次结构照旧丢 |
 | **设置在命令行上静默消失** | **v7 已修**(`--set` 改 `extend`)。同形的风险在别处也可能有:任何 `nargs="*"` 且允许多次出现的参数都是这个形状 |
 | 早停把开放式搜索砍成一代 | 决定七:`stop_at_fitness` 缺省关,数字只能由任务的 `criterion.solved_at` 给。`minimize` 判据禁止声明 |
+| **一个通道的天花板按另一个通道的用途定** | **中了两次**。第二次是 `proof_sketch`:它的描述写着「不花模型预算」,被读成便宜,而一次 Mathlib 编译 28 秒、上限 30 秒。**「便宜」说的是钱,「快」说的是时间,工具描述里只写了前者。** 第一次:`proof_attack` 复用 `callHarness`,继承了给数据库查询定的 30 秒,而它跑的是分钟级求解器。没被发现是因为 smoke **明写着不调用它**——「刻意不测最贵的那条」和「那条没有天花板问题」在测试报告里长得一样 |
+| **preset 在 roster 里可见 ≠ 这台机器上可用** | `proof.ts` 按设计在**调用时**逐工具报缺失,preset 的 `broken` 只覆盖 YAML 加载不了的情况。安装器打印它绑定了什么、以及 `EVOHARNESS_API_KEY` 未设时哪一个工具会失败 |
 | **演示任务悄悄不带 Lean 也能出分** | `tasks/authored/etp_one/grade.py` **没有离线兜底**,判题器不在就报错停跑。反例是 `experiments/etp_stage2/grade.py`——它的兜底对长跑是对的,搬到这里就变成"看起来跑通了" |
 
 ## 7. 明确不做
@@ -572,6 +656,9 @@ Python SearchLoop
 ```text
 DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍)
   → DH-3(承重项已闭合,余成本对账) → DH-3.5(done,带 Lean 的单题闭环)
+  → DH-3.6(done,证明模式即 agent preset;attack 未经该通道跑过)
+  → DH-3.7(done,研究模式取代 demo 外壳;evo_start 未经该通道起过跑)
+  → DH-3.8(done,整个 dsh 包镜像进 EvoHarness,漂移由 mirror.spec.ts 挡)
   → DH-4(对抗测试与审批循环已补,沙箱遗留未堵) → DH-5(一、二层 done,三层未做) → DH-6
 ```
 
@@ -584,6 +671,8 @@ DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍
 - DH-2 对拍不过:不得进入**用于产生结论的**真实进化(demo_counter 这种验证性跑不受此限,已跑);
 - DH-3 候选不可回溯:不得用于产生对外结论;
 - ~~DH-4 沙箱边界只有代码推论、没有执行证据~~ —— **v8 解除**:编辑器那条用例真的从沙箱里写了,四步含软链绕行与活性对照。仍存的边界:**读那一侧完全没堵**(`workspace-write` 的设计如此),且临时区仍可写——只是 run 目录不再在那儿;
+- **不得声称研究模式在真实会话里起过跑**:DH-3.7 的端到端只覆盖只读那三个工具,`evo_start` 经 preset 这条路没有真起过一次;
+- ~~不得声称证明模式在真实会话里跑通过~~ —— **2026-09-01 晚解除(open / status / sketch 三个)**。仍存的边界:**`proof_attack` 与 `proof_assemble` 经这条通道一次都没跑成过**,且根目标未证——分解被接受只说明路线合法;
 - **不得从 dsh 会话里起对照基线跑**:`evo_start` 走的 launch 路径表达不了 `BasicSearchProfile`。要 best-of-N 基线,当前只能写 Python 调 `evoharness.api.run()`;
 - DH-4 对抗测试未通过期间:不得无人值守运行(常设);
 - DH-5 反向断言不过(agent 的解读能变成 verdict):copilot 不得接入证据解读环节;

@@ -1,0 +1,154 @@
+# The `proof` agent preset — dsh's Proof Mode, mounted per session.
+#
+# A TEMPLATE, not an installable preset: the three `@...@` tokens below name
+# this machine's EvoHarness, and `scripts/install_dsh_presets.sh` fills them
+# in on the way to `$DSH_HOME/.agent-presets/proof/`. Copying this directory
+# by hand leaves a composition whose first tool call reports a python
+# interpreter literally called `@EVO_PYTHON@`.
+#
+# This file is an AGENT-PLANE composition. The roster mounts it once under a
+# standing scope and every session naming it joins by scope parentage, so the
+# tools and prompt sections here cover the joined agents while the host
+# composition keeps what a preset must not own: the registries themselves, the
+# sandbox and approval stack, persistence, and the model route. Configure the
+# route where the deployment does — this preset does not carry one, and a
+# session on it answers from whatever the host is already using.
+#
+# The rows here are the ones a proof session uses: open goals, read the board,
+# propose decompositions, dispatch subgoals, assemble. Delegation, workflows,
+# background jobs, plan mode, the goal tool and skills are absent because none
+# of them appear in that loop, and a row copied from another preset drifts from
+# its original without anyone noticing.
+#
+# `tool-bash` IS here, and it can reach `.evo/graph.db` — the graph sits inside
+# the directory a workspace-write session may write to. That is acceptable for
+# one reason and only one: the graph is a record, not a verdict. A node marked
+# proved by hand still has to survive `proof_assemble`, which recompiles the
+# finished article and reports the axioms Lean says it depends on, so a forged
+# `sorry` comes back as `sorryAx`. Do not extend that reasoning to anything
+# else the session can write.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      You work on FORMAL proofs in Lean 4, on a proof graph that outlives this
+      conversation. You choose what is worth trying; Lean decides what is true.
+
+      The board is authoritative and it is not in this transcript. Read it with
+      proof_status before you decide anything, and again after anything that
+      spent money. It lives in `.evo/` under this session's working directory.
+
+      A goal is proved when proof_assemble compiles it with no `sorry` and no
+      axiom outside the allowed set. Nothing else counts — not a lemma that
+      typechecked on its own, not a decomposition Lean accepted, and not your
+      own reading of a proof. Say a goal is proved only after it assembled.
+
+      Two ways a proof looks finished and is not. Expect both of yourself:
+
+      - Moving the difficulty. A lemma that restates its parent, or a parent
+        body that closes only because a `sorry` sits under it, has proved
+        nothing. proof_sketch refuses the blatant cases; the subtle ones are
+        yours to catch.
+      - Inventing a citation. Do not appeal to a Mathlib or literature result
+        you have not seen. If you cannot say where a lemma comes from, prove
+        it or open it as a goal of its own.
+
+      Cheap before expensive. proof_open and proof_status cost nothing,
+      proof_sketch costs one Lean compile, and proof_attack spends real money
+      on a solver and can run for minutes. Check a route before paying to walk
+      it.
+
+      A tool that compiles or solves takes minutes and returns on its own.
+      Wait for it rather than polling with a shell, and do not ask for wider
+      sandbox permissions in order to wait — ask only when a command was
+      actually denied. A board read while a check is still running shows a
+      decomposition nobody has judged yet, which is not a decomposition Lean
+      rejected.
+
+      This mode works on goals already stated in Lean. A question in prose is
+      not a goal here: write it as a declaration signature first, and say so
+      plainly when you cannot.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── the proof graph ─────────────────────────────────────────────────────────
+
+# A relative specifier, resolved against THIS directory: the installer puts a
+# link to the plugin beside this file rather than an absolute path in it. The
+# link points into the dsh checkout on purpose — the module imports
+# `@deepseek-ai/dsh-tools`, which resolves from where the file really lives,
+# and nothing under `$DSH_HOME` can reach the harness's own dependencies.
+- id: evo-proof
+  name: './proof.ts'
+  config:
+    python: '@EVO_PYTHON@'
+    harnessRoot: '@EVO_HARNESS_ROOT@'
+    # Empty means unset, which is right for goals that do not import Mathlib.
+    leanProject: '@EVO_LEAN_PROJECT@'
+
+# ── reading and running things ──────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# Search, not fetch — the same shape `standard` mounts. Kept because the
+# citation failure mode above is checkable: a lemma the model cannot place is
+# one it can go and look for before relying on it.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# Load-bearing here rather than optional: a proof runs for hours and the board
+# is re-read every few turns, so the transcript grows faster than the work
+# does. `tokenMeter` stays on the host plane; these rows resolve that one
+# instance.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024

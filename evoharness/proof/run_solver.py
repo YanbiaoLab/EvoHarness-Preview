@@ -8,8 +8,9 @@ report rather than decided here.
 Each subgoal is a dynamically minted TaskSpec, and that is a feature. Its hash
 covers the lemma's own statement, so the evidence for "this lemma was proved"
 stands on its own and can be audited without the graph. The cost is one run
-directory per node, which is why `run_index` exists: 170 nodes are otherwise
-170 anonymous directories.
+directory per node, so directories are keyed by goal: a graph of a hundred
+nodes is otherwise a hundred anonymous ones. The durable index from a goal to
+the directories it was attacked in is the store's `attempts.run_dir` column.
 
 `search_profile_factory` is where P-2's ladder plugs in. L1 and L2 are
 `BasicSearchProfile` with different proposal modes; L3 and L4 are
@@ -20,13 +21,51 @@ changes, which is what makes the ladder an experiment rather than a rewrite.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .graph import Goal, Outcome
 from .solver import AttemptResult
 
 SEED_MAIN = "subgoal.lean"
+
+_ATTEMPT_PREFIX = "attempt_"
+
+
+def claim_attempt_dir(work_root: Path, goal_id: str) -> Path:
+    """Create and return an unused attempt directory for one goal.
+
+    Keyed by goal, and claimed by creating it rather than by counting. One
+    attack is one process, so a counter held in a solver would start over for
+    the next one and hand it a directory another goal is already recorded
+    against: `api.run` finds a foreign checkpoint and refuses, and the earlier
+    run's artifacts are overwritten while the graph still points at them.
+
+    Creation is exclusive because scanning alone leaves a gap — two attacks on
+    one goal read the same highest index — so the loser takes the next index
+    instead of sharing a directory.
+
+    :param work_root: directory holding one subdirectory per attacked goal.
+    :param goal_id: the goal these attempts belong to.
+    :returns: the freshly created, empty attempt directory.
+    """
+    parent = Path(work_root) / goal_id
+    parent.mkdir(parents=True, exist_ok=True)
+    used = [
+        int(name)
+        for child in parent.iterdir()
+        if child.is_dir() and child.name.startswith(_ATTEMPT_PREFIX)
+        and (name := child.name[len(_ATTEMPT_PREFIX):]).isdigit()
+    ]
+    index = max(used, default=-1) + 1
+    while True:
+        run_dir = parent / f"{_ATTEMPT_PREFIX}{index:04d}"
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            index += 1
+        else:
+            return run_dir
 
 TASK_PROMPT = """\
 Prove this Lean 4 lemma. Replace the `sorry` in `{main}`, between the
@@ -61,27 +100,15 @@ class ApiRunSolver:
     preamble: str = ""
     level: str = "L2"
 
-    #: goal id -> every run directory that goal was attacked in, in order, so
-    #: a finished graph can be audited. A goal may be attacked more than once
-    #: (an infra fault is not a verdict), so this is a list, not one entry.
-    run_index: dict[str, list[str]] = field(default_factory=dict)
-    #: Names directories. Counting `run_index` entries instead would reuse a
-    #: directory whenever the same goal is retried, and `api.run` would then
-    #: find a foreign manifest there and refuse -- an infra failure caused
-    #: entirely by our own bookkeeping.
-    _attempts: int = 0
-
     def attack(self, goal: Goal, *, budget: float) -> AttemptResult:
         from evoharness import ResolvedTask, api
 
-        run_dir = Path(self.work_root) / f"attempt_{self._attempts:04d}"
-        self._attempts += 1
+        run_dir = claim_attempt_dir(Path(self.work_root), goal.id)
         seed_dir = run_dir / "seed"
-        seed_dir.mkdir(parents=True, exist_ok=True)
+        seed_dir.mkdir()
         (seed_dir / SEED_MAIN).write_text(
             seed_text(goal, self.preamble), encoding="utf-8"
         )
-        self.run_index.setdefault(goal.id, []).append(str(run_dir))
 
         task = ResolvedTask.from_directory(
             seed_dir,

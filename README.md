@@ -73,7 +73,7 @@ endpoint. Supply the credential through the environment; never put it in a
 tracked file:
 
 ```bash
-export ALIYUN_MAAS_API_KEY="your-api-key"
+export EVOHARNESS_API_KEY="your-api-key"
 
 uv run python -m experiments.run_evolution \
   --recipe e3r \
@@ -83,8 +83,11 @@ uv run python -m experiments.run_evolution \
   --run-dir results/live-demo
 ```
 
-Set `EVOHARNESS_API_BASE` to override the default endpoint, or use the legacy
-`EVOHARNESS_API_KEY` credential name for an existing deployment.
+Set `EVOHARNESS_API_BASE` to override the default endpoint. The two names go
+together: a key is good at one gateway, so the credential is named after the
+project rather than after a vendor — `ALIYUN_MAAS_API_KEY` is still read for
+deployments configured before the endpoint moved, and nothing is named after
+it any more.
 
 Never commit API keys. Use `--budget-usd` and task-specific evaluation limits
 before starting a live run.

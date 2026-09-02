@@ -1,0 +1,63 @@
+# The HOST side: what a person's own dsh session mounts to look at EvoHarness
+# runs. Deliberately a separate file from candidate.cordis.yml, and the two
+# must not be merged.
+#
+# `evo_status` and `evo_trajectory` answer about the whole population — every
+# generation, every rival's fitness. A candidate that could call them would
+# see the scores of the programs it is competing against and would bypass the
+# inspiration selection the search itself is tuning. The candidate's own
+# window onto its peers is `evo_inspect_candidate`, which answers about one
+# program at a time and only what a reference listing already named.
+#
+# This is a fragment: mount these rows in whatever configuration your session
+# already runs. It is not a whole deployment on its own. A source-checkout
+# launcher must render the relative names below to checkout-local absolute
+# paths because Cordis patch files do not change the profile's module base.
+#
+# Environment, all three required at call time rather than at mount, so a
+# missing one names itself in front of you instead of in a boot log:
+#
+#   EVO_RUNS_ROOT      directory the run directories live under. Tools take a
+#                      run NAME and resolve it here — a model-supplied path
+#                      would be a choice of what on this machine gets read.
+#   EVO_PYTHON         interpreter EvoHarness is installed in.
+#   EVO_HARNESS_ROOT   checkout `evoharness` imports from.
+#
+#   EVO_TASKS_ROOT     directory authored task directories live under, for
+#                      `evo_task_check` and (if mounted) `evo_start`.
+#
+# `evo-host` is read-only. Starting a run lives in `evo-start` below, mounted
+# separately and commented out by default, because a deployment that wants
+# people to watch runs without being able to launch them should be able to
+# have exactly that.
+
+- insert:
+    - id: evo-host
+      name: '../src/host.ts'
+
+# Uncomment to let this session start runs. Read the rest of this comment
+# first.
+#
+# A run costs hours of compute and real money, and a tool call is issued by
+# the model — "go ahead" typed in a chat is the model's reading of a sentence,
+# not a person's authorisation. So `evo_start` asks through
+# `ctx.approval.request` and launches only on `allowed-once`. It injects
+# `approval`, so it will not mount at all without that service; and with no
+# answerer configured, the seam fails closed and every attempt is refused as
+# `unavailable`. Both of those are the intended behaviour, not obstacles to
+# work around: a deployment that cannot ask a person cannot launch.
+#
+# Needs, beyond the variables above:
+#
+#   EVO_DSH_CONFIG     the candidate runtime's cordis config — NOT this file
+#   EVO_DSH_RUNTIME    the dsh runtime entry candidates run
+#   EVO_DSH_PROVIDER   the provider route that config declares
+#
+# All three are the deployment's to choose. A cordis config named by the model
+# would be the model choosing the candidate's whole capability set, and a task
+# directory named by the model would be the model choosing the function that
+# scores it — which is why both tools take names resolved under a configured
+# root rather than paths.
+#
+#    - id: evo-start
+#      name: '../src/start.ts'

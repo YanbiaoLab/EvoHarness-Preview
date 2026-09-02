@@ -1,0 +1,13 @@
+# The spike itself. A source-checkout launcher must render this portable
+# relative name to an absolute path because patch files do not change the
+# profile module base. Do not pass this source file directly to `--patch`.
+- insert:
+    - id: evo-spike
+      name: './src/index.ts'
+
+# Neither dsh-base nor dsh-web-app mounts the model-facing plugin-mounting
+# tools, so without this row rounds two and four would measure an absent
+# capability rather than a denied one. The `cordis-host-runner` service it
+# injects is already in the tree; adding it again collides on entry id.
+    - id: tool-cordis
+      name: '@deepseek-ai/dsh-tool-cordis'

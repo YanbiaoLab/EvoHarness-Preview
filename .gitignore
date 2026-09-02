@@ -43,3 +43,4 @@ experiments/
 # committed (lean-toolchain, lakefile.toml, lake-manifest.json); the artifacts
 # are not.
 tasks/lean_env/.lake/
+__pycache__/
