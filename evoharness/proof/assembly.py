@@ -21,11 +21,12 @@ their disagreement would be invisible until it was expensive.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .graph import GoalStatus
+from .graph import Certification, GoalStatus
 from .sketch import ERROR_RE, LeanRunner, SketchUnavailable, render
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -190,6 +191,36 @@ def verify(
         )
     _ = goal  # kept for symmetry with the error paths above
     return result
+
+
+def certify(
+    store: "ProofGraphStore",
+    goal_id: str,
+    *,
+    runner: LeanRunner | None = None,
+) -> tuple[AssemblyResult, Certification]:
+    """Verify, and record the verdict on the goal.
+
+    `verify` alone leaves no trace: the compile happens, the caller reads the
+    answer, and the graph still says only PROVED -- a status derived from the
+    route closing, which is a weaker claim than the finished file compiling.
+    Recording it is what lets a later reader tell the two apart, and what
+    makes a failed assembly visible as the finding it is rather than as an
+    absence.
+
+    Nothing is recorded when nothing was measured: `verify` raises
+    `AssemblyError` for that, and it propagates.
+    """
+
+    result = verify(store, goal_id, runner=runner)
+    certification = store.record_certification(
+        goal_id,
+        ok=result.ok,
+        axioms=result.axioms,
+        reason=result.reason,
+        text_sha256=hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
+    )
+    return result, certification
 
 
 def _root_name(store: "ProofGraphStore", goal_id: str) -> str:

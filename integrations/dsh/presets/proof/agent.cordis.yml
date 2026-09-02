@@ -44,7 +44,10 @@
       A goal is proved when proof_assemble compiles it with no `sorry` and no
       axiom outside the allowed set. Nothing else counts — not a lemma that
       typechecked on its own, not a decomposition Lean accepted, and not your
-      own reading of a proof. Say a goal is proved only after it assembled.
+      own reading of a proof. The board shows this as `certified`; a goal
+      whose status is `proved` but whose `certified` is null has a closed
+      route and an uncompiled proof. Say a goal is proved only after it
+      assembled.
 
       Two ways a proof looks finished and is not. Expect both of yourself:
 

@@ -7,6 +7,12 @@ something the search depends on:
       +- Decomposition   an AND node -- every subgoal must close
       |    +- Subgoal (a Goal again)
       +- Attempt      one run of a solver against this goal, directly
+      +- Certification   one compile of the ASSEMBLED proof of this goal
+
+The last is what separates two things the status machine cannot: a goal
+whose route closed, and a goal whose finished proof was compiled as one
+file. PROVED is derived from the first; only a certification records the
+second.
 
 Nothing here touches storage or Lean. It is the semantics alone, so the rules
 that decide whether a goal is proved can be tested without a database, without
@@ -139,6 +145,30 @@ class Attempt:
     #: that died on infrastructure shows six identical `infra-failed` rows and
     #: no way to tell what broke.
     note: str = ""
+    created_at: float | None = None
+
+
+@dataclass(frozen=True)
+class Certification:
+    """One compile of a goal's assembled proof, as one file.
+
+    Recorded whether or not it passed. A failed certification is a finding
+    about the graph -- it believed something the compiler does not -- and a
+    record that kept only successes would show such a goal as merely
+    "not yet certified".
+    """
+
+    id: str
+    goal_id: str
+    ok: bool
+    #: Every axiom Lean reported the finished proof depends on. Kept even on
+    #: failure, when a forbidden axiom is what failed it.
+    axioms: frozenset[str] = frozenset()
+    reason: str = ""
+    #: Identifies the exact file that was compiled, without storing it: the
+    #: text is reproducible from the graph, and what an audit needs is to know
+    #: whether the graph has changed since.
+    text_sha256: str = ""
     created_at: float | None = None
 
 

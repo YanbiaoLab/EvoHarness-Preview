@@ -11,7 +11,7 @@ import shutil
 
 import pytest
 
-from evoharness.proof.assembly import AssemblyError, assemble, verify
+from evoharness.proof.assembly import AssemblyError, assemble, certify, verify
 from evoharness.proof.controller import FixedDecompositions, ProofController
 from evoharness.proof.graph import GoalStatus, Outcome
 from evoharness.proof.sketch import LeanSketchValidator, Validation, render
@@ -191,3 +191,50 @@ def test_rendering_records_where_each_declaration_landed(store):
 
     for name, line in rendered.declaration_lines.items():
         assert lines[line - 1].startswith(f"theorem {name} ")
+
+
+# --- 认证进图 ------------------------------------------------------------------
+
+def test_certify_records_what_verify_found(store):
+    """`verify` 只回答;`certify` 把回答写进图,`status` 才分得出「路线闭合」
+    和「成品编译通过」。"""
+
+    root, _ = solve_fixture(store)
+    assert store.latest_certification(root.id) is None
+
+    result, certification = certify(store, root.id)
+
+    assert result.ok is True
+    assert certification.goal_id == root.id
+    read = store.latest_certification(root.id)
+    assert read is not None
+    assert read.ok is True
+    assert read.axioms == result.axioms
+    assert read.text_sha256 != ""
+
+
+def test_a_failed_assembly_is_certified_as_failed(store):
+    """组装编不过是关于图的真发现,必须留痕;只记成功会把它显示成「尚未认证」。"""
+
+    root = store.upsert_goal(ROOT_IDENTITY, FIXTURE_SIGNATURE)
+    store.add_root(root.id, "fixture")
+    drifted = dict(FIXTURE_PROOFS)
+    drifted["text:lemma_assoc"] = "Nat.mul_zero a"
+    ProofController(
+        store,
+        StubSolver(
+            script={
+                ROOT_IDENTITY: [Outcome.TASK_FAILED],
+                **{identity: [Outcome.PROVED] for identity in drifted},
+            },
+            proofs=drifted,
+        ),
+        decompositions=FixedDecompositions({ROOT_IDENTITY: FIXTURE_SKETCH}),
+        validate_sketch=accept_all,
+    ).solve(root.id, budget=100)
+
+    result, certification = certify(store, root.id)
+
+    assert result.ok is False
+    assert certification.ok is False
+    assert store.latest_certification(root.id).ok is False

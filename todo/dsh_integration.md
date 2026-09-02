@@ -1,6 +1,6 @@
 # EvoHarness 接 dsh:Agent Backend 实现与外壳可选倒置(DH-0..DH-6)
 
-> 状态:**v10(2026-09-01)—— dsh 包归属收进 EvoHarness(DH-3.8);研究模式取代 demo 外壳、demo 已删(DH-3.7);证明模式已做成 dsh agent preset(DH-3.6);v8(2026-08-27)—— 带 Lean 的单题闭环已跑通,上游 854 个提交已合入**。架构与接缝自 v1 未变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证,且在跨 854 个提交的合并后复验)。逐版进度见下面几段。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)、[DSH 集成.md](DSH%20集成.md)(两张架构图)。
+> 状态:**v10(2026-09-01)—— 真实会话全链证毕 PBBasic002、认证进图(DH-3.9);dsh 包归属收进 EvoHarness(DH-3.8);研究模式取代 demo 外壳、demo 已删(DH-3.7);证明模式已做成 dsh agent preset(DH-3.6);v8(2026-08-27)—— 带 Lean 的单题闭环已跑通,上游 854 个提交已合入**。架构与接缝自 v1 未变:仍是现有 `AgentBackend`,`SearchLoop` / `_execute_plan` / `AgentSessionProposer` / `SingleShotProposer` 零修改(已验证,且在跨 854 个提交的合并后复验)。逐版进度见下面几段。对象:[deepseek-harness](/Users/zhangkang/Documents/Projects/deepseek-harness/)(`@deepseek-ai/dsh`,MIT,developer preview)。以下 dsh 侧路径均相对该仓库根。配对文档:[research_layer.md](research_layer.md)(治理层)、[eval_protocol.md](../docs/eval_protocol.md)(评估信任边界)、[DSH 集成.md](DSH%20集成.md)(两张架构图)。
 >
 > **v5(2026-08-18 晚)** 的三处改判仍然有效,不再重复陈述:①`cost_usd` 的价目表方案**作废**(成本统计是次要信号,不得写死在代码里、不得变成阻断项);②`finish_reason` 的词表是 dsh 的 `TurnEndReasonMap` 六个成员,不是 provider 的 finish reason;③三个不可强制的 limit 风险**下调**——`_ProposalUsage.absorb` 在调用方一侧 fail-closed。整篇取代 v4 及更早。
 >
@@ -449,6 +449,20 @@ DH-3.6/3.7 之后有条线画得不一致:`proof.ts` 归 EvoHarness 并按次拷
 
 **不镜像的**:`presets/` 与两个 Python 入口——dsh 包里没有任何东西消费它们(preset 渲染进 `$DSH_HOME`,`proof_repl.py` 以 EvoHarness 身份跑),各自只有一份。
 
+### DH-3.9:首次真实会话跑通全链,以及它暴露的三个缺陷(2026-09-01 晚,v10)
+
+真实浏览器会话、证明模式、题目 PBBasic002(IMO-Bench Basic,LEAP 解过——首跑不能让题目成为混淆项):open → sketch(Lean 拒两次、第三次接受)→ attack ×2(各一行 `nlinarith`)→ assemble 通过,独立 `lake env lean` 复核公理集 `[propext, Classical.choice, Quot.sound]`。
+
+只有真跑才暴露的三个缺陷,均已修并有变异对照:
+
+- **编译类调用也挂在 30 秒天花板上。** `proof_sketch` 的描述写「no model budget」,被读成便宜;实测 `import Mathlib` 加一句 `positivity` 编译 28 秒,所有 Mathlib 分解校验都在 Lean 开口前被切断,板上留下永不判定的 `proposed`。现编译类调用用 `leanTimeoutMs`,用例钉的是它**必须高于** Python 的 `--lean-timeout`——只有 Lean 自己的超时会产出判定。**一个调用花多少钱,不说明它花多少时间。**
+- **attempt 目录按进程计数,两条引理撞同一目录。** 计数器活在 solver 实例上,而一次 attack 是一个进程;`api.run` 拒 resume,前一次的工件被覆盖而图上指针仍指着它。现 `runs/<goal_id>/attempt_NNNN`,靠 `mkdir` 独占创建占位而不是计算。原注释预言了这个失败模式,防的是同实例重试;**防护的作用域必须至少和它保护的东西一样长。** 顺带删了无读者的 `run_index`——持久索引一直是 `attempts.run_dir`。
+- **`proof_assemble` 的 `out` 是模型给的路径,按子进程 cwd(EvoHarness 根)解析,且不受会话沙箱约束**——证明写进了源码树。现只收文件名、解析到会话目录,与 `resolveRun` 同形:模型给的路径不是参数,是能力。
+
+**认证进图(DH-3.9 收尾)。** `cmd_assemble` 原本什么都不写:`proved` 是状态机从路线闭合推出来的,而「成品整体编译通过、公理集干净」只活在会话日志里——按设计那不是证据。现 `certify()` = `verify()` + `record_certification()`,新表 `certifications`(通过与否、公理集、文件 sha256、时间),**失败也记**——组装编不过是关于图的真发现,只记成功会把它显示成「尚未认证」。`status` 多一个 `certified` 字段,`proved` 与 `certified` 从此分得开。旧 `graph.db` 打开即建表,报「未认证」而不是读不出。
+
+**仍存**:`~/proofs/div3` 那份图里 `four_sum_sq_le → attempt_0000` 指针指向已被覆盖的目录(修复只管将来);`evo_start` 经研究模式 preset 没真起过跑;候选运行时 `api: openai-completions` 对 krill 端点会 403(协议应随端点走)。
+
 ### DH-4:安全加固(**已按决定跳过,条件保留**)
 
 用户 2026-08-18 决定跳过安全测试,先做业务实现。以下条目保留但不阻塞 DH-1..DH-3:
@@ -659,6 +673,7 @@ DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍
   → DH-3.6(done,证明模式即 agent preset;attack 未经该通道跑过)
   → DH-3.7(done,研究模式取代 demo 外壳;evo_start 未经该通道起过跑)
   → DH-3.8(done,整个 dsh 包镜像进 EvoHarness,漂移由 mirror.spec.ts 挡)
+  → DH-3.9(done,真实会话全链证毕 PBBasic002;认证进图)
   → DH-4(对抗测试与审批循环已补,沙箱遗留未堵) → DH-5(一、二层 done,三层未做) → DH-6
 ```
 

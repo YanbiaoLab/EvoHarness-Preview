@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evoharness import BasicSearchProfile, ComponentSpec, RunSpec  # noqa: E402
 from evoharness.core import LLMResponse, LLMStopReason  # noqa: E402
-from evoharness.proof.assembly import verify  # noqa: E402
+from evoharness.proof.assembly import certify  # noqa: E402
 from evoharness.proof.controller import ProofController  # noqa: E402
 from evoharness.proof.identity import ExactTextHasher, LeanExprHasher  # noqa: E402
 from evoharness.proof.propose import ModelDecompositionSource  # noqa: E402
@@ -286,7 +286,7 @@ def main() -> int:
             return 1
 
         print("\nfinal re-verification (the only thing that certifies the root)")
-        result = verify(store, root.id)
+        result, _ = certify(store, root.id)
         print("ok:", result.ok)
         print("axioms:", sorted(result.axioms))
         if not result.ok:

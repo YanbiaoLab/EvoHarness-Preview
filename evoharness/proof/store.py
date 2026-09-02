@@ -24,11 +24,12 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from .graph import (
     Attempt,
+    Certification,
     Decomposition,
     DecompositionStatus,
     Goal,
@@ -77,6 +78,15 @@ CREATE TABLE IF NOT EXISTS attempts (
     note         TEXT NOT NULL DEFAULT '',
     created_at   REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS certifications (
+    id          TEXT PRIMARY KEY,
+    goal_id     TEXT NOT NULL REFERENCES goals(id),
+    ok          INTEGER NOT NULL,
+    axioms_json TEXT NOT NULL DEFAULT '[]',
+    reason      TEXT NOT NULL DEFAULT '',
+    text_sha256 TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS roots (
     goal_id TEXT PRIMARY KEY REFERENCES goals(id),
     label   TEXT NOT NULL
@@ -84,6 +94,7 @@ CREATE TABLE IF NOT EXISTS roots (
 CREATE INDEX IF NOT EXISTS ix_decomp_goal ON decompositions(goal_id);
 CREATE INDEX IF NOT EXISTS ix_edge_subgoal ON decomposition_subgoals(subgoal_id);
 CREATE INDEX IF NOT EXISTS ix_attempt_goal ON attempts(goal_id);
+CREATE INDEX IF NOT EXISTS ix_cert_goal ON certifications(goal_id);
 """
 
 
@@ -462,6 +473,76 @@ class ProofGraphStore:
             )
             for row in rows
         ]
+
+    # -- certifications -------------------------------------------------------
+
+    def record_certification(
+        self,
+        goal_id: str,
+        *,
+        ok: bool,
+        axioms: Iterable[str] = (),
+        reason: str = "",
+        text_sha256: str = "",
+    ) -> Certification:
+        """Record one compile of this goal's assembled proof.
+
+        Appended, never replaced: the graph can change under a certification
+        (a lemma re-proved, a decomposition added), and the history of what
+        was compiled when is what lets a reader tell a stale pass from a
+        current one.
+        """
+
+        cert_id = _new_id("cert")
+        now = time.time()
+        axiom_set = frozenset(axioms)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO certifications (id, goal_id, ok, axioms_json,"
+                " reason, text_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cert_id,
+                    goal_id,
+                    int(ok),
+                    json.dumps(sorted(axiom_set)),
+                    reason,
+                    text_sha256,
+                    now,
+                ),
+            )
+        return Certification(
+            id=cert_id,
+            goal_id=goal_id,
+            ok=ok,
+            axioms=axiom_set,
+            reason=reason,
+            text_sha256=text_sha256,
+            created_at=now,
+        )
+
+    def certifications_of(self, goal_id: str) -> list[Certification]:
+        rows = self._conn.execute(
+            "SELECT * FROM certifications WHERE goal_id = ? ORDER BY created_at",
+            (goal_id,),
+        ).fetchall()
+        return [
+            Certification(
+                id=row["id"],
+                goal_id=row["goal_id"],
+                ok=bool(row["ok"]),
+                axioms=frozenset(json.loads(row["axioms_json"])),
+                reason=row["reason"],
+                text_sha256=row["text_sha256"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def latest_certification(self, goal_id: str) -> Certification | None:
+        """The most recent compile of the assembled proof, passed or not."""
+
+        certs = self.certifications_of(goal_id)
+        return certs[-1] if certs else None
 
     # -- propagation ----------------------------------------------------------
 

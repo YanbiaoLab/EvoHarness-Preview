@@ -214,9 +214,11 @@ export function apply(ctx: Context, config: Config = {}) {
     name: 'proof_status',
     description:
       'Read the board: which goals are open, proved or exhausted, what has '
-      + 'been attempted on each, and what has been spent. Call it before '
-      + 'deciding what to do next; it is cheap and it is the only place the '
-      + 'real state lives.',
+      + 'been attempted on each, and what has been spent. `proved` means the '
+      + 'route closed; `certified` says whether the assembled proof compiled '
+      + 'as one file, and is null until proof_assemble has run. Call it '
+      + 'before deciding what to do next; it is cheap and it is the only '
+      + 'place the real state lives.',
     parameters: {
       goal_id: { type: 'string', description: 'One goal; omit for everything.' },
     },
@@ -307,7 +309,8 @@ export function apply(ctx: Context, config: Config = {}) {
       + 'is the ONLY thing that certifies a root goal: per-node greens were '
       + 'earned minutes apart and only compiling the finished article catches '
       + 'a lemma that typechecks alone and not in company. Returns whether it '
-      + 'compiled and which axioms Lean says it depends on.',
+      + 'compiled and which axioms Lean says it depends on, and records that '
+      + 'verdict on the goal, passed or failed.',
     parameters: {
       goal_id: { type: 'string', description: 'The root goal.', required: true },
       out: {

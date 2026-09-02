@@ -32,7 +32,7 @@ import os
 import sys
 from pathlib import Path
 
-from .assembly import AssemblyError, verify
+from .assembly import AssemblyError, certify
 from .controller import ProofController
 from .grade import make_grader
 from .graph import DecompositionStatus, GoalStatus
@@ -71,6 +71,25 @@ def _hasher(args):
     return ExactTextHasher()
 
 
+def _certification_view(store: ProofGraphStore, goal_id: str) -> dict | None:
+    """The latest compile of the assembled proof, or None when there was none.
+
+    Shown beside `status` because the two answer different questions: PROVED
+    says the route closed, and this says the finished file compiled. A reader
+    given only the first will take it for the second.
+    """
+
+    cert = store.latest_certification(goal_id)
+    if cert is None:
+        return None
+    return {
+        "ok": cert.ok,
+        "axioms": sorted(cert.axioms),
+        "reason": cert.reason[:400],
+        "at": cert.created_at,
+    }
+
+
 def _goal_view(store: ProofGraphStore, goal) -> dict:
     attempts = store.attempts_of(goal.id)
     decompositions = store.decompositions_of(goal.id)
@@ -78,6 +97,7 @@ def _goal_view(store: ProofGraphStore, goal) -> dict:
         "goal_id": goal.id,
         "name": declaration_name(goal.statement),
         "status": goal.status.value,
+        "certified": _certification_view(store, goal.id),
         "statement": goal.statement,
         "attempts": [
             {"outcome": a.outcome.value, "note": a.note[:200]} for a in attempts
@@ -354,7 +374,7 @@ def cmd_assemble(args) -> dict:
                 "ok": False,
                 "reason": f"goal is {goal.status.value}; nothing to assemble",
             }
-        result = verify(store, goal.id, runner=_runner(args))
+        result, certification = certify(store, goal.id, runner=_runner(args))
         out = Path(args.out) if args.out else None
         if result.ok and out:
             out.write_text(result.text, encoding="utf-8")
@@ -362,6 +382,7 @@ def cmd_assemble(args) -> dict:
             "ok": result.ok,
             "reason": result.reason[:2000],
             "axioms": sorted(result.axioms),
+            "certification_id": certification.id,
             "written_to": str(out) if (result.ok and out) else None,
             "text": result.text if args.show_text else None,
         }
