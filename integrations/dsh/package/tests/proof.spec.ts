@@ -394,4 +394,36 @@ describe('where an assembled proof is written', () => {
 
     expect(await argvOf(ctx, 'proof_assemble', { goal_id: 'g1' })).not.toContain('--out')
   })
+
+  it('passes each named route through as its own flag', async () => {
+    // Python takes `--route` repeatably because a goal further down the tree
+    // can have several completed routes too. One joined argument would arrive
+    // as a single unknown decomposition id.
+    const ctx = await mount()
+
+    expect(await argvOf(ctx, 'proof_assemble', {
+      goal_id: 'g1',
+      routes: 'dec_aaa, dec_bbb',
+    })).toEqual(expect.arrayContaining([
+      '--route', 'dec_aaa', '--route', 'dec_bbb',
+    ]))
+  })
+
+  it('sends no route at all rather than an empty one', async () => {
+    // `--route ''` reaches Python as a lookup for a decomposition named the
+    // empty string, and the caller is then told a route is missing when what
+    // it actually typed was a trailing comma.
+    const ctx = await mount()
+
+    // An explicit `routes: undefined` is not in this list: the tool runtime
+    // aborts the call before dispatch on it, which is a different thing from
+    // the parameter being absent. Omitting it entirely is covered above.
+    for (const routes of ['', '   ', ',', 'dec_aaa,']) {
+      const argv = await argvOf(ctx, 'proof_assemble', { goal_id: 'g1', routes })
+      expect(argv).not.toContain('')
+      expect(argv.filter(item => item === '--route')).toHaveLength(
+        routes === 'dec_aaa,' ? 1 : 0,
+      )
+    }
+  })
 })

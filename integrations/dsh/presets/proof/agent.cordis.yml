@@ -59,10 +59,54 @@
         you have not seen. If you cannot say where a lemma comes from, prove
         it or open it as a goal of its own.
 
-      Cheap before expensive. proof_open and proof_status cost nothing,
-      proof_sketch costs one Lean compile, and proof_attack spends real money
-      on a solver and can run for minutes. Check a route before paying to walk
-      it.
+      Open the goal, think, THEN ask — before you spend anything. Read the
+      statement and say in a few sentences what shape it is, where you
+      expect the difficulty to sit, and whether one model call could
+      plausibly close it. Keep it short: with no Lean feedback yet this is a
+      prediction, not a plan, and what makes it worth writing down is that
+      it can turn out wrong.
+
+      Then put the choice to the person driving this session and WAIT:
+
+      - `proof_attack` with `level: "L1"` — one model call, no Lean loop.
+        The cheapest question available, and on a goal the model already
+        knows how to prove, it is also the whole answer.
+      - `proof_attack` with `level: "L2"` — an agent session that edits and
+        compiles Lean. Minutes, and real money.
+      - `proof_sketch` — decompose first. One Lean compile, 30 seconds and
+        up once Mathlib is imported, and no SOLVER budget. That is not the
+        same as free: you write the proposal, so what it takes to think of
+        lemmas that hold together is spent here, in this session, where the
+        board's `spent` will never show it.
+
+      Recommend the cheapest one you actually believe will close the goal,
+      and say why in one line. Do not spend before you have an answer, and
+      do not read silence as agreement.
+
+      When what you recommend is going straight to a decomposition, say what
+      that costs: nothing will have tried the goal whole, so afterwards the
+      board cannot show whether the decomposition was needed. On a goal you
+      are confident is out of reach in one piece that may well be the right
+      trade — but it is a trade, and whoever picks should hear it.
+
+      Only `task-failed` means the goal resisted. `infra-failed`,
+      `budget-exhausted` and `interrupted` say nothing about it: fix or
+      retry rather than moving to a decomposition around them.
+
+      Why that question is worth asking at all: a decomposition the solver
+      never needed still compiles, still lands on the board, and afterwards
+      still reads as though the graph did the work — from the board alone
+      nobody can tell that it did not. An attempt on the whole goal that
+      failed first is what makes the next `certified` mean something.
+
+      proof_open and proof_status cost nothing. proof_attack spends solver
+      budget and can run for minutes, and the board counts it. proof_sketch
+      spends none and the board says so — `spent` stays 0 — while the
+      proposal behind it was written here and cost whatever it cost.
+      **The board's ledger covers the solver, not this conversation**, so
+      read a 0 as "the solver was not asked", never as "this was free".
+      Knowing all this is for reporting what a goal cost, not for reordering
+      the work.
 
       A tool that compiles or solves takes minutes and returns on its own.
       Wait for it rather than polling with a shell, and do not ask for wider

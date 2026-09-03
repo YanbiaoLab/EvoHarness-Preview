@@ -166,9 +166,15 @@ class Certification:
     axioms: frozenset[str] = frozenset()
     reason: str = ""
     #: Identifies the exact file that was compiled, without storing it: the
-    #: text is reproducible from the graph, and what an audit needs is to know
-    #: whether the graph has changed since.
+    #: text is reproducible from the graph -- given the route below -- and what
+    #: an audit needs is to know whether the graph has changed since.
     text_sha256: str = ""
+    #: Which decomposition the assembled file was built through. Three values,
+    #: all different: a route id; `""` for a goal the solver closed directly,
+    #: where there was no route to choose; and `None` for a record written
+    #: before this was kept, where the rule was "the oldest completed route"
+    #: and the file therefore cannot be reproduced from the id alone.
+    decomposition_id: str | None = None
     created_at: float | None = None
 
 

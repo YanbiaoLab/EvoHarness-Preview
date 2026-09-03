@@ -85,6 +85,10 @@ CREATE TABLE IF NOT EXISTS certifications (
     axioms_json TEXT NOT NULL DEFAULT '[]',
     reason      TEXT NOT NULL DEFAULT '',
     text_sha256 TEXT NOT NULL DEFAULT '',
+    -- Nullable on purpose, and NOT defaulted to '': a row from before this
+    -- column existed has an unknown route, while '' says there was none to
+    -- pick. Defaulting would erase that difference on every old graph.
+    decomposition_id TEXT,
     created_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS roots (
@@ -128,7 +132,29 @@ class ProofGraphStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._add_missing_columns()
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring an older graph's tables up to the current shape.
+
+        `CREATE TABLE IF NOT EXISTS` adds tables but never columns, so a graph
+        created before a column existed opens without it and fails on the
+        first read -- and these graphs outlive the sessions that made them,
+        which is the whole point of writing them to disk.
+        """
+
+        for table, column, decl in (
+            ("certifications", "decomposition_id", "TEXT"),
+        ):
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {decl}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -484,6 +510,7 @@ class ProofGraphStore:
         axioms: Iterable[str] = (),
         reason: str = "",
         text_sha256: str = "",
+        decomposition_id: str | None = "",
     ) -> Certification:
         """Record one compile of this goal's assembled proof.
 
@@ -499,7 +526,8 @@ class ProofGraphStore:
         with self._conn:
             self._conn.execute(
                 "INSERT INTO certifications (id, goal_id, ok, axioms_json,"
-                " reason, text_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " reason, text_sha256, decomposition_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     cert_id,
                     goal_id,
@@ -507,6 +535,7 @@ class ProofGraphStore:
                     json.dumps(sorted(axiom_set)),
                     reason,
                     text_sha256,
+                    decomposition_id,
                     now,
                 ),
             )
@@ -517,6 +546,7 @@ class ProofGraphStore:
             axioms=axiom_set,
             reason=reason,
             text_sha256=text_sha256,
+            decomposition_id=decomposition_id,
             created_at=now,
         )
 
@@ -533,6 +563,7 @@ class ProofGraphStore:
                 axioms=frozenset(json.loads(row["axioms_json"])),
                 reason=row["reason"],
                 text_sha256=row["text_sha256"],
+                decomposition_id=row["decomposition_id"],
                 created_at=row["created_at"],
             )
             for row in rows

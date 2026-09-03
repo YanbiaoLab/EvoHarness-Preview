@@ -32,7 +32,7 @@ import os
 import sys
 from pathlib import Path
 
-from .assembly import AssemblyError, certify
+from .assembly import AmbiguousRoute, AssemblyError, certify
 from .controller import ProofController
 from .grade import make_grader
 from .graph import DecompositionStatus, GoalStatus
@@ -86,6 +86,10 @@ def _certification_view(store: ProofGraphStore, goal_id: str) -> dict | None:
         "ok": cert.ok,
         "axioms": sorted(cert.axioms),
         "reason": cert.reason[:400],
+        # Which route was compiled. `""` means the goal had none -- a solver
+        # closed it directly -- and null means the record predates this being
+        # kept, when whichever route was oldest won silently.
+        "decomposition_id": cert.decomposition_id,
         "at": cert.created_at,
     }
 
@@ -374,7 +378,25 @@ def cmd_assemble(args) -> dict:
                 "ok": False,
                 "reason": f"goal is {goal.status.value}; nothing to assemble",
             }
-        result, certification = certify(store, goal.id, runner=_runner(args))
+        try:
+            result, certification = certify(
+                store, goal.id, runner=_runner(args), routes=args.route
+            )
+        except AmbiguousRoute as exc:
+            # A question, not a fault: answered by naming a route, so it comes
+            # back as a payload the caller can act on rather than as an error
+            # that reads like the graph is broken. Nothing is compiled and
+            # nothing is recorded -- there is no verdict to record yet.
+            return {
+                "ok": False,
+                "refused": True,
+                "reason": str(exc),
+                "goal": exc.goal_id,
+                "routes": [
+                    {"decomposition_id": route_id, "subgoals": list(names)}
+                    for route_id, names in exc.candidates
+                ],
+            }
         out = Path(args.out) if args.out else None
         if result.ok and out:
             out.write_text(result.text, encoding="utf-8")
@@ -383,6 +405,7 @@ def cmd_assemble(args) -> dict:
             "reason": result.reason[:2000],
             "axioms": sorted(result.axioms),
             "certification_id": certification.id,
+            "decomposition_id": certification.decomposition_id,
             "written_to": str(out) if (result.ok and out) else None,
             "text": result.text if args.show_text else None,
         }
@@ -536,6 +559,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--goal", required=True)
     p.add_argument("--out", default="")
     p.add_argument("--show-text", action="store_true")
+    # Repeatable rather than one value: a goal deep in the tree can have
+    # several completed routes too, and pinning only the top would leave the
+    # caller unable to answer the refusal it gets for the one below.
+    p.add_argument("--route", action="append", default=[],
+                   help="a completed decomposition to assemble through; "
+                        "repeat for goals further down the tree")
     p.set_defaults(func=cmd_assemble)
     return parser
 

@@ -463,6 +463,74 @@ DH-3.6/3.7 之后有条线画得不一致:`proof.ts` 归 EvoHarness 并按次拷
 
 **仍存**:`~/proofs/div3` 那份图里 `four_sum_sq_le → attempt_0000` 指针指向已被覆盖的目录(修复只管将来);`evo_start` 经研究模式 preset 没真起过跑;候选运行时 `api: openai-completions` 对 krill 端点会 403(协议应随端点走)。
 
+### DH-3.10:第一张两层图,以及它拆出来的三个装配缺陷(2026-09-03,v10)
+
+PB-Basic-008(IMO-Bench Basic,LEAP 解过)是这条链上**第一次真正的两层分解**:
+`PBBasic008` → `PBBasic008_core` → {`_core_low`, `_core_high`},三条引理全部证出。
+**数学那一半成功了,塌的是管道**——`proof_assemble` 报 `certified.ok: false`,
+理由是 `sketch.lean:156:0: invalid 'import' command`。
+
+之所以现在才炸:此前每一张图都是**一层**(PBBasic002 根 → 两条叶子,PBBasic001
+根 → 一条叶子)。叶子经 `_direct_proof` 只贡献 body,`assemble` 里那条把子树整段
+拼进来的分支**从来没有执行过**——不在任何一次真实会话里,也不在 11 个装配用例里
+(fixture 是一份单层 sketch)。**死代码给自己的 bug 上了隐身衣。**
+
+Lean 只报得出它撞到的第一个。离线重放那份 176 行的文本后,同一处接缝上摞着三个:
+
+- **preamble 每层各发一次。** `render` 把 `sketch.preamble` 打在自己文本开头,而
+  `assemble` 把子树文本和父层文本直接 `join`,于是第 1 行和第 156 行各有一个
+  `import Mathlib`。现在 preamble 由 `assemble` **提到文件顶部发一次**,按行去重、
+  保留首次出现顺序(子树需要额外 `open` 的情况因此不丢),`render` 收
+  `preamble=False`。
+- **子树的引理被声明两次。** 子树自己声明了 `PBBasic008_core`,父层的 `render`
+  又发一遍。现在 `render` 收 `omit`,父层不再发子树已经发过的那个声明。
+- **父层引用了一个谁也没定义的名字。** 旧代码写 `bodies[spec.name] = spec.name +
+  "_assembled"`,指望递归产出一个叫 `<名字>_assembled` 的声明;递归产出的叫
+  `<名字>`。整个文件里 `_assembled` 只出现一次——**就是那个引用**。现在
+  `_assemble_body` 返回 `(文本, 它声明的名字)`,对不上直接报 wiring fault:
+  **父层要靠子树定义它不再自己发的那个声明,这个假设必须被检查,不能被相信。**
+
+#### 组装路线改由调用方选(同一轮)
+
+修完拼接还剩一个更要紧的:会话当场提了一条绕开嵌套的扁平路线、Lean 也接受了,
+**而组装器照旧去拿最老的那条**。`assemble` 取的是 `completed[0]`,而
+`decompositions_of` 是 `ORDER BY created_at`——**「早」和「这份证明是不是你要的」
+毫无关系**,更糟的是这个选择完全不可见。工具面也没有任何参数能表达它,所以会话
+只读翻遍了 `.evo` 也找不到切换的办法:那个办法当时不存在。
+
+- `assemble` / `verify` / `certify` 收 `routes`,`proof_assemble` 收逗号分隔的
+  `routes`,CLI 是可重复的 `--route`(**树下面的目标也可能有多条路线**,只钉住
+  顶上那个,调用方就答不了下面那一层给它的拒绝);
+- 多条 completed 而没点名 → 抛 `AmbiguousRoute`,**列出每条路线的 id 与子目标名**
+  (被拒的一方通常是个只有一轮机会的模型,光给 id 会逼它再查一次图);
+- 点了名却没用上 → 报错,不静默忽略。**默默忽略是最坏的结局**:调用方以为自己
+  选过了,却拿到了它正想避开的那份文件;
+- **路线进认证记录**(`certifications.decomposition_id`)。这不是补字段:
+  `text_sha256` 的注释承诺「文件可从图复现」,而这句话此前成立**恰恰是因为选路
+  规则是死的**。选路一交给调用方,同一份图就能渲染出好几份文件,**一个再也复现
+  不出来的哈希比没有哈希更糟——它读起来像出处**。三个取值互不相同:路线 id /
+  `""`(求解器直接证的,没有路线可选)/ `NULL`(这条记录写在开始记录路线之前)。
+
+**为什么这不越过决定六的线**:选路线是「值得试哪条」,不是「哪条为真」。选错了
+`verify()` 照样重编译整篇、照样报公理集,拿不到一个假的 `certified`,代价只是浪费
+一次编译。模型**只能选,不能删、不能拒、不能改顺序**——能删就等于能让不方便的
+证据消失。
+
+**验到哪一步**:新增两层 fixture(`import Init`,bare `lean` 就能解析,不需要 lake
+环境,而中部重复它复现的是逐字相同的报错)与 10 个用例;EvoHarness 全量 **1228
+passed**,dsh 侧 **107 passed**、`tsc` 干净。变异对照三条**全部应声而倒**:
+①preamble 退回每层各发 → 第 3、10 行出现中部 import;②父层退回重复声明 →
+`lemma_distrib` 声明两次、`_assembled` 复现;③选路退回 `completed[0]` → 两条路线
+时不再抛,静默选最老。**真实的 008 图上复核**:歧义被拒且两条路线都列了出来;
+按扁平路线拼出 168 行、按原来那条嵌套路线拼出 172 行,**两份都只有第 1 行一个
+import、每个声明各一次、`_assembled` 归零**。
+
+**仍存**:`~/proofs/pbbasic008` 的根目标尚未重新认证(改动只保证拼得出来,还没
+再跑一次 Lean);`tool-bash` 在证明模式下报
+`sandbox escalation to "workspace-write" is not strictly wider than this call's
+current "workspace-write" mode` 这条 dsh 侧缺陷**这次连报 7 次**(DH-3.6 记的是
+3 次),确认可复现且在吃轮次。
+
 ### DH-4:安全加固(**已按决定跳过,条件保留**)
 
 用户 2026-08-18 决定跳过安全测试,先做业务实现。以下条目保留但不阻塞 DH-1..DH-3:
@@ -687,7 +755,8 @@ DH-0(done) → DH-0.5(done) → DH-1(done) → DH-2(承重项已闭合,余对拍
 - DH-3 候选不可回溯:不得用于产生对外结论;
 - ~~DH-4 沙箱边界只有代码推论、没有执行证据~~ —— **v8 解除**:编辑器那条用例真的从沙箱里写了,四步含软链绕行与活性对照。仍存的边界:**读那一侧完全没堵**(`workspace-write` 的设计如此),且临时区仍可写——只是 run 目录不再在那儿;
 - **不得声称研究模式在真实会话里起过跑**:DH-3.7 的端到端只覆盖只读那三个工具,`evo_start` 经 preset 这条路没有真起过一次;
-- ~~不得声称证明模式在真实会话里跑通过~~ —— **2026-09-01 晚解除(open / status / sketch 三个)**。仍存的边界:**`proof_attack` 与 `proof_assemble` 经这条通道一次都没跑成过**,且根目标未证——分解被接受只说明路线合法;
+- ~~不得声称证明模式在真实会话里跑通过~~ —— **2026-09-01 晚解除**:五个工具经这条通道都真跑过(DH-3.9 是 open → sketch → attack ×2 → assemble 全链)。此前这条停止线还写着 attack 与 assemble「一次都没跑成过」,那是 DH-3.6 当天早些时候的状态,**同一份文件的 DH-3.9 已经推翻了它而这里没跟着改**——一条读起来在拦、实际早已解除的停止线,会把整张表的可信度一起拉低;
+- **不得声称一份 `certified` 说明了哪份证明,除非它记着走的是哪条路线**(DH-3.10)。`decomposition_id` 为 `NULL` 的旧记录,其文件无法从图复现;
 - **不得从 dsh 会话里起对照基线跑**:`evo_start` 走的 launch 路径表达不了 `BasicSearchProfile`。要 best-of-N 基线,当前只能写 Python 调 `evoharness.api.run()`;
 - DH-4 对抗测试未通过期间:不得无人值守运行(常设);
 - DH-5 反向断言不过(agent 的解读能变成 verdict):copilot 不得接入证据解读环节;

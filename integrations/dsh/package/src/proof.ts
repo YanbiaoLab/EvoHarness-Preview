@@ -147,6 +147,23 @@ function workspace(exec: ToolRunContext): string {
 }
 
 
+/**
+ * Route ids from one comma-separated argument.
+ *
+ * The tool schema here carries scalars only, and `proof_sketch` already takes
+ * its whole proposal as a json string, so a list arrives the same way rather
+ * than as a shape this layer cannot declare. Empty pieces are dropped instead
+ * of forwarded: `--route ''` would reach Python as a lookup for a route named
+ * the empty string, and the error would be about a missing decomposition
+ * rather than about a trailing comma.
+ */
+function splitRoutes(value: unknown): string[] {
+  if (typeof value !== 'string') {
+    return []
+  }
+  return value.split(',').map(part => part.trim()).filter(part => part !== '')
+}
+
 function resolveOut(exec: ToolRunContext, name: string): string {
   if (name === '' || name === '.' || name === '..') {
     throw new Error('out must be the name of a file')
@@ -242,7 +259,13 @@ export function apply(ctx: Context, config: Config = {}) {
       + 'goal instead of reducing it, and a lemma restating an ancestor is '
       + 'refused for making no progress. Rejection comes with a reason; read '
       + 'it and propose differently rather than repeating. Costs one Lean '
-      + 'compile and no model budget, so check a route before spending on it.',
+      + 'compile -- 30 seconds and up once Mathlib is imported -- and no '
+      + 'SOLVER budget, which is not the same as free: the proposal is '
+      + 'yours to write, so that cost lands in the calling session where '
+      + "the board's `spent` will never show it. Prefer it after "
+      + 'proof_attack has come back `task-failed` on the goal: a '
+      + 'decomposition the solver never needed still lands on the board and '
+      + 'afterwards reads as though the graph did work it did not do.',
     parameters: {
       goal_id: { type: 'string', description: 'The goal to decompose.', required: true },
       proposal: { type: 'string', description: 'The json object described above.', required: true },
@@ -264,7 +287,9 @@ export function apply(ctx: Context, config: Config = {}) {
       'Hand one goal to EvoHarness to solve. This is the expensive call: it '
       + 'runs an agent that edits Lean and compiles it, repeatedly. Attack '
       + 'LEAVES -- goals with no accepted decomposition -- because a goal '
-      + 'whose route is already being worked is carried by its subgoals. The '
+      + 'whose route is already being worked is carried by its subgoals. A '
+      + 'goal nobody has decomposed IS a leaf, so this is the FIRST call to '
+      + 'make on a new goal rather than the last, and it needs no flag. The '
       + 'outcome comes from the run itself: `proved`, `task-failed` (tried and '
       + 'could not), or one of `infra-failed` / `budget-exhausted` / '
       + '`interrupted`, which say nothing about the goal and are not evidence '
@@ -277,7 +302,10 @@ export function apply(ctx: Context, config: Config = {}) {
       budget: { type: 'number', description: 'Ceiling for this call. Default 10.' },
       level: {
         type: 'string',
-        description: 'L1 one-shot, or L2 (default) an agent session that can call Lean.',
+        description:
+          'L1 one-shot, or L2 (default) an agent session that can call Lean. '
+          + 'Start a new goal at L1: it is one model call, and on a goal the '
+          + 'model already knows how to prove it is the whole answer.',
       },
       allow_unaccepted_route: {
         type: 'boolean',
@@ -310,9 +338,20 @@ export function apply(ctx: Context, config: Config = {}) {
       + 'earned minutes apart and only compiling the finished article catches '
       + 'a lemma that typechecks alone and not in company. Returns whether it '
       + 'compiled and which axioms Lean says it depends on, and records that '
-      + 'verdict on the goal, passed or failed.',
+      + 'verdict on the goal, passed or failed. When a goal has more than one '
+      + 'completed route this REFUSES and lists them rather than choosing: '
+      + 'which route is compiled is part of what the certification means, and '
+      + 'the alternative was picking the oldest, an attribute with no bearing '
+      + 'on which proof anyone wants. Answer by naming one in `routes`.',
     parameters: {
       goal_id: { type: 'string', description: 'The root goal.', required: true },
+      routes: {
+        type: 'string',
+        description:
+          'Decomposition id to assemble through. A goal further down the '
+          + 'tree can need one too, so several may be given, separated by '
+          + 'commas; each is matched to its own goal.',
+      },
       out: {
         type: 'string',
         description:
@@ -326,6 +365,7 @@ export function apply(ctx: Context, config: Config = {}) {
       harness(config),
       ['-m', MODULE, ...commonFlags(exec, config), 'assemble',
         '--goal', String(args.goal_id),
+        ...splitRoutes(args.routes).flatMap(route => ['--route', route]),
         ...(args.out ? ['--out', resolveOut(exec, String(args.out))] : []),
         ...(args.show_text ? ['--show-text'] : [])],
       exec.signal, 'assembling the proof',

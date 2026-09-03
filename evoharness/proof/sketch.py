@@ -33,7 +33,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,7 +143,11 @@ class RenderedSketch:
 
 
 def render(
-    sketch: Sketch, *, bodies: Mapping[str, str] | None = None
+    sketch: Sketch,
+    *,
+    bodies: Mapping[str, str] | None = None,
+    preamble: bool = True,
+    omit: Collection[str] = (),
 ) -> RenderedSketch:
     """Lay the sketch out as a Lean file.
 
@@ -151,13 +155,28 @@ def render(
     validation. Supplying bodies gives the assembled proof, for final
     re-verification. One function for both, so the thing checked and the thing
     finally compiled cannot drift apart.
+
+    The two keyword switches exist for `assembly.assemble`, which renders a
+    tree of sketches into ONE file rather than a sketch into a file:
+
+    - `preamble=False` because an `import` is only legal at the top, and a
+      nested sketch's text lands in the middle. The imports of a whole tree
+      are hoisted and emitted once by the caller.
+    - `omit` because a subgoal that was itself decomposed already has its
+      declaration written out by its own rendered subtree, which appears
+      earlier in the file. Emitting it again is a duplicate declaration --
+      and the version emitted here would have to cite a body that nothing
+      defines.
+
+    Both defaults keep a single sketch rendering exactly as before.
     """
 
     bodies = dict(bodies or {})
+    omitted = frozenset(omit)
     lines: list[str] = []
     declaration_lines: dict[str, int] = {}
 
-    if sketch.preamble:
+    if preamble and sketch.preamble:
         lines.extend(sketch.preamble.splitlines())
         lines.append("")
 
@@ -171,6 +190,8 @@ def render(
         lines.append("")
 
     for spec in sketch.subgoals:
+        if spec.name in omitted:
+            continue
         emit(spec.name, spec.signature, bodies.get(spec.name, "sorry"))
     emit(sketch.parent_name, sketch.parent_signature, sketch.parent_body)
 
