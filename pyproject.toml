@@ -48,9 +48,6 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["evoharness*"]
 
-[tool.setuptools.package-data]
-"evoharness.evoweb" = ["static/**/*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
