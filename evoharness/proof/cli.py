@@ -37,6 +37,7 @@ from .controller import ProofController
 from .grade import make_grader
 from .graph import DecompositionStatus, GoalStatus
 from .identity import ExactTextHasher, LeanExprHasher
+from .inspect import InspectError, attempt_view
 from .propose import ProposalError, parse_proposal
 from .run_solver import ApiRunSolver, declaration_name
 from .sketch import LeanRunner, LeanSketchValidator, SketchUnavailable
@@ -50,6 +51,13 @@ WORK_ENV = "EVO_PROOF_WORK"
 #: `lean`, which is right for core-Lean goals and wrong for every real
 #: benchmark problem.
 PROJECT_ENV = "EVO_LEAN_PROJECT"
+
+#: How far a goal's lease outlives the attack it covers. It has to absorb
+#: everything around the solver's own limit -- starting an interpreter, and
+#: writing the attempt down afterwards -- plus the margin the caller keeps
+#: back, because a caller that waits longer than the solver is exactly the
+#: arrangement this layer is built for.
+_LEASE_MARGIN_S = 300.0
 
 
 def _runner(args) -> LeanRunner:
@@ -103,8 +111,12 @@ def _goal_view(store: ProofGraphStore, goal) -> dict:
         "status": goal.status.value,
         "certified": _certification_view(store, goal.id),
         "statement": goal.statement,
+        # The id is here so `attempt` can be asked about one of these rather
+        # than only about the most recent: without it the board describes
+        # attempts the caller has no way to name.
         "attempts": [
-            {"outcome": a.outcome.value, "note": a.note[:200]} for a in attempts
+            {"id": a.id, "outcome": a.outcome.value, "note": a.note[:200]}
+            for a in attempts
         ],
         "decompositions": [
             {
@@ -367,6 +379,21 @@ def cmd_attack(args) -> dict:
         store.close()
 
 
+def cmd_attempt(args) -> dict:
+    """Read one finished attempt back. Costs nothing and starts nothing."""
+
+    store = _store(args)
+    try:
+        return attempt_view(
+            store,
+            args.goal,
+            args.attempt or None,
+            include_code=args.code,
+        )
+    finally:
+        store.close()
+
+
 def cmd_assemble(args) -> dict:
     """The only thing that certifies a root: compile the finished article."""
 
@@ -434,6 +461,7 @@ def _controller(
     args, store: ProofGraphStore, *, solver_needed: bool = True
 ) -> ProofController:
     from evoharness import BasicSearchProfile, ComponentSpec, RunSpec
+    from evoharness.contracts.run import ProposalLimits
 
     runner = _runner(args)
     work = Path(args.work or os.environ.get(WORK_ENV) or ".proof")
@@ -448,6 +476,16 @@ def _controller(
             ),
             output_dir=str(out),
             seed=args.seed,
+            # Set rather than defaulted. `ProposalLimits.timeout_s` defaults to
+            # 5400s, which was chosen for an evolution run that owns its own
+            # process; here the caller is a tool call with a ceiling of its
+            # own, and whichever fires first decides what comes back. The
+            # caller's ceiling produces `interrupted` -- a non-verdict, no
+            # evidence about the goal, nothing recorded about the run -- while
+            # this one produces `timeout`, which is a capability outcome. So
+            # this must be the lower of the two, and the caller passes down
+            # what it can actually wait for.
+            proposal_limits=ProposalLimits(timeout_s=args.attack_timeout),
         ),
         search_profile_factory=lambda: BasicSearchProfile(
             num_trajectories=args.trajectories, proposal_mode=mode
@@ -456,6 +494,7 @@ def _controller(
         transport=_transport(args),
         preamble=_read_preamble(args),
         level=args.level,
+        on_attempt_dir=store.note_attempt_dir,
     )
     return ProofController(
         store,
@@ -466,6 +505,15 @@ def _controller(
         decompositions=_NoDecompositions(),
         validate_sketch=LeanSketchValidator(runner=runner),
         max_capability_attempts=args.max_attempts,
+        # Longer than one attack can possibly last, and derived from it rather
+        # than chosen. An expired lease means one thing -- the holder is dead
+        # -- and recovery acts on it: force-releases the goal and records an
+        # INTERRUPTED attempt. A lease shorter than the work it covers makes
+        # that statement false halfway through every long attack, and then a
+        # second solver starts on the same lemma while the first is still
+        # proving it, with a fabricated interruption written against the one
+        # that was working.
+        lease_ttl_s=args.attack_timeout + _LEASE_MARGIN_S,
     )
 
 
@@ -555,6 +603,14 @@ def build_parser() -> argparse.ArgumentParser:
     _solver_flags(p)
     p.set_defaults(func=cmd_attack)
 
+    p = sub.add_parser("attempt")
+    p.add_argument("--goal", required=True)
+    p.add_argument("--attempt", default="",
+                   help="one attempt id; omit for the most recent")
+    p.add_argument("--code", action="store_true",
+                   help="include the Lean file of the latest candidate")
+    p.set_defaults(func=cmd_attempt)
+
     p = sub.add_parser("assemble")
     p.add_argument("--goal", required=True)
     p.add_argument("--out", default="")
@@ -572,6 +628,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _solver_flags(p) -> None:
     p.add_argument("--level", choices=("L1", "L2"), default="L2",
                    help="L1 one-shot; L2 an agent session that can call Lean")
+    # Deliberately below anything that calls this. A caller with a shorter
+    # ceiling gets `interrupted` and learns nothing about the goal; the whole
+    # point of naming this is that the solver stops first, with a verdict.
+    p.add_argument("--attack-timeout", type=float, default=840.0,
+                   metavar="SECONDS",
+                   help="how long one attempt may run before it stops itself; "
+                        "must be under the caller's own ceiling")
     p.add_argument("--trajectories", type=int, default=1)
     p.add_argument("--max-attempts", type=int, default=1)
     p.add_argument("--seed", type=int, default=1)
@@ -582,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         payload = args.func(args)
     except (
-        ValueError, KeyError, RuntimeError, SketchUnavailable, AssemblyError
+        ValueError, KeyError, RuntimeError, SketchUnavailable, AssemblyError,
+        InspectError,
     ) as exc:
         json.dump({"error": f"{type(exc).__name__}: {exc}"}, sys.stdout)
         sys.stdout.write("\n")

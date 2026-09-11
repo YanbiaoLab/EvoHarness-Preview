@@ -99,11 +99,19 @@ class ApiRunSolver:
     transport: object = None
     preamble: str = ""
     level: str = "L2"
+    #: Told (goal_id, run_dir) the moment a directory is claimed, before
+    #: anything is written into it. The graph uses it to survive this process
+    #: dying: an attempt that never returns is recorded by recovery, which
+    #: otherwise has no way to learn where the work went. Optional -- the
+    #: solver runs identically without it, it just leaves an orphan.
+    on_attempt_dir: Callable[[str, str], None] | None = None
 
     def attack(self, goal: Goal, *, budget: float) -> AttemptResult:
         from evoharness import ResolvedTask, api
 
         run_dir = claim_attempt_dir(Path(self.work_root), goal.id)
+        if self.on_attempt_dir is not None:
+            self.on_attempt_dir(goal.id, str(run_dir))
         seed_dir = run_dir / "seed"
         seed_dir.mkdir()
         (seed_dir / SEED_MAIN).write_text(

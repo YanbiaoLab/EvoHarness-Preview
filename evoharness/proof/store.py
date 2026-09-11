@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS goals (
     exhausted_at_solver TEXT,
     lease_owner         TEXT,
     lease_expires_at    REAL,
+    lease_run_dir       TEXT,
     created_at          REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS decompositions (
@@ -116,6 +117,7 @@ def _goal(row: sqlite3.Row) -> Goal:
         exhausted_at_solver=row["exhausted_at_solver"],
         lease_owner=row["lease_owner"],
         lease_expires_at=row["lease_expires_at"],
+        lease_run_dir=row["lease_run_dir"],
     )
 
 
@@ -146,6 +148,7 @@ class ProofGraphStore:
 
         for table, column, decl in (
             ("certifications", "decomposition_id", "TEXT"),
+            ("goals", "lease_run_dir", "TEXT"),
         ):
             existing = {
                 row["name"]
@@ -652,8 +655,12 @@ class ProofGraphStore:
 
         now = time.time() if now is None else now
         with self._conn:
+            # The working directory is cleared with the same UPDATE that takes
+            # the lease: a new holder inherits nothing, and a stale pointer
+            # from the previous one can never be read as this one's.
             cursor = self._conn.execute(
-                "UPDATE goals SET lease_owner = ?, lease_expires_at = ?"
+                "UPDATE goals SET lease_owner = ?, lease_expires_at = ?,"
+                " lease_run_dir = NULL"
                 " WHERE id = ? AND (lease_owner IS NULL"
                 "                   OR lease_expires_at IS NULL"
                 "                   OR lease_expires_at <= ?)",
@@ -679,21 +686,36 @@ class ProofGraphStore:
         ).fetchall()
         return [_goal(row) for row in rows]
 
+    def note_attempt_dir(self, goal_id: str, run_dir: str) -> None:
+        """Record where the lease holder is about to work.
+
+        Called when the directory is claimed and before anything is written
+        into it, because the case this exists for is the worker dying with the
+        attempt unrecorded. Written after the fact it would be missing exactly
+        when it is needed.
+        """
+
+        with self._conn:
+            self._conn.execute(
+                "UPDATE goals SET lease_run_dir = ? WHERE id = ?",
+                (run_dir, goal_id),
+            )
+
     def force_release(self, goal_id: str) -> None:
         """Clear a lease regardless of who holds it. Recovery only."""
 
         with self._conn:
             self._conn.execute(
-                "UPDATE goals SET lease_owner = NULL, lease_expires_at = NULL"
-                " WHERE id = ?",
+                "UPDATE goals SET lease_owner = NULL, lease_expires_at = NULL,"
+                " lease_run_dir = NULL WHERE id = ?",
                 (goal_id,),
             )
 
     def release(self, goal_id: str, owner: str) -> None:
         with self._conn:
             self._conn.execute(
-                "UPDATE goals SET lease_owner = NULL, lease_expires_at = NULL"
-                " WHERE id = ? AND lease_owner = ?",
+                "UPDATE goals SET lease_owner = NULL, lease_expires_at = NULL,"
+                " lease_run_dir = NULL WHERE id = ? AND lease_owner = ?",
                 (goal_id, owner),
             )
 

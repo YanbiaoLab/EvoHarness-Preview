@@ -114,6 +114,11 @@ class Goal:
     #: the goal's semantic proof status.
     lease_owner: str | None = None
     lease_expires_at: float | None = None
+    #: Where the lease holder is working, written before any work happens in
+    #: it. A worker that dies records nothing, so this is the only thing that
+    #: can tell recovery which directory the dead attempt left behind; without
+    #: it the artifacts survive as an orphan nothing points at.
+    lease_run_dir: str | None = None
 
 
 @dataclass(frozen=True)

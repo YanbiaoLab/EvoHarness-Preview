@@ -21,7 +21,7 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 
 import * as EvoProof from '../src/proof.ts'
 import type { Config } from '../src/proof.ts'
-import { LEAN_TIMEOUT_MS } from '../src/proof.ts'
+import { LEAN_TIMEOUT_MS, solverTimeoutS } from '../src/proof.ts'
 import { TIMEOUT_MS } from '../src/cli.ts'
 
 /** `evoharness.proof.cli`'s own `--lean-timeout` default, in milliseconds. */
@@ -228,6 +228,23 @@ describe('how long a call may take', () => {
       .resolves.toBe('still running')
   })
 
+  it('gives the solver a ceiling under the one this layer waits', async () => {
+    // Ordering again, and it decides what an unfinished attack is worth. The
+    // solver stopping itself produces `timeout`: an outcome about the goal,
+    // with the run recorded and its directory named. This layer stopping
+    // first produces `interrupted`, which says nothing about the goal, and
+    // leaves the graph pointing at no directory at all.
+    const ctx = await mount()
+    void ctx
+
+    for (const ceiling of [900_000, 1_500_000, 61_000]) {
+      expect(solverTimeoutS(ceiling) * 1000).toBeLessThan(ceiling)
+    }
+    // Never zero or negative, however tight the ceiling: a solver told it has
+    // no time is a configuration error reported as a proof result.
+    expect(solverTimeoutS(1)).toBeGreaterThan(0)
+  })
+
   it('gives the compiling calls a ceiling above Lean\'s own', async () => {
     // Ordering is what is asserted, not a number. A compiling call must
     // outlast the Python side's `--lean-timeout` so that a slow compile comes
@@ -393,6 +410,35 @@ describe('where an assembled proof is written', () => {
     const ctx = await mount()
 
     expect(await argvOf(ctx, 'proof_assemble', { goal_id: 'g1' })).not.toContain('--out')
+  })
+
+  it('reads an attempt back without naming one, and names one when asked', async () => {
+    // The board lists attempts, so the caller can point at an older one; with
+    // nothing named this is about the most recent, which is what a caller
+    // deciding its next move is asking about.
+    const ctx = await mount()
+
+    expect(await argvOf(ctx, 'proof_attempt', { goal_id: 'g1' }))
+      .toEqual(expect.arrayContaining(['attempt', '--goal', 'g1']))
+    expect(await argvOf(ctx, 'proof_attempt', { goal_id: 'g1' }))
+      .not.toContain('--attempt')
+
+    expect(await argvOf(ctx, 'proof_attempt', {
+      goal_id: 'g1', attempt_id: 'att_7', code: true,
+    })).toEqual(expect.arrayContaining(['--attempt', 'att_7', '--code']))
+  })
+
+  it('tells the solver how long it has, derived from its own ceiling', async () => {
+    // One number, not two. The pair that drifted apart was 900s here and the
+    // 5400s default on the far side, and nobody chose them to go together --
+    // so every goal needing more than 15 minutes could only ever come back
+    // `interrupted`.
+    const ctx = await mount({ attackTimeoutMs: 300_000 })
+
+    expect(await argvOf(ctx, 'proof_attack', { goal_id: 'g1' }))
+      .toEqual(expect.arrayContaining([
+        '--attack-timeout', String(solverTimeoutS(300_000)),
+      ]))
   })
 
   it('passes each named route through as its own flag', async () => {

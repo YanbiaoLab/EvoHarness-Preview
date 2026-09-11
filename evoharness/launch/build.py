@@ -118,44 +118,23 @@ def build(cfg: LaunchConfig) -> BuiltRun:
     transport = task.transport
     if cfg.live:
         api_base = os.environ.get("EVOHARNESS_API_BASE", DEFAULT_LLM_API_BASE)
-        # `EVOHARNESS_API_KEY` first, and the pairing with `EVOHARNESS_API_BASE`
-        # above is the reason: a key and the endpoint it is good at belong to
-        # the same gateway, and only one of these two names says which gateway
-        # without naming a vendor. That mattered the moment the endpoint moved
-        # off Aliyun — `ALIYUN_MAAS_API_KEY` then held a credential for
-        # somewhere else, and every config reading it described the wrong
-        # provider. It stays accepted so a machine configured before the move
-        # keeps running; it is no longer what anything is named after.
+        
         api_key = os.environ.get("EVOHARNESS_API_KEY") or os.environ.get(
             "ALIYUN_MAAS_API_KEY"
         )
         if not api_key:
-            # Raised rather than routed through `parser.error`: the assembly
-            # has to run where there is no parser — a detached start, a
-            # resume — and reaching back into argparse is the one line that
-            # would keep it here.
+           
             raise LaunchConfigError(
                 "--live requires EVOHARNESS_API_KEY "
                 "(ALIYUN_MAAS_API_KEY is still read for older deployments)"
             )
-        # Reasoning models spend minutes before the first token, and this
-        # task's prompt is large (task brief + research brief + a
-        # multi-file genome). The 120s default timed out every proposal on
-        # MiniMax-M3, which the proposer breaker correctly reads as a dead
-        # proposer — a healthy model would be mistaken for a broken one.
-        # The protocol is explicit, never autodetected: a gateway that serves
-        # only /responses rejects /chat/completions with the same 403 it uses
-        # for an unauthorized token, so a silent fallback would run the whole
-        # search on a protocol nobody chose and report nothing.
+        
         responses = os.environ.get("EVOHARNESS_LLM_PROTOCOL", "chat") == "responses"
         make_transport = (
             make_openai_responses_transport if responses
             else make_openai_compat_transport
         )
-        # Streaming is Responses-only and opt-in. It exists for delivery
-        # robustness: a proxy that cuts the body mid-flight ends the stream
-        # without its terminal event, which retries cleanly, instead of
-        # yielding a JSON prefix that may or may not parse.
+  
         if responses and os.environ.get("EVOHARNESS_LLM_STREAM") == "1":
             make_transport = functools.partial(
                 make_openai_responses_transport, stream=True
@@ -163,35 +142,14 @@ def build(cfg: LaunchConfig) -> BuiltRun:
         transport = make_transport(
             api_base,
             api_key,
-            # Sized to measured latency, remeasured after the prompt grew.
-            # MiniMax-M3 on this task's ~12k-token prompt, concurrency 4:
-            # median 242s, max 283s, no failures. At 300s the median sat 19%
-            # under the cliff and calls were being truncated mid-flight — in
-            # the concurrency probe every "failure" landed on exactly 300s,
-            # so they were this timeout, not the provider.
-            #
-            # 600s was 2.5x the median, and that was the wrong anchor: the
-            # right one is the measured MAX of 283s. At 600 a hung call cost
-            # ten minutes, and retries nest, so run modmul_r6 spent thirty
-            # minutes on a single proposal while the rest of its generation
-            # waited. 400s clears the observed max by 41% and caps a hang at
-            # two thirds of what it did.
             timeout_s=float(os.environ.get("EVOHARNESS_LLM_TIMEOUT_S", 400)),
         )
 
-    # Built before RunSpec, not after: when a dsh runtime drives the proposals
-    # it IS the proposer backend, and describing the transport instead would
-    # leave the deployment out of every hash that decides whether a resume is
-    # the same experiment. The pair is validated in LaunchConfig, which every
-    # caller goes through — including the ones with no command line.
+   
     agent_backend = None
     if cfg.dsh_config is not None:
         if proposal.mode == "single_shot":
-            # The single-shot lane answers in one message and never opens a
-            # session, so it returns before it looks at the backend. Accepting
-            # the pair here would put a dsh runtime in the run's identity for
-            # a run that proposed entirely in-process — the manifest would name
-            # a runtime no candidate ever ran inside.
+            
             raise LaunchConfigError(
                 "proposal.mode=single_shot cannot use an agent runtime; "
                 "pass --set proposal.mode=agentic (or conversational/hybrid) "
@@ -211,10 +169,7 @@ def build(cfg: LaunchConfig) -> BuiltRun:
                 runtime_cwd=cfg.dsh_runtime.resolve().parents[3],
                 session_root=cfg.run_dir / "dsh_sessions",
                 run_dir=cfg.run_dir,
-                # The tool `candidate.cordis.yml` mounts so a candidate can
-                # read the reference programs its prompt lists. Declared here
-                # because Python cannot see the runtime's tool table; the
-                # prompt names exactly this or nothing.
+              
                 peer_fetch_tool="evo_inspect_candidate",
                 model=proposal.model or search.llm_models[0],
             )

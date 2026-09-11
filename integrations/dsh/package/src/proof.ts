@@ -58,6 +58,27 @@ const MODULE = 'evoharness.proof.cli'
 const ATTACK_TIMEOUT_MS = 900_000
 
 /**
+ * How much of an attack's ceiling is kept back for the solver to stop itself.
+ *
+ * The solver is told `ceiling - margin` and this layer waits the full ceiling,
+ * so the solver's own timeout always fires first. That ordering is the whole
+ * point: the solver stopping produces `timeout`, an outcome that says the goal
+ * was not closed in the time given, while this layer stopping produces
+ * `interrupted` -- no verdict, no cost recorded, and a run directory the graph
+ * cannot name. Two ceilings set independently is how every goal that needs
+ * more than the shorter one becomes permanently unjudgeable.
+ *
+ * The margin covers starting an interpreter and writing the record, not the
+ * proving.
+ */
+const ATTACK_MARGIN_MS = 60_000
+
+/** The seconds the solver is given, derived from what this layer will wait. */
+export function solverTimeoutS(ceilingMs: number): number {
+  return Math.max(1, Math.floor((ceilingMs - ATTACK_MARGIN_MS) / 1000))
+}
+
+/**
  * Ceiling on a call that compiles: `proof_sketch` and `proof_assemble`.
  *
  * Must stay above the Python side's own `--lean-timeout`. Whichever ceiling
@@ -315,18 +336,60 @@ export function apply(ctx: Context, config: Config = {}) {
       },
     },
     output: passthrough,
-    execute: async (args, exec) => callHarness(
-      harness(config),
-      ['-m', MODULE, ...commonFlags(exec, config), 'attack',
-        '--goal', String(args.goal_id),
-        ...(args.budget === undefined ? [] : ['--budget', String(args.budget)]),
-        ...(args.level ? ['--level', String(args.level)] : []),
-        ...(args.allow_unaccepted_route ? ['--allow-unaccepted-route'] : [])],
-      exec.signal, 'attacking a goal',
-      {
-        timeoutMs: config.attackTimeoutMs ?? ATTACK_TIMEOUT_MS,
-        env: await modelCredential(ctx),
+    execute: async (args, exec) => {
+      const ceilingMs = config.attackTimeoutMs ?? ATTACK_TIMEOUT_MS
+      return callHarness(
+        harness(config),
+        ['-m', MODULE, ...commonFlags(exec, config), 'attack',
+          '--goal', String(args.goal_id),
+          // Derived from the ceiling above rather than defaulted on the far
+          // side, so raising one raises both and they cannot drift apart.
+          '--attack-timeout', String(solverTimeoutS(ceilingMs)),
+          ...(args.budget === undefined ? [] : ['--budget', String(args.budget)]),
+          ...(args.level ? ['--level', String(args.level)] : []),
+          ...(args.allow_unaccepted_route ? ['--allow-unaccepted-route'] : [])],
+        exec.signal, 'attacking a goal',
+        {
+          timeoutMs: ceilingMs,
+          env: await modelCredential(ctx),
+        },
+      )
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'proof_attempt',
+    description:
+      'Read one finished attempt back: what the solver tried, what Lean said '
+      + 'about it, and what it spent. Costs nothing and starts nothing. Use '
+      + 'it after an attack comes back `task-failed`, before deciding whether '
+      + 'to attack again or decompose -- the board only records the outcome '
+      + 'word, and the compiler errors are the part that says WHY. Read '
+      + '`conclusive` first: on `interrupted`, `infra-failed` or '
+      + '`budget-exhausted` it is false, the run was stopped rather than '
+      + 'finished, and what it shows is where the solver happened to be '
+      + 'rather than anything it decided. The solver\'s own `summary` is what '
+      + 'it believed it was doing; `lean_errors` is what actually happened.',
+    parameters: {
+      goal_id: { type: 'string', description: 'The goal.', required: true },
+      attempt_id: {
+        type: 'string',
+        description:
+          'One attempt, as listed by proof_status. Omit for the most recent.',
       },
+      code: {
+        type: 'boolean',
+        description: 'Include the Lean file of the last candidate.',
+      },
+    },
+    output: passthrough,
+    execute: (args, exec) => callHarness(
+      harness(config),
+      ['-m', MODULE, ...commonFlags(exec, config), 'attempt',
+        '--goal', String(args.goal_id),
+        ...(args.attempt_id ? ['--attempt', String(args.attempt_id)] : []),
+        ...(args.code ? ['--code'] : [])],
+      exec.signal, 'reading an attempt',
     ),
   }))
 

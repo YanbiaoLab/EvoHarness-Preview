@@ -79,14 +79,107 @@ def test_an_abandoned_lease_becomes_a_recorded_interruption(store):
     assert "worker-that-died" in store.attempts_of(root.id)[0].note
 
 
+def test_the_interruption_says_where_the_dead_attempt_was_working(store):
+    """承重项。死掉的 worker 什么都没记,而它的轨迹还在磁盘上——一条指不出
+    目录的记录,读起来和「什么都没试过」一模一样,轨迹就此成为孤儿。"""
+
+    root = store.upsert_goal(*ROOT)
+    store.claim(root.id, "worker-that-died", ttl_s=60, now=1000.0)
+    store.note_attempt_dir(root.id, "/runs/id_root/attempt_0007")
+
+    controller_for(store, StubSolver({})).recover(now=2000.0)
+
+    attempt = store.attempts_of(root.id)[0]
+    assert attempt.outcome is Outcome.INTERRUPTED
+    assert attempt.run_dir == "/runs/id_root/attempt_0007"
+
+
 def test_recovery_frees_the_goal_for_the_next_worker(store):
     root = store.upsert_goal(*ROOT)
     store.claim(root.id, "worker-that-died", ttl_s=60, now=1000.0)
+    store.note_attempt_dir(root.id, "/runs/id_root/attempt_0007")
 
     controller_for(store, StubSolver({})).recover(now=2000.0)
 
     assert store.goal(root.id).lease_owner is None
+    assert store.goal(root.id).lease_run_dir is None
     assert store.claim(root.id, "worker-b", ttl_s=60, now=2000.0) is True
+
+
+def test_a_new_holder_inherits_no_directory_from_the_last_one(store):
+    """指针跟着租约走,而**接手过期租约**是它唯一会出错的那条路。
+
+    worker A 记下目录后死掉,worker B 直接抢走过期的租约(恢复扫描还没跑到)。
+    B 要是也死了,而指针还是 A 的,那次中断就会指着**别人的**轨迹——
+    一个指错地方的指针比没有指针难发现得多,它一路读起来都成立。
+
+    刻意不先 `release`:那条路上指针本来就被清掉了,测它等于什么都没测。
+    """
+
+    root = store.upsert_goal(*ROOT)
+    store.claim(root.id, "worker-a", ttl_s=60, now=1000.0)
+    store.note_attempt_dir(root.id, "/runs/id_root/attempt_0000")
+
+    assert store.claim(root.id, "worker-b", ttl_s=60, now=2000.0) is True
+    assert store.goal(root.id).lease_run_dir is None
+
+    controller_for(store, StubSolver({})).recover(now=9000.0)
+
+    attempt = store.attempts_of(root.id)[0]
+    assert "worker-b" in attempt.note
+    assert attempt.run_dir is None
+
+
+def test_two_controllers_do_not_share_a_name(store):
+    """承重项,而且是并行的前提。
+
+    租约是**按名字**释放的(`WHERE lease_owner = ?`)。两个控制器都叫
+    `controller`,先收工的那个就会把另一个还攥着的目标放出来,第三个随即在
+    同一条引理上起跑——**正是租约要防的那个失败,从标识符这一侧绕了回来。**
+    """
+
+    root = store.upsert_goal(*ROOT)
+    a = controller_for(store, StubSolver({}))
+    b = controller_for(store, StubSolver({}))
+
+    assert a.owner != b.owner
+
+    store.claim(root.id, a.owner, ttl_s=600, now=1000.0)
+    store.release(root.id, b.owner)
+
+    assert store.goal(root.id).lease_owner == a.owner
+    assert store.claim(root.id, b.owner, ttl_s=600, now=1100.0) is False
+
+
+def test_the_interruption_names_a_worker_rather_than_a_role(store):
+    """`lease held by controller expired` 在 N 个 worker 之下什么也没说。"""
+
+    root = store.upsert_goal(*ROOT)
+    a = controller_for(store, StubSolver({}))
+    store.claim(root.id, a.owner, ttl_s=60, now=1000.0)
+
+    controller_for(store, StubSolver({})).recover(now=2000.0)
+
+    assert a.owner in store.attempts_of(root.id)[0].note
+
+
+def test_an_older_graph_opens_without_the_column_and_reads(tmp_path):
+    """图比这个字段活得久。`CREATE TABLE IF NOT EXISTS` 加得了表、加不了列,
+    所以旧图会在第一次读的时候炸——而它们正是要恢复的那些。"""
+
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    ProofGraphStore(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE goals DROP COLUMN lease_run_dir")
+
+    store = ProofGraphStore(path)
+    try:
+        goal = store.upsert_goal(*ROOT)
+        assert store.goal(goal.id).lease_run_dir is None
+    finally:
+        store.close()
 
 
 def test_a_crash_is_not_evidence_that_a_lemma_is_hard(store):

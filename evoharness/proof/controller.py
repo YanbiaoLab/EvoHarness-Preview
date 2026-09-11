@@ -23,6 +23,9 @@ number without anything having to be written twice.
 
 from __future__ import annotations
 
+import os
+import socket
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -36,7 +39,7 @@ from .graph import (
     Outcome,
 )
 from .sketch import Sketch, SketchUnavailable, Validation
-from .solver import Solver
+from .solver import AttemptResult, Solver
 from .store import ProofGraphStore
 
 #: A goal whose route is already being worked is not one to attack directly.
@@ -45,6 +48,25 @@ from .store import ProofGraphStore
 _ROUTE_IN_PROGRESS = frozenset(
     {DecompositionStatus.PROPOSED, DecompositionStatus.ACCEPTED}
 )
+
+
+def worker_id() -> str:
+    """A name no other worker can be using.
+
+    The lease is released by name -- `WHERE lease_owner = ?` -- so a shared
+    name is not cosmetic. Two controllers both called `controller` means the
+    one that finishes releases the other's goal while it is still proving it,
+    and a third then starts on the same lemma: the "two solvers on one lemma"
+    failure the lease exists to prevent, reintroduced through the identifier.
+    That is why this is the default rather than something callers opt into --
+    a name that collides has to be asked for.
+
+    The random suffix is for pid reuse. Host and pid alone read better, and
+    that is what they are here for: the note on an interrupted attempt names
+    this, and `controller` named nothing.
+    """
+
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
 
 class DecompositionSource(Protocol):
     """Where a route from a goal to subgoals comes from.
@@ -134,7 +156,7 @@ class ProofController:
         max_consecutive_infra: int = 5,
         select: Callable[[Sequence[Goal]], Goal | None] = select_first_open,
         lease_ttl_s: float = 600.0,
-        owner: str = "controller",
+        owner: str | None = None,
         decompose_root_first: bool = False,
     ):
         self.store = store
@@ -145,7 +167,7 @@ class ProofController:
         self.max_consecutive_infra = max_consecutive_infra
         self.select = select
         self.lease_ttl_s = lease_ttl_s
-        self.owner = owner
+        self.owner = owner or worker_id()
         # LEAP's order is direct-first, and that is the default. Inverting it
         # for the ROOT only is the "with graph" arm P-5 needs: comparing
         # decomposition against direct proving requires being able to ask for
@@ -206,10 +228,20 @@ class ProofController:
         recovered: list[str] = []
         self.revalidate_proposed()
         for goal in self.store.stale_leases(now):
+            # `lease_run_dir` is the only thing that survives a worker dying
+            # mid-attempt. Without it the record says an attempt happened and
+            # points nowhere, while its trajectory sits on disk as an orphan --
+            # which reads afterwards as "nothing was tried".
+            result = AttemptResult.interrupted(
+                run_dir=goal.lease_run_dir,
+                note=f"lease held by {goal.lease_owner} expired without release",
+            )
             self.store.record_attempt(
                 goal.id,
-                Outcome.INTERRUPTED,
-                note=f"lease held by {goal.lease_owner} expired without release",
+                result.outcome,
+                run_dir=result.run_dir,
+                cost=result.cost,
+                note=result.note,
             )
             self.store.force_release(goal.id)
             self.store.propagate(

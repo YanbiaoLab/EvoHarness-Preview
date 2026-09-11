@@ -172,3 +172,137 @@ def test_running_out_of_budget_is_not_a_verdict_on_the_goal():
     assert result.cost == 0.0
     # 剧本没有被消耗:钱到位之后这次尝试还在。
     assert solver.attack(GOAL, budget=100).outcome is Outcome.PROVED
+
+
+# --- 工作目录要在动工之前先报出来 --------------------------------------------
+
+def test_the_attempt_directory_is_announced_before_any_work_in_it(
+    monkeypatch, tmp_path
+):
+    """承重项。这个回调存在的唯一场景是**进程死在半路**,那时候谁都不会再
+    写什么了。跑完之后再报,恰恰在需要它的那一次缺席。"""
+
+    from pathlib import Path
+
+    from evoharness import api
+    from evoharness.proof.run_solver import ApiRunSolver
+
+    told: list[tuple[str, str]] = []
+    seen_at_run_time: list[list] = []
+
+    def fake_run(task, run_spec, profile, transport=None):
+        seen_at_run_time.append(list(told))
+        raise RuntimeError("stopped here on purpose")
+
+    monkeypatch.setattr(api, "run", fake_run)
+    solver = ApiRunSolver(
+        work_root=tmp_path / "runs",
+        run_spec_factory=lambda out: object(),
+        search_profile_factory=lambda: object(),
+        grade_func=lambda *a, **k: None,
+        on_attempt_dir=lambda goal_id, run_dir: told.append((goal_id, run_dir)),
+    )
+
+    result = solver.attack(GOAL, budget=1.0)
+
+    assert result.outcome is Outcome.INFRA_FAILED
+    assert [goal_id for goal_id, _ in told] == [GOAL.id]
+    assert Path(told[0][1]).is_dir()
+    # 求解器开跑的那一刻,回调已经发生过了——不是跑完才补。
+    assert seen_at_run_time == [told]
+    assert told[0][1] == result.run_dir
+
+
+def test_a_solver_without_the_callback_runs_the_same(monkeypatch, tmp_path):
+    """回调是可选的:没有它只是留下一个孤儿目录,不是跑不起来。"""
+
+    from evoharness import api
+    from evoharness.proof.run_solver import ApiRunSolver
+
+    monkeypatch.setattr(api, "run", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("stopped here on purpose")
+    ))
+    solver = ApiRunSolver(
+        work_root=tmp_path / "runs",
+        run_spec_factory=lambda out: object(),
+        search_profile_factory=lambda: object(),
+        grade_func=lambda *a, **k: None,
+    )
+
+    assert solver.attack(GOAL, budget=1.0).outcome is Outcome.INFRA_FAILED
+
+
+# --- 一次尝试能跑多久,由调用方定 --------------------------------------------
+
+def _attack_args(tmp_path, *extra):
+    from evoharness.proof import cli
+
+    return cli.build_parser().parse_args(
+        ["--work", str(tmp_path / ".evo"), "attack", "--goal", "g1", *extra]
+    )
+
+
+def _run_spec(tmp_path, args):
+    from evoharness.proof import cli
+    from evoharness.proof.store import ProofGraphStore
+
+    store = ProofGraphStore(tmp_path / ".evo" / "graph.db")
+    try:
+        controller = cli._controller(args, store)
+        return controller.solver.run_spec_factory(tmp_path / "out")
+    finally:
+        store.close()
+
+
+def test_the_callers_ceiling_reaches_the_run_spec(monkeypatch, tmp_path):
+    monkeypatch.setenv("EVOHARNESS_API_BASE", "https://example.invalid")
+    monkeypatch.setenv("EVOHARNESS_API_KEY", "k")
+
+    spec = _run_spec(tmp_path, _attack_args(tmp_path, "--attack-timeout", "123"))
+
+    assert spec.proposal_limits.timeout_s == 123.0
+
+
+def test_the_timeout_is_set_rather_than_left_at_the_evolution_default(
+    monkeypatch, tmp_path
+):
+    """承重项。`ProposalLimits.timeout_s` 缺省 5400 秒,是给自己占一个进程的
+    进化跑定的;这里的调用方是一个带自己天花板的工具调用。两边各定各的,
+    先响的那个决定调用方看到什么——而那一个产出的是 `interrupted`,
+    一个不含判定、不记花费、连目录都指不出来的收场。"""
+
+    from evoharness.contracts.run import ProposalLimits
+
+    monkeypatch.setenv("EVOHARNESS_API_BASE", "https://example.invalid")
+    monkeypatch.setenv("EVOHARNESS_API_KEY", "k")
+
+    spec = _run_spec(tmp_path, _attack_args(tmp_path))
+
+    assert spec.proposal_limits.timeout_s != ProposalLimits().timeout_s
+    assert spec.proposal_limits.timeout_s < ProposalLimits().timeout_s
+
+
+def test_the_lease_outlives_the_attack_it_covers(monkeypatch, tmp_path):
+    """承重项,钉的是次序不是数字。
+
+    租约过期只有一个含义:持有者死了。恢复扫描据此**强制释放目标并记一条
+    `interrupted`**。租约比它覆盖的工作短,这句话就在每一次长 attack 跑到
+    一半时变成假的——第二个求解器在同一条引理上起跑,而账上给那个还在
+    正常工作的 attack 记了一次伪造的中断。
+    """
+
+    from evoharness.proof import cli
+    from evoharness.proof.store import ProofGraphStore
+
+    monkeypatch.setenv("EVOHARNESS_API_BASE", "https://example.invalid")
+    monkeypatch.setenv("EVOHARNESS_API_KEY", "k")
+
+    for extra in ((), ("--attack-timeout", "1440")):
+        args = _attack_args(tmp_path, *extra)
+        store = ProofGraphStore(tmp_path / ".evo" / "graph.db")
+        try:
+            controller = cli._controller(args, store)
+        finally:
+            store.close()
+
+        assert controller.lease_ttl_s > args.attack_timeout

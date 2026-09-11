@@ -112,13 +112,19 @@ class AttemptResult:
                    note=f"stopped_reason={reason} best_fitness={fitness}")
 
     @classmethod
-    def interrupted(cls, run_dir: str | None = None) -> "AttemptResult":
+    def interrupted(
+        cls, run_dir: str | None = None, note: str = "",
+    ) -> "AttemptResult":
         """The run never returned. The one outcome a later run may resume from,
         because the run directory it left behind carries a checkpoint.
+
+        `note` is the caller's diagnosis, and recovery has a better one than
+        this constructor can guess: it knows whose lease went stale, while
+        from here all that is visible is the absence of a report.
         """
 
         return cls(Outcome.INTERRUPTED, run_dir=run_dir,
-                   note="run did not return; manifest not finalized")
+                   note=note or "run did not return; manifest not finalized")
 
 
 class Solver(Protocol):

@@ -32,6 +32,7 @@ PB-Advanced-006(1041)。几何那两道长的先不碰——Mathlib 几何的工
 | 3 | PB-Basic-010 | `~/proofs/pbbasic010` | IMO-easy / 组合 | (Modified) Tournament of Towns 2022 Senior O-level P3 | 118 行 | 组合是 LEAP 未公布的两个残差类别之一,先探底 |
 | 4 | PB-Basic-001 | `~/proofs/pbbasic001` | IMO-easy / 代数 | (Modified) IMO 2019 P1 | 138 行 | 换**形状**:结论是集合等式,分解要拆两个包含方向 |
 | 5 | PB-Basic-024 | `~/proofs/pbbasic024` | IMO-medium / 数论 | (Modified) Serbia MO 2008 P1 | 79 行 | 难度标签跳一级但参照只有 79 行,测成败跟的是标签还是长度 |
+| 6 | PB-Advanced-006 | `~/proofs/pbadvanced006` | **IMO-hard** / 代数 | Novel Problem | **1041 行** | 换轴。前五道按「参照短」选,而那个信号对「测分解」是反的 |
 
 两处口径要记在前面,写结论时不能含糊:
 
@@ -112,6 +113,7 @@ proof_open                    (preamble + statement 从 statement.txt 粘)
 | PB-Basic-010 | | | | | | | |
 | PB-Basic-001 | 未记(旧流程) | 分解(无岔口) | — | assemble 认证 | 1 次 / sketch 编译不过:化简后类型不匹配 | 39 分钟 | 干净 |
 | PB-Basic-024 | | | | | | | |
+| PB-Advanced-006 | | | | | | | |
 
 「停在哪一步」取值:`open` / `sketch 通过` / `attack 通过` / `assemble 认证`。
 
