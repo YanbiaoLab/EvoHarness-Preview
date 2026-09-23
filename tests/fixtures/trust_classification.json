@@ -1,0 +1,124 @@
+{
+  "$comment": "Trust classification cases shared with the verifier; a pinned copy whose data fields must equal the verifier's own. The lowest-level axiom decides. A native_decide-shaped axiom counts as audited only with a positive content recheck (native_holds=true); a failed or missing recheck is claimed. The native_decide axiom name is a real one taken from verifier output on 2026-09-23. Cases describe axiom sets that occur in practice: in Lean v4.33, Lean.ofReduceBool / ofReduceNat always come together with Lean.trustCompiler.",
+  "policy_version": 1,
+  "levels": {
+    "tainted": 0,
+    "claimed": 1,
+    "audited": 2,
+    "trusted": 3
+  },
+  "cases": [
+    {
+      "id": "empty",
+      "axioms": [],
+      "trust": "trusted"
+    },
+    {
+      "id": "propext",
+      "axioms": [
+        "propext"
+      ],
+      "trust": "trusted"
+    },
+    {
+      "id": "standard_three",
+      "axioms": [
+        "propext",
+        "Quot.sound",
+        "Classical.choice"
+      ],
+      "trust": "trusted"
+    },
+    {
+      "id": "of_reduce_bool",
+      "axioms": [
+        "Lean.ofReduceBool",
+        "Lean.trustCompiler"
+      ],
+      "trust": "audited"
+    },
+    {
+      "id": "of_reduce_nat",
+      "axioms": [
+        "Lean.ofReduceNat",
+        "Lean.trustCompiler"
+      ],
+      "trust": "audited"
+    },
+    {
+      "id": "trust_compiler",
+      "axioms": [
+        "Lean.trustCompiler"
+      ],
+      "trust": "audited"
+    },
+    {
+      "id": "native_holds",
+      "axioms": [
+        "nd_probe._native.native_decide.ax_1"
+      ],
+      "native_holds": true,
+      "trust": "audited"
+    },
+    {
+      "id": "native_recheck_failed",
+      "axioms": [
+        "nd_probe._native.native_decide.ax_1"
+      ],
+      "native_holds": false,
+      "trust": "claimed"
+    },
+    {
+      "id": "native_unchecked",
+      "axioms": [
+        "nd_probe._native.native_decide.ax_1"
+      ],
+      "trust": "claimed"
+    },
+    {
+      "id": "native_plus_standard",
+      "axioms": [
+        "propext",
+        "nd_probe._native.native_decide.ax_1"
+      ],
+      "native_holds": true,
+      "trust": "audited"
+    },
+    {
+      "id": "custom_axiom",
+      "axioms": [
+        "myAx"
+      ],
+      "trust": "claimed"
+    },
+    {
+      "id": "native_component_only",
+      "axioms": [
+        "Foo._native.bar"
+      ],
+      "trust": "claimed"
+    },
+    {
+      "id": "native_substring_only",
+      "axioms": [
+        "native_decide_lemma"
+      ],
+      "trust": "claimed"
+    },
+    {
+      "id": "sorry",
+      "axioms": [
+        "sorryAx"
+      ],
+      "trust": "tainted"
+    },
+    {
+      "id": "sorry_plus_standard",
+      "axioms": [
+        "sorryAx",
+        "propext"
+      ],
+      "trust": "tainted"
+    }
+  ]
+}

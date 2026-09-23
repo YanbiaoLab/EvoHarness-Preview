@@ -14,6 +14,12 @@ partially created decompositions.
 (open, proved, exhausted), while transient scheduling state (lease holder and
 expiry) is maintained in separate columns.
 
+**A graph has one scope, fixed when it is created.** Memoization hands back a
+node with its accumulated status, so a graph whose premises changed between two
+commands would let a PROVED earned under one set stand under another. The
+`graph_scope` row records the premises; opening under different ones is
+refused. See `scope.py`.
+
 Storage uses SQLite with WAL mode to provide atomic multi-row updates and crash
 consistency across runs.
 """
@@ -34,11 +40,14 @@ from .graph import (
     DecompositionStatus,
     Goal,
     GoalStatus,
+    GraphError,
     Outcome,
     check_acyclic,
     decomposition_status_from,
     goal_status_from,
 )
+from .envelope import SourceEnvelope
+from .scope import GraphScope, ScopeError, ScopeMismatch, ScopeMissing
 from .sketch import Sketch
 
 _SCHEMA = """
@@ -90,6 +99,11 @@ CREATE TABLE IF NOT EXISTS certifications (
     -- column existed has an unknown route, while '' says there was none to
     -- pick. Defaulting would erase that difference on every old graph.
     decomposition_id TEXT,
+    -- The trust level the axiom report put the finished proof at, read
+    -- through the graph's AxiomPolicy. Nullable for the same reason as the
+    -- route: NULL is "recorded before trust was kept", '' is "nothing
+    -- compiled, so nothing to classify".
+    trust       TEXT,
     created_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS roots (
@@ -100,6 +114,33 @@ CREATE INDEX IF NOT EXISTS ix_decomp_goal ON decompositions(goal_id);
 CREATE INDEX IF NOT EXISTS ix_edge_subgoal ON decomposition_subgoals(subgoal_id);
 CREATE INDEX IF NOT EXISTS ix_attempt_goal ON attempts(goal_id);
 CREATE INDEX IF NOT EXISTS ix_cert_goal ON certifications(goal_id);
+-- Candidate files split into what the verifier checks (envelope.py). Written
+-- once, before the first verification that uses it, and read back rather than
+-- re-split: verify, assembly and publish must see byte-identical input.
+CREATE TABLE IF NOT EXISTS envelopes (
+    envelope_hash    TEXT PRIMARY KEY,
+    envelope_json    TEXT NOT NULL,
+    candidate_sha256 TEXT NOT NULL,
+    -- Where the original file lives, when known. The file itself stays there:
+    -- The verifier keeps only its hash, in the publication's provenance.
+    candidate_path   TEXT,
+    created_at       REAL NOT NULL
+);
+-- One row or none. None means either a brand-new graph (the first open writes
+-- it) or a graph built before scopes existed (opening it needs --adopt-scope).
+CREATE TABLE IF NOT EXISTS graph_scope (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    scope_version           INTEGER NOT NULL,
+    environment             TEXT NOT NULL,
+    base_id                 TEXT NOT NULL DEFAULT '',
+    minimum_trust           TEXT NOT NULL,
+    axiom_policy_version    INTEGER NOT NULL,
+    identity_hasher         TEXT NOT NULL,
+    preamble_sha256         TEXT NOT NULL,
+    envelope_schema_version INTEGER NOT NULL,
+    goalkey_schema_version  INTEGER NOT NULL,
+    created_at              REAL NOT NULL
+);
 """
 
 
@@ -124,7 +165,24 @@ def _goal(row: sqlite3.Row) -> Goal:
 class ProofGraphStore:
     """The graph's one source of truth. Readable views are derived, never kept."""
 
-    def __init__(self, path: Path | str):
+    def __init__(
+        self,
+        path: Path | str,
+        scope: GraphScope | None = None,
+        *,
+        adopt_scope: bool = False,
+    ):
+        """Open (or create) the graph at `path`.
+
+        `scope` is what the caller will work under. Given, it is enforced: a
+        new graph records it, a graph with a scope must match it field by
+        field, and a graph with goals but no scope is refused unless
+        `adopt_scope` says to record this one. `None` enforces nothing and is
+        for callers that own the whole graph's lifetime themselves -- tests,
+        and scripts that build a graph and throw it away. The CLI always
+        passes one.
+        """
+
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
@@ -136,6 +194,74 @@ class ProofGraphStore:
         self._conn.executescript(_SCHEMA)
         self._add_missing_columns()
         self._conn.commit()
+        try:
+            self.scope = self._settle_scope(scope, adopt_scope)
+        except ScopeError:
+            self._conn.close()
+            raise
+
+    @staticmethod
+    def read_scope(path: Path | str) -> GraphScope | None:
+        """The scope recorded in the graph at `path`, without opening it for work.
+
+        Callers use it to inherit the settings a command did not restate.
+        A missing file or a graph without a scope reads as None.
+        """
+
+        path = Path(path)
+        if not path.is_file():
+            return None
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_scope'"
+            ).fetchone()
+            if table is None:
+                return None
+            row = conn.execute("SELECT * FROM graph_scope WHERE id = 1").fetchone()
+            return GraphScope.from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def _settle_scope(
+        self, wanted: GraphScope | None, adopt: bool
+    ) -> GraphScope | None:
+        row = self._conn.execute(
+            "SELECT * FROM graph_scope WHERE id = 1"
+        ).fetchone()
+        stored = GraphScope.from_row(row) if row else None
+        if wanted is None:
+            if adopt:
+                raise ScopeError("--adopt-scope needs a scope to adopt")
+            return stored
+        if stored is not None:
+            if adopt:
+                raise ScopeError(
+                    "--adopt-scope only applies to a graph with no recorded "
+                    "scope; this one has one"
+                )
+            diffs = stored.diff(wanted)
+            if diffs:
+                raise ScopeMismatch(diffs)
+            return stored
+        goals = self._conn.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
+        if goals and not adopt:
+            raise ScopeMissing(
+                f"this graph has {goals} goal(s) but no recorded scope: it was "
+                "built before scopes existed, under premises nobody wrote down. "
+                "If you know it was built under the settings of this command, "
+                "record them with --adopt-scope; if it may have mixed hashers or "
+                "preambles, start over with --force-new-graph."
+            )
+        row = {**wanted.to_row(), "created_at": time.time()}
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO graph_scope (id, " + ", ".join(row) + ") VALUES (1, "
+                + ", ".join("?" for _ in row) + ")",
+                tuple(row.values()),
+            )
+        return wanted
 
     def _add_missing_columns(self) -> None:
         """Bring an older graph's tables up to the current shape.
@@ -148,6 +274,7 @@ class ProofGraphStore:
 
         for table, column, decl in (
             ("certifications", "decomposition_id", "TEXT"),
+            ("certifications", "trust", "TEXT"),
             ("goals", "lease_run_dir", "TEXT"),
         ):
             existing = {
@@ -514,6 +641,7 @@ class ProofGraphStore:
         reason: str = "",
         text_sha256: str = "",
         decomposition_id: str | None = "",
+        trust: str | None = "",
     ) -> Certification:
         """Record one compile of this goal's assembled proof.
 
@@ -529,8 +657,8 @@ class ProofGraphStore:
         with self._conn:
             self._conn.execute(
                 "INSERT INTO certifications (id, goal_id, ok, axioms_json,"
-                " reason, text_sha256, decomposition_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " reason, text_sha256, decomposition_id, trust, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     cert_id,
                     goal_id,
@@ -539,6 +667,7 @@ class ProofGraphStore:
                     reason,
                     text_sha256,
                     decomposition_id,
+                    trust,
                     now,
                 ),
             )
@@ -550,6 +679,7 @@ class ProofGraphStore:
             reason=reason,
             text_sha256=text_sha256,
             decomposition_id=decomposition_id,
+            trust=trust,
             created_at=now,
         )
 
@@ -567,6 +697,7 @@ class ProofGraphStore:
                 reason=row["reason"],
                 text_sha256=row["text_sha256"],
                 decomposition_id=row["decomposition_id"],
+                trust=row["trust"],
                 created_at=row["created_at"],
             )
             for row in rows
@@ -577,6 +708,46 @@ class ProofGraphStore:
 
         certs = self.certifications_of(goal_id)
         return certs[-1] if certs else None
+
+    # -- envelopes ------------------------------------------------------------
+
+    def record_envelope(
+        self, envelope: SourceEnvelope, *, candidate_path: str | None = None
+    ) -> str:
+        """Persist the exact envelope a verification will use. Returns its hash.
+
+        Idempotent by hash. A second write of the same hash must carry the same
+        text; anything else means two different envelopes collided, and keeping
+        either silently would bind a certificate to input nobody checked.
+        """
+
+        text = envelope.to_json()
+        digest = envelope.envelope_hash
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO envelopes (envelope_hash, envelope_json,"
+                " candidate_sha256, candidate_path, created_at) VALUES (?, ?, ?, ?, ?)",
+                (digest, text, envelope.candidate_file_sha256, candidate_path, time.time()),
+            )
+        stored = self._conn.execute(
+            "SELECT envelope_json FROM envelopes WHERE envelope_hash = ?", (digest,)
+        ).fetchone()["envelope_json"]
+        if stored != text:
+            raise GraphError(f"envelope {digest} is already stored with different content")
+        return digest
+
+    def envelope(self, envelope_hash: str) -> SourceEnvelope:
+        """The stored envelope, read back and re-hashed -- never re-split."""
+
+        row = self._conn.execute(
+            "SELECT envelope_json FROM envelopes WHERE envelope_hash = ?", (envelope_hash,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no such envelope: {envelope_hash}")
+        envelope = SourceEnvelope.from_dict(json.loads(row["envelope_json"]))
+        if envelope.envelope_hash != envelope_hash:
+            raise GraphError(f"envelope {envelope_hash} no longer hashes to its key")
+        return envelope
 
     # -- propagation ----------------------------------------------------------
 

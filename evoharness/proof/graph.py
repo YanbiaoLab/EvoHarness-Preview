@@ -180,6 +180,12 @@ class Certification:
     #: before this was kept, where the rule was "the oldest completed route"
     #: and the file therefore cannot be reproduced from the id alone.
     decomposition_id: str | None = None
+    #: The trust level the axiom report put the finished proof at, read
+    #: through the graph's `AxiomPolicy` -- the "label" half of accepting
+    #: native_decide: an `audited` proof is a proof, and says so. Same three
+    #: states as the route: a level; `""` when nothing compiled; `None` for a
+    #: record written before this was kept.
+    trust: str | None = None
     created_at: float | None = None
 
 

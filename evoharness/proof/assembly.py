@@ -33,15 +33,11 @@ from .graph import (
     DecompositionStatus,
     GoalStatus,
 )
+from .policy import AxiomPolicy
 from .sketch import ERROR_RE, LeanRunner, SketchUnavailable, render
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .store import ProofGraphStore
-
-#: The axioms a finished proof may depend on: classical logic, and nothing
-#: else. `sorryAx` is absent by construction, and so is whatever
-#: `native_decide` drags in.
-ALLOWED_AXIOMS = frozenset({"propext", "Quot.sound", "Classical.choice"})
 
 _NO_AXIOMS_RE = re.compile(r"'(\S+)' does not depend on any axioms")
 _AXIOMS_RE = re.compile(r"'(\S+)' depends on axioms: \[([^\]]*)\]")
@@ -63,10 +59,17 @@ class AssemblyResult:
     reason: str = ""
     text: str = ""
     axioms: frozenset[str] = field(default_factory=frozenset)
+    #: The trust level the axiom report puts the finished proof at, read
+    #: through the graph's `AxiomPolicy`. Empty when nothing was compiled.
+    trust: str = ""
+    #: Every axiom that on its own keeps the proof below the policy --
+    #: `sorryAx`, user-declared axioms, and native_decide axioms a local
+    #: compile could not recheck. Computed by the policy, not by a set kept here.
+    forbidden: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def forbidden_axioms(self) -> frozenset[str]:
-        return self.axioms - ALLOWED_AXIOMS
+        return self.forbidden
 
 
 class AmbiguousRoute(AssemblyError):
@@ -329,13 +332,17 @@ def verify(
     *,
     runner: LeanRunner | None = None,
     routes: "Iterable[str]" = (),
+    policy: AxiomPolicy | None = None,
 ) -> AssemblyResult:
-    """Assemble, compile, and read Lean's axiom report.
+    """Assemble, compile, and read Lean's axiom report through the policy.
 
     This is the only thing that makes the root's PROVED status mean anything.
     A failure here is a real finding: the graph believed something the compiler
-    does not.
+    does not -- with one exception spelled out in the reason: native_decide
+    axioms, which a local compile has no way to recheck.
     """
+
+    policy = policy or AxiomPolicy()
 
     goal = store.goal(goal_id)
     text = assemble(store, goal_id, routes=routes)
@@ -370,19 +377,33 @@ def verify(
             reason=f"no `#print axioms {name}` output",
             text=text,
         )
-    result = AssemblyResult(ok=True, text=text, axioms=axioms)
-    if result.forbidden_axioms:
+    # No native_decide recheck is available here: such axioms classify as
+    # `claimed` and block the certificate. Failing closed is the point.
+    trust = policy.classify(axioms)
+    forbidden = policy.blocking(axioms)
+    if forbidden:
+        unverified = policy.unverified_native(axioms)
+        reason = (
+            "the assembled proof depends on axioms outside the policy "
+            f"(minimum_trust={policy.minimum_trust}): "
+            + ", ".join(sorted(forbidden))
+        )
+        if unverified:
+            reason += (
+                "; native_decide axioms need the verifier's content recheck and "
+                "a local compile cannot certify them: "
+                + ", ".join(sorted(unverified))
+            )
         return AssemblyResult(
             ok=False,
-            reason=(
-                "the assembled proof depends on axioms outside the policy: "
-                + ", ".join(sorted(result.forbidden_axioms))
-            ),
+            reason=reason,
             text=text,
             axioms=axioms,
+            trust=trust,
+            forbidden=forbidden,
         )
     _ = goal  # kept for symmetry with the error paths above
-    return result
+    return AssemblyResult(ok=True, text=text, axioms=axioms, trust=trust)
 
 
 def certify(
@@ -391,6 +412,7 @@ def certify(
     *,
     runner: LeanRunner | None = None,
     routes: "Iterable[str]" = (),
+    policy: AxiomPolicy | None = None,
 ) -> tuple[AssemblyResult, Certification]:
     """Verify, and record the verdict on the goal.
 
@@ -411,7 +433,7 @@ def certify(
     like provenance while being none.
     """
 
-    result = verify(store, goal_id, runner=runner, routes=routes)
+    result = verify(store, goal_id, runner=runner, routes=routes, policy=policy)
     decomposition = _top_route(store, goal_id, _pin_map(store, routes))
     certification = store.record_certification(
         goal_id,
@@ -420,6 +442,7 @@ def certify(
         reason=result.reason,
         text_sha256=hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
         decomposition_id=decomposition.id if decomposition else "",
+        trust=result.trust,
     )
     return result, certification
 
@@ -471,7 +494,6 @@ def _axioms(output: str, name: str) -> frozenset[str] | None:
 
 
 __all__ = [
-    "ALLOWED_AXIOMS",
     "AmbiguousRoute",
     "AssemblyError",
     "AssemblyResult",

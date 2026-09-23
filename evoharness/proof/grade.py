@@ -11,7 +11,8 @@ parent, `_pick_island` skips the island, and the run emits no proposals at all
 -- which reads exactly like a model that could not solve the problem.
 
 **Fitness is graded**, because 0/1 gives the search nothing to climb. It only
-orders the search: 1.0 comes from the axiom report and from nothing else.
+orders the search: 1.0 comes from the axiom report, read through the graph's
+`AxiomPolicy`, and from nothing else.
 
 **A broken toolchain is not a wrong answer.** No Lean, or a process killed by a
 signal, means nothing was measured, so it raises rather than scoring zero. A
@@ -25,10 +26,9 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from .policy import SORRY, AxiomPolicy
 from .run_solver import SEED_MAIN, declaration_name
 from .sketch import ERROR_RE, LeanRunner, SketchUnavailable
-
-ALLOWED_AXIOMS = frozenset({"propext", "Quot.sound", "Classical.choice"})
 
 #: Getting a file past the elaborator is real progress over one that does not.
 #: Without a floor every early candidate sits at exactly 0.0 and parent
@@ -36,16 +36,22 @@ ALLOWED_AXIOMS = frozenset({"propext", "Quot.sound", "Classical.choice"})
 _COMPILES_FLOOR = 0.30
 
 
-def make_grader(runner: LeanRunner | None = None) -> Callable:
-    """A grade function bound to one way of invoking Lean.
+def make_grader(
+    runner: LeanRunner | None = None, policy: AxiomPolicy | None = None
+) -> Callable:
+    """A grade function bound to one way of invoking Lean and one axiom policy.
 
     Parameterized rather than hard-coded, because a bare `lean` cannot see
     Mathlib: its olean search path comes from the lake environment. A grader
     that assumed bare `lean` would fail every real benchmark problem with
     "unknown module Mathlib" and score it as the candidate's fault.
+
+    The policy is a parameter for the same reason it is one object: the graph
+    fixes it, and the grader and the final certificate must read the same one.
     """
 
     runner = runner or LeanRunner()
+    policy = policy or AxiomPolicy()
 
     def grade(candidate_dir, ctx):
         from evoharness.serve import InfraError
@@ -83,36 +89,63 @@ def make_grader(runner: LeanRunner | None = None) -> Callable:
             }
 
         axioms = _axioms(output, name)
-        forbidden = axioms - ALLOWED_AXIOMS - {"sorryAx"}
+        # `sorry` is judged apart: it marks unfinished work, which still earns
+        # the compile floor below. Everything else is judged by the policy.
+        rest = axioms - {SORRY}
+        # No native_decide recheck is possible from here, so none is passed:
+        # an unrechecked native_decide axiom classifies as `claimed`.
+        trust = policy.classify(rest)
+        unverified = policy.unverified_native(rest)
+        forbidden = policy.blocking(rest) - unverified
         if forbidden:
-            # `native_decide` and friends. Compiles, prints, and is not a proof
-            # under this policy.
+            # A user-declared axiom or anything else below the policy. Compiles,
+            # prints, and is not a proof -- and it is the candidate's doing.
             return {
                 "fitness": 0.0,
                 "passed": False,
                 "fault_kind": "task_failure",
                 "fault": f"forbidden axioms: {', '.join(sorted(forbidden))}",
-                "visible_metrics": {**metrics, "axioms": ",".join(sorted(axioms))},
+                "visible_metrics": {
+                    **metrics,
+                    "axioms": ",".join(sorted(axioms)),
+                    "trust": trust,
+                },
             }
 
-        if "sorryAx" in axioms:
-            # Compiles, still leans on `sorry`. Partial credit, and passed=True
-            # so it can be a parent.
+        if SORRY in axioms or unverified:
+            # Compiles, and either still leans on `sorry` or rests on
+            # native_decide axioms a local compile cannot recheck. Partial
+            # credit, and passed=True so it can be a parent. The second is not
+            # scored as the candidate's fault: it may be a sound proof that only
+            # the verifier can certify.
+            notes = output[:2000]
+            if unverified:
+                notes = (
+                    "native_decide axioms need the verifier's content recheck; a "
+                    "local compile cannot certify them: "
+                    + ", ".join(sorted(unverified))
+                    + "\n"
+                    + notes
+                )[:2000]
             return {
                 "fitness": _COMPILES_FLOOR,
                 "passed": True,
-                "notes": output[:2000],
-                "visible_metrics": {**metrics, "proved": 0},
+                "notes": notes,
+                "visible_metrics": {**metrics, "proved": 0, "trust": trust},
             }
 
         return {
             "fitness": 1.0,
             "passed": True,
-            "notes": f"Lean reports {name} depends only on allowed axioms.",
+            "notes": (
+                f"Lean reports {name} depends only on axioms at trust {trust}, "
+                f"within minimum_trust={policy.minimum_trust}."
+            ),
             "visible_metrics": {
                 **metrics,
                 "proved": 1,
                 "axioms": ",".join(sorted(axioms)),
+                "trust": trust,
             },
         }
 
@@ -148,4 +181,4 @@ def _axioms(output: str, name: str) -> frozenset[str]:
     )
 
 
-__all__ = ["ALLOWED_AXIOMS", "make_grader"]
+__all__ = ["make_grader"]
