@@ -42,6 +42,10 @@ from .sketch import Sketch, SketchUnavailable, Validation
 from .solver import AttemptResult, Solver
 from .store import ProofGraphStore
 
+#: No-verdict outcomes that stop the run on first sight rather than after a
+#: streak. Both are properties of the graph's scope, not of one goal.
+_STOP_AT_ONCE = frozenset({Outcome.ENVIRONMENT_MISMATCH, Outcome.STALE_INPUT})
+
 #: A goal whose route is already being worked is not one to attack directly.
 #: This is a scheduling judgement, not graph semantics, which is why it lives
 #: here rather than in `graph.py`.
@@ -67,6 +71,21 @@ def worker_id() -> str:
     """
 
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
+
+def _ledger_left_behind(run_dir: str | None):
+    """(verdicts, envelopes) a verifier-graded attempt wrote before it died."""
+
+    if not run_dir:
+        return (), ()
+    from pathlib import Path
+
+    from .verifier import VerificationLedger
+
+    ledger = Path(run_dir) / "verifier"
+    if not ledger.is_dir():
+        return (), ()
+    return VerificationLedger.load(ledger)
+
 
 class DecompositionSource(Protocol):
     """Where a route from a goal to subgoals comes from.
@@ -158,6 +177,7 @@ class ProofController:
         lease_ttl_s: float = 600.0,
         owner: str | None = None,
         decompose_root_first: bool = False,
+        heartbeat: Callable[[], str | None] | None = None,
     ):
         self.store = store
         self.solver = solver
@@ -175,6 +195,11 @@ class ProofController:
         # the root because applying it everywhere would decompose leaves that
         # have nothing left to split.
         self.decompose_root_first = decompose_root_first
+        #: Called before each iteration. Returns None to go on, or a reason to
+        #: stop the run -- the premises it runs under have changed outside it
+        #: (a base pin that could not be renewed, retrieved results that are no
+        #: longer visible). A stop, not a verdict: nothing is recorded on a goal.
+        self.heartbeat = heartbeat
 
     # -- scheduling -----------------------------------------------------------
 
@@ -236,12 +261,20 @@ class ProofController:
                 run_dir=goal.lease_run_dir,
                 note=f"lease held by {goal.lease_owner} expired without release",
             )
+            # Whatever the verifier answered before the worker died is kept with
+            # the interrupted attempt, as its record -- never as its verdict. A
+            # certified candidate among them is a proof nobody collected; its
+            # envelope is kept, and asking again with the same request is
+            # answered from the verifier's record, not recompiled.
+            verifications, envelopes = _ledger_left_behind(goal.lease_run_dir)
             self.store.record_attempt(
                 goal.id,
                 result.outcome,
                 run_dir=result.run_dir,
                 cost=result.cost,
                 note=result.note,
+                verifications=verifications,
+                envelopes=envelopes,
             )
             self.store.force_release(goal.id)
             self.store.propagate(
@@ -337,6 +370,11 @@ class ProofController:
             if self.store.goal(root_goal_id).status is GoalStatus.PROVED:
                 stopped = "proved"
                 break
+            if self.heartbeat is not None:
+                halt = self.heartbeat()
+                if halt:
+                    stopped = halt
+                    break
 
             spent = self.store.total_cost()
             if spent >= budget:
@@ -395,6 +433,9 @@ class ProofController:
                     evidence_ref=result.evidence_ref,
                     cost=result.cost,
                     note=result.note,
+                    verifications=result.verifications,
+                    envelopes=result.envelopes,
+                    auxiliary_declarations=result.auxiliary_declarations,
                 )
                 attempts += 1
                 self.store.propagate(
@@ -409,7 +450,16 @@ class ProofController:
                     # about itself, and looking for another route on the
                     # strength of a judge outage is how infrastructure gets to
                     # rewrite the graph.
-                    if result.outcome is Outcome.INFRA_FAILED:
+                    if result.outcome in _STOP_AT_ONCE:
+                        # Recurs on every goal under this scope: the graph's
+                        # environment cannot host its own preamble, or the
+                        # environment it was pinned to has moved. Retrying
+                        # burns the budget to learn the same thing again.
+                        stopped = result.outcome.value
+                        break
+                    if result.outcome in (
+                        Outcome.INFRA_FAILED, Outcome.CONTRACT_REJECTED
+                    ):
                         consecutive_infra += 1
                         if consecutive_infra >= self.max_consecutive_infra:
                             stopped = "infra"

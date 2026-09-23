@@ -1,0 +1,43 @@
+{
+  "$comment": "Pinned copy of the verifier contract's x-verification-reasons: every status the verifier returns and the machine-readable reasons each may carry. evoharness/proof/verdict.py must map every pair on purpose. When EVO_VERIFIER_CONTRACT points at the verifier's contract file, tests/test_proof_verdict.py checks this copy still equals it.",
+  "by_status": {
+    "verified": [],
+    "task_failed": [
+      "elaboration_error",
+      "kernel_replay"
+    ],
+    "timeout": [
+      "wall_clock"
+    ],
+    "infra_failed": [
+      "protocol_error",
+      "worker_failure"
+    ],
+    "interrupted": [
+      "interrupted"
+    ],
+    "policy_rejected": [
+      "forbidden_axiom",
+      "meta_declaration",
+      "namespace_prefix",
+      "native_unverified",
+      "parent_uses_sorry",
+      "root_contract",
+      "root_not_replayed",
+      "sorry_axiom",
+      "sorry_outside_subgoals",
+      "subgoal_unused",
+      "trust_below_minimum"
+    ],
+    "stale_input": [
+      "base_changed"
+    ],
+    "goal_mismatch": [
+      "proposition_differs"
+    ],
+    "environment_mismatch": [
+      "context_error",
+      "missing_imports"
+    ]
+  }
+}

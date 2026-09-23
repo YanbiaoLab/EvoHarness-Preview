@@ -32,6 +32,7 @@ import time
 import uuid
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .graph import (
     Attempt,
@@ -49,6 +50,11 @@ from .graph import (
 from .envelope import SourceEnvelope
 from .scope import GraphScope, ScopeError, ScopeMismatch, ScopeMissing
 from .sketch import Sketch
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .contract import GoalContract
+    from .retrieval import RetrievalEvidence
+    from .verdict import CandidateVerdict
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS goals (
@@ -126,6 +132,66 @@ CREATE TABLE IF NOT EXISTS envelopes (
     candidate_path   TEXT,
     created_at       REAL NOT NULL
 );
+-- What the verifier said about each candidate an attempt graded. One attempt is
+-- one search run and grades many candidates, so the attempt's outcome is an
+-- aggregate (verdict.py); this table keeps the pieces it was aggregated from,
+-- for audit and for re-verification. A candidate the verifier never answered
+-- for is kept with status 'unverified' and its envelope, so it can be checked
+-- once the verifier is back.
+CREATE TABLE IF NOT EXISTS attempt_verifications (
+    attempt_id       TEXT NOT NULL REFERENCES attempts(id),
+    candidate_id     TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    reason           TEXT,
+    outcome          TEXT NOT NULL,
+    job_id           TEXT,
+    certification_id TEXT,
+    envelope_hash    TEXT,
+    source_sha256    TEXT,
+    goal_key         TEXT,
+    trust            TEXT,
+    note             TEXT NOT NULL DEFAULT '',
+    created_at       REAL NOT NULL,
+    PRIMARY KEY (attempt_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS ix_verif_status ON attempt_verifications(status);
+-- The verifier's identity for a goal, and everything needed to replay the
+-- request that produced it. Goal.identity stays the local hasher's: the
+-- verifier's key is bound to one environment and sensitive to things the
+-- local memo key must not be, so it lives beside the node, not in it.
+CREATE TABLE IF NOT EXISTS goal_contracts (
+    goal_id        TEXT PRIMARY KEY REFERENCES goals(id),
+    goal_key       TEXT NOT NULL,
+    goal_key_json  TEXT NOT NULL,
+    base_json      TEXT NOT NULL,
+    name_prefix    TEXT NOT NULL,
+    proposition    TEXT NOT NULL,
+    context_json   TEXT NOT NULL,
+    options_json   TEXT NOT NULL,
+    created_at     REAL NOT NULL
+);
+-- Publications of a certified root into the verifier's managed graph. The
+-- idempotency key is kept because a retry must reuse it; a fresh key for the
+-- same certification is refused by the verifier.
+CREATE TABLE IF NOT EXISTS publications (
+    idempotency_key   TEXT PRIMARY KEY,
+    certification_id  TEXT NOT NULL REFERENCES certifications(id),
+    publication_id    TEXT,
+    status            TEXT NOT NULL,
+    admitted_json     TEXT NOT NULL DEFAULT '[]',
+    base_json         TEXT NOT NULL DEFAULT '{}',
+    created_at        REAL NOT NULL
+);
+-- What the verifier's library returned before a goal was attacked, kept with the
+-- environment it was asked in. Read back to check the results are still visible
+-- there (retrieval.vanished): the library can shrink under a running graph.
+CREATE TABLE IF NOT EXISTS retrievals (
+    request_id  TEXT PRIMARY KEY,
+    goal_id     TEXT NOT NULL REFERENCES goals(id),
+    base_json   TEXT NOT NULL,
+    hits_json   TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
 -- One row or none. None means either a brand-new graph (the first open writes
 -- it) or a graph built before scopes existed (opening it needs --adopt-scope).
 CREATE TABLE IF NOT EXISTS graph_scope (
@@ -142,6 +208,23 @@ CREATE TABLE IF NOT EXISTS graph_scope (
     created_at              REAL NOT NULL
 );
 """
+
+
+def _verdict(row: sqlite3.Row) -> "CandidateVerdict":
+    from .verdict import CandidateVerdict
+
+    return CandidateVerdict(
+        candidate_id=row["candidate_id"],
+        status=row["status"],
+        reason=row["reason"],
+        job_id=row["job_id"],
+        certification_id=row["certification_id"],
+        envelope_hash=row["envelope_hash"],
+        source_sha256=row["source_sha256"],
+        goal_key=row["goal_key"],
+        trust=row["trust"],
+        note=row["note"],
+    )
 
 
 def _new_id(prefix: str) -> str:
@@ -276,6 +359,12 @@ class ProofGraphStore:
             ("certifications", "decomposition_id", "TEXT"),
             ("certifications", "trust", "TEXT"),
             ("goals", "lease_run_dir", "TEXT"),
+            # The verifier's side of a certification (graph.Certification's
+            # `external` field). NULL on every local-compile record.
+            ("certifications", "external_json", "TEXT"),
+            # Helper declarations beside a proof (graph.Attempt). NULL reads as
+            # none: every attempt recorded before this held one declaration.
+            ("attempts", "auxiliary_json", "TEXT"),
         ):
             existing = {
                 row["name"]
@@ -564,14 +653,24 @@ class ProofGraphStore:
         evidence_ref: str | None = None,
         cost: float = 0.0,
         note: str = "",
+        verifications: "Iterable[CandidateVerdict]" = (),
+        envelopes: "Iterable[SourceEnvelope]" = (),
+        auxiliary_declarations: Sequence[str] = (),
     ) -> Attempt:
+        """Record one attempt, with what the verifier said about its candidates.
+
+        One transaction: an attempt whose outcome was aggregated from candidate
+        verdicts must not land without them, or the audit shows a conclusion
+        with nothing it was drawn from.
+        """
+
         attempt_id = _new_id("att")
         now = time.time()
         with self._conn:
             self._conn.execute(
                 "INSERT INTO attempts (id, goal_id, outcome, proof_text,"
-                " run_dir, evidence_ref, cost, note, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " run_dir, evidence_ref, cost, note, auxiliary_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     attempt_id,
                     goal_id,
@@ -581,9 +680,28 @@ class ProofGraphStore:
                     evidence_ref,
                     cost,
                     note,
+                    json.dumps(list(auxiliary_declarations))
+                    if auxiliary_declarations else None,
                     now,
                 ),
             )
+            for envelope in envelopes:
+                self._insert_envelope(envelope, None)
+            for verdict in verifications:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO attempt_verifications (attempt_id,"
+                    " candidate_id, status, reason, outcome, job_id,"
+                    " certification_id, envelope_hash, source_sha256, goal_key,"
+                    " trust, note, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        attempt_id, verdict.candidate_id, verdict.status,
+                        verdict.reason, verdict.outcome.value, verdict.job_id,
+                        verdict.certification_id, verdict.envelope_hash,
+                        verdict.source_sha256, verdict.goal_key, verdict.trust,
+                        verdict.note, now,
+                    ),
+                )
         return Attempt(
             id=attempt_id,
             goal_id=goal_id,
@@ -592,6 +710,7 @@ class ProofGraphStore:
             run_dir=run_dir,
             evidence_ref=evidence_ref,
             cost=cost,
+            auxiliary_declarations=tuple(auxiliary_declarations),
             note=note,
             created_at=now,
         )
@@ -624,11 +743,98 @@ class ProofGraphStore:
                 run_dir=row["run_dir"],
                 evidence_ref=row["evidence_ref"],
                 cost=row["cost"],
+                auxiliary_declarations=tuple(
+                    json.loads(row["auxiliary_json"]) if row["auxiliary_json"] else ()
+                ),
                 note=row["note"],
                 created_at=row["created_at"],
             )
             for row in rows
         ]
+
+    def verifications_of(self, attempt_id: str) -> list["CandidateVerdict"]:
+        rows = self._conn.execute(
+            "SELECT * FROM attempt_verifications WHERE attempt_id = ?"
+            " ORDER BY created_at, candidate_id",
+            (attempt_id,),
+        ).fetchall()
+        return [_verdict(row) for row in rows]
+
+    def unverified_candidates(self) -> list[tuple[str, "CandidateVerdict"]]:
+        """(attempt_id, verdict) for every candidate the verifier never answered.
+
+        Kept so they can be checked once it is back: a candidate that may be a
+        proof is not thrown away because the judge was down when it arrived.
+        """
+
+        rows = self._conn.execute(
+            "SELECT * FROM attempt_verifications WHERE status = 'unverified'"
+            " ORDER BY created_at"
+        ).fetchall()
+        return [(row["attempt_id"], _verdict(row)) for row in rows]
+
+    # -- retrieval ------------------------------------------------------------
+
+    def record_retrieval(
+        self, goal_id: str, request_id: str, *, base: dict, hits: Sequence
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO retrievals (request_id, goal_id, base_json,"
+                " hits_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (request_id, goal_id, json.dumps(base, sort_keys=True),
+                 json.dumps([h.to_json() for h in hits], sort_keys=True), time.time()),
+            )
+
+    def retrieved(self) -> list[tuple[dict, "RetrievalEvidence"]]:
+        """Every declaration ever retrieved, once each, with the environment it came from."""
+
+        from .retrieval import RetrievalEvidence
+
+        out, seen = [], set()
+        for row in self._conn.execute(
+            "SELECT base_json, hits_json FROM retrievals ORDER BY created_at"
+        ):
+            base = json.loads(row["base_json"])
+            for hit in json.loads(row["hits_json"]):
+                key = (base.get("fingerprint"), hit["declaration_id"])
+                if key not in seen:
+                    seen.add(key)
+                    out.append((base, RetrievalEvidence.from_hit(hit)))
+        return out
+
+    # -- verifier contracts ---------------------------------------------------
+
+    def record_goal_contract(self, goal_id: str, contract: "GoalContract") -> None:
+        """Bind a goal to the verifier's identity for it. Written once.
+
+        A second write must agree: the same node under two verifier identities
+        means either the scope moved (which opening refuses) or the resolver
+        is not deterministic, and either way the first binding is what every
+        stored verification of this goal was checked against.
+        """
+
+        row = contract.to_row()
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO goal_contracts (goal_id, " + ", ".join(row)
+                + ", created_at) VALUES (?, " + ", ".join("?" for _ in row) + ", ?)",
+                (goal_id, *row.values(), time.time()),
+            )
+        stored = self.goal_contract(goal_id)
+        if stored is not None and stored.goal_key != contract.goal_key:
+            raise GraphError(
+                f"goal {goal_id} is already bound to verifier goal key "
+                f"{stored.goal_key}, not {contract.goal_key}"
+            )
+
+    def goal_contract(self, goal_id: str) -> "GoalContract | None":
+        from .contract import GoalContract
+
+        row = self._conn.execute(
+            "SELECT * FROM goal_contracts WHERE goal_id = ?", (goal_id,)
+        ).fetchone()
+        return GoalContract.from_row(row) if row else None
 
     # -- certifications -------------------------------------------------------
 
@@ -642,6 +848,7 @@ class ProofGraphStore:
         text_sha256: str = "",
         decomposition_id: str | None = "",
         trust: str | None = "",
+        external: dict | None = None,
     ) -> Certification:
         """Record one compile of this goal's assembled proof.
 
@@ -657,8 +864,8 @@ class ProofGraphStore:
         with self._conn:
             self._conn.execute(
                 "INSERT INTO certifications (id, goal_id, ok, axioms_json,"
-                " reason, text_sha256, decomposition_id, trust, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " reason, text_sha256, decomposition_id, trust, external_json,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     cert_id,
                     goal_id,
@@ -668,6 +875,7 @@ class ProofGraphStore:
                     text_sha256,
                     decomposition_id,
                     trust,
+                    json.dumps(external, sort_keys=True) if external is not None else None,
                     now,
                 ),
             )
@@ -680,6 +888,7 @@ class ProofGraphStore:
             text_sha256=text_sha256,
             decomposition_id=decomposition_id,
             trust=trust,
+            external=external,
             created_at=now,
         )
 
@@ -698,10 +907,58 @@ class ProofGraphStore:
                 text_sha256=row["text_sha256"],
                 decomposition_id=row["decomposition_id"],
                 trust=row["trust"],
+                external=(
+                    json.loads(row["external_json"]) if row["external_json"] else None
+                ),
                 created_at=row["created_at"],
             )
             for row in rows
         ]
+
+    def certification(self, cert_id: str) -> Certification:
+        row = self._conn.execute(
+            "SELECT goal_id FROM certifications WHERE id = ?", (cert_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no such certification: {cert_id}")
+        return next(c for c in self.certifications_of(row["goal_id"]) if c.id == cert_id)
+
+    # -- publications ---------------------------------------------------------
+
+    def record_publication(
+        self, cert_id: str, *, idempotency_key: str, answer: dict
+    ) -> None:
+        """Keep the verifier's answer to a publication. Upsert by key: a retry
+        with the same key gets the same answer back, and replaces nothing else."""
+
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO publications (idempotency_key, certification_id,"
+                " publication_id, status, admitted_json, base_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    idempotency_key, cert_id, answer.get("publication_id"),
+                    answer.get("status", ""),
+                    json.dumps(answer.get("admitted_node_ids") or []),
+                    json.dumps(answer.get("base") or {}, sort_keys=True),
+                    time.time(),
+                ),
+            )
+
+    def publication_of(self, cert_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM publications WHERE certification_id = ?"
+            " ORDER BY created_at DESC LIMIT 1", (cert_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "idempotency_key": row["idempotency_key"],
+            "publication_id": row["publication_id"],
+            "status": row["status"],
+            "admitted_node_ids": json.loads(row["admitted_json"]),
+            "base": json.loads(row["base_json"]),
+        }
 
     def latest_certification(self, goal_id: str) -> Certification | None:
         """The most recent compile of the assembled proof, passed or not."""
@@ -721,14 +978,21 @@ class ProofGraphStore:
         either silently would bind a certificate to input nobody checked.
         """
 
+        with self._conn:
+            return self._insert_envelope(envelope, candidate_path)
+
+    def _insert_envelope(
+        self, envelope: SourceEnvelope, candidate_path: str | None
+    ) -> str:
+        """The write itself, inside the caller's transaction."""
+
         text = envelope.to_json()
         digest = envelope.envelope_hash
-        with self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO envelopes (envelope_hash, envelope_json,"
-                " candidate_sha256, candidate_path, created_at) VALUES (?, ?, ?, ?, ?)",
-                (digest, text, envelope.candidate_file_sha256, candidate_path, time.time()),
-            )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO envelopes (envelope_hash, envelope_json,"
+            " candidate_sha256, candidate_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            (digest, text, envelope.candidate_file_sha256, candidate_path, time.time()),
+        )
         stored = self._conn.execute(
             "SELECT envelope_json FROM envelopes WHERE envelope_hash = ?", (digest,)
         ).fetchone()["envelope_json"]

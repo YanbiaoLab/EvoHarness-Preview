@@ -60,6 +60,17 @@ class Outcome(str, Enum):
     TIMEOUT = "timeout"
     INFRA_FAILED = "infra-failed"
     INTERRUPTED = "interrupted"
+    #: The verifier refused on the request's own terms -- the roots it was told
+    #: to expect, the namespace they had to sit in -- not on the candidate's.
+    #: A fault in how this side built the request, so no verdict on the goal.
+    CONTRACT_REJECTED = "contract-rejected"
+    #: The environment the request was pinned to changed under it.
+    STALE_INPUT = "stale-input"
+    #: The environment cannot give what the request needs: an import it does
+    #: not cover, or a context that does not elaborate in it. Reported as a
+    #: task failure, this is "the model cannot prove it" for every goal in a
+    #: graph whose preamble is broken.
+    ENVIRONMENT_MISMATCH = "environment-mismatch"
 
 
 #: The only outcomes that say anything about whether this goal is hard.
@@ -71,7 +82,27 @@ CAPABILITY_OUTCOMES = frozenset({Outcome.TASK_FAILED, Outcome.TIMEOUT})
 #: never trigger a search for a different decomposition: doing either lets an
 #: infrastructure fault rewrite the shape of the whole graph.
 NO_VERDICT_OUTCOMES = frozenset(
-    {Outcome.INFRA_FAILED, Outcome.INTERRUPTED, Outcome.BUDGET_EXHAUSTED}
+    {
+        Outcome.INFRA_FAILED,
+        Outcome.INTERRUPTED,
+        Outcome.BUDGET_EXHAUSTED,
+        Outcome.CONTRACT_REJECTED,
+        Outcome.STALE_INPUT,
+        Outcome.ENVIRONMENT_MISMATCH,
+    }
+)
+
+#: When an attempt saw several kinds of no-verdict and nothing else, which one
+#: it reports. Persistent causes first, because they recur on every retry and
+#: need a person: a broken environment, then a request this side built wrong,
+#: then an environment that moved. Transient causes last -- a worker that died
+#: may well have died of one of the above. Most severe first.
+NO_VERDICT_SEVERITY: tuple[Outcome, ...] = (
+    Outcome.ENVIRONMENT_MISMATCH,
+    Outcome.CONTRACT_REJECTED,
+    Outcome.STALE_INPUT,
+    Outcome.INFRA_FAILED,
+    Outcome.INTERRUPTED,
 )
 
 #: The one outcome a later run may pick up where this one stopped, because the
@@ -145,6 +176,11 @@ class Attempt:
     run_dir: str | None = None
     evidence_ref: str | None = None
     cost: float = 0.0
+    #: Helper declarations the proof relies on, whole and in source order, each
+    #: named under the goal (`goal.step`). `proof_text` stays the body alone,
+    #: because assembly re-emits the signature; these are emitted just before
+    #: it. Empty for every proof written as one declaration.
+    auxiliary_declarations: tuple[str, ...] = ()
     #: The solver's own account of how this ended. Never parsed, but it is the
     #: only place an infra diagnosis survives -- without it, auditing a run
     #: that died on infrastructure shows six identical `infra-failed` rows and
@@ -186,6 +222,11 @@ class Certification:
     #: states as the route: a level; `""` when nothing compiled; `None` for a
     #: record written before this was kept.
     trust: str | None = None
+    #: The verifier's side of it, when the verifier compiled it rather than a
+    #: local `lean`: its certification id, the goal key and environment it was
+    #: bound to, the verification job, the envelope it was made from. None for a
+    #: local compile -- which is not a certification anyone else can check.
+    external: "dict | None" = None
     created_at: float | None = None
 
 
@@ -278,6 +319,7 @@ def decomposition_status_from(
 __all__ = [
     "CAPABILITY_OUTCOMES",
     "NO_VERDICT_OUTCOMES",
+    "NO_VERDICT_SEVERITY",
     "RESUMABLE_OUTCOMES",
     "Attempt",
     "CycleError",

@@ -250,7 +250,10 @@ def _assemble_body(
             # which is what a subgoal contributes when spliced into a sketch;
             # at the top of the file it still needs its own declaration around
             # it, or what comes back is a bare term that compiles as nothing.
-            return f"{goal.statement} := {direct}\n", _declaration_name(
+            # Its helpers, named under it, go first: Lean needs them declared
+            # before the proof that uses them.
+            helpers = "".join(h.rstrip() + "\n\n" for h in _direct_helpers(store, goal_id))
+            return f"{helpers}{goal.statement} := {direct}\n", _declaration_name(
                 goal.statement
             )
 
@@ -280,6 +283,9 @@ def _assemble_body(
             sub_direct = _direct_proof(store, subgoal_id)
             if sub_direct is not None:
                 bodies[spec.name] = sub_direct
+                # Named under the lemma, so unique wherever the lemma's name is;
+                # ahead of the sketch, so declared before the lemma uses them.
+                preludes.extend(h.rstrip() + "\n" for h in _direct_helpers(store, subgoal_id))
                 continue
         # The subgoal was itself decomposed. Its subtree declares the lemma,
         # so this sketch must not declare it a second time.
@@ -297,6 +303,15 @@ def _assemble_body(
 
     rendered = render(sketch, bodies=bodies, preamble=False, omit=omit)
     return "\n\n".join([*preludes, rendered.text]), sketch.parent_name
+
+
+def _direct_helpers(store: "ProofGraphStore", goal_id: str) -> tuple[str, ...]:
+    """The helper declarations of the attempt `_direct_proof` takes its body from."""
+
+    for attempt in store.attempts_of(goal_id):
+        if attempt.outcome.value == "proved":
+            return attempt.auxiliary_declarations
+    return ()
 
 
 def _direct_proof(store: "ProofGraphStore", goal_id: str) -> str | None:

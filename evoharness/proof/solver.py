@@ -19,9 +19,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from .graph import Goal, Outcome
+from .graph import NO_VERDICT_OUTCOMES, Goal, Outcome
+from .verdict import CandidateVerdict, attempt_outcome
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .envelope import SourceEnvelope
 
 #: `stopped_reason` values that mean the run itself broke. No verdict on the
 #: goal: `evaluation/faults.py` calls these NO_VERDICT, and counting them as
@@ -50,6 +54,14 @@ class AttemptResult:
     cost: float = 0.0
     #: Free-form, for the audit trail. Never parsed.
     note: str = ""
+    #: Helper declarations beside the proof, named under the goal; see
+    #: `graph.Attempt.auxiliary_declarations`. Only a PROVED result carries any.
+    auxiliary_declarations: tuple[str, ...] = ()
+    #: What the verifier said about each candidate the run graded, when the
+    #: run was graded by one. The outcome above is aggregated from these.
+    verifications: tuple[CandidateVerdict, ...] = ()
+    #: The envelopes those verifications were made from, to persist with them.
+    envelopes: "tuple[SourceEnvelope, ...]" = ()
 
     def __post_init__(self) -> None:
         if self.outcome is Outcome.PROVED and not self.proof_text:
@@ -57,7 +69,9 @@ class AttemptResult:
                 "a PROVED attempt must carry its proof text; without it the "
                 "graph holds a proved goal with nothing to assemble"
             )
-        if self.outcome is not Outcome.PROVED and self.proof_text:
+        if self.outcome is not Outcome.PROVED and (
+            self.proof_text or self.auxiliary_declarations
+        ):
             raise ValueError(
                 f"a {self.outcome.value} attempt cannot carry proof text"
             )
@@ -71,14 +85,33 @@ class AttemptResult:
         solved_at: float = 1.0,
         proof_text: str | None = None,
         evidence_ref: str | None = None,
+        verifications: Sequence[CandidateVerdict] = (),
+        envelopes: "Sequence[SourceEnvelope]" = (),
+        winner_envelope: str | None = None,
+        verified_by_verifier: bool = False,
+        auxiliary_declarations: Sequence[str] = (),
     ) -> "AttemptResult":
         """Derive the outcome from a finished `api.run()`.
 
         Order matters. Whether the goal was PROVED is asked first, because
-        reaching `solved_at` means Lean accepted a proof, and that stays true
+        reaching `solved_at` means a proof was accepted, and that stays true
         however the run later fell over. Asking "how did it stop" first would
         throw away a proof already in hand because the judge went down
         afterwards.
+
+        When the run was graded by the verifier (`verified_by_verifier`),
+        reaching `solved_at` is not enough on its own: the winning candidate --
+        whose envelope hash is `winner_envelope` -- must carry a certification
+        among `verifications`. The grader is the only place a certification is
+        made; this is the only place one is bound to the attempt's result. A
+        solved score with no bound certification is a fault in that wiring,
+        and is reported as one rather than as a proof.
+
+        Then the no-verdict rule: a run in which the verifier answered only
+        with no-verdict statuses -- never once about a candidate -- ends with
+        the most severe of them, not with whatever the run's stopping reason
+        suggests. "The verifier never answered" must not read as "the model
+        cannot do it".
 
         INTERRUPTED is deliberately absent: a run that returns a report was not
         interrupted. See `interrupted()` for the case where it never returned.
@@ -87,6 +120,12 @@ class AttemptResult:
         reason = getattr(report, "stopped_reason", "")
         fitness = getattr(report, "best_fitness", None)
         cost = float(getattr(report, "total_llm_cost", 0.0) or 0.0)
+        carried = {
+            "run_dir": run_dir,
+            "cost": cost,
+            "verifications": tuple(verifications),
+            "envelopes": tuple(envelopes),
+        }
 
         if fitness is not None and fitness >= solved_at:
             if not proof_text:
@@ -94,22 +133,45 @@ class AttemptResult:
                     "run reached the solved threshold but no proof text was "
                     "extracted from its best candidate"
                 )
+            if verified_by_verifier and not _bound(verifications, winner_envelope):
+                return cls(
+                    Outcome.CONTRACT_REJECTED,
+                    note=(
+                        "the run reached the solved threshold but its winning "
+                        f"candidate (envelope {winner_envelope}) carries no "
+                        "certification; the grader and the result disagree"
+                    ),
+                    **carried,
+                )
             return cls(
                 outcome=Outcome.PROVED,
                 proof_text=proof_text,
-                run_dir=run_dir,
+                auxiliary_declarations=tuple(auxiliary_declarations),
                 evidence_ref=evidence_ref,
-                cost=cost,
                 note=f"stopped_reason={reason}",
+                **carried,
+            )
+        aggregated = attempt_outcome(verifications)
+        if aggregated in NO_VERDICT_OUTCOMES:
+            counts: dict[str, int] = {}
+            for verdict in verifications:
+                key = f"{verdict.status}/{verdict.reason}" if verdict.reason else verdict.status
+                counts[key] = counts.get(key, 0) + 1
+            return cls(
+                aggregated,
+                note=(
+                    f"stopped_reason={reason}; the verifier returned no verdict "
+                    "on any candidate: "
+                    + ", ".join(f"{k} x{n}" for k, n in sorted(counts.items()))
+                )[:500],
+                **carried,
             )
         if reason in _INFRA_REASONS:
-            return cls(Outcome.INFRA_FAILED, run_dir=run_dir, cost=cost,
-                       note=f"stopped_reason={reason}")
+            return cls(Outcome.INFRA_FAILED, note=f"stopped_reason={reason}", **carried)
         if reason in _BUDGET_REASONS:
-            return cls(Outcome.BUDGET_EXHAUSTED, run_dir=run_dir, cost=cost,
-                       note=f"stopped_reason={reason}")
-        return cls(Outcome.TASK_FAILED, run_dir=run_dir, cost=cost,
-                   note=f"stopped_reason={reason} best_fitness={fitness}")
+            return cls(Outcome.BUDGET_EXHAUSTED, note=f"stopped_reason={reason}", **carried)
+        return cls(Outcome.TASK_FAILED,
+                   note=f"stopped_reason={reason} best_fitness={fitness}", **carried)
 
     @classmethod
     def interrupted(
@@ -125,6 +187,15 @@ class AttemptResult:
 
         return cls(Outcome.INTERRUPTED, run_dir=run_dir,
                    note=note or "run did not return; manifest not finalized")
+
+
+def _bound(verifications: Sequence[CandidateVerdict], envelope_hash: str | None) -> bool:
+    """A certification made for exactly the winning candidate's envelope."""
+
+    return envelope_hash is not None and any(
+        v.status == "verified" and v.certification_id and v.envelope_hash == envelope_hash
+        for v in verifications
+    )
 
 
 class Solver(Protocol):

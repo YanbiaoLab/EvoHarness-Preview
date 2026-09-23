@@ -47,6 +47,20 @@ from .run_solver import ApiRunSolver, declaration_name
 from .scope import GraphScope, local_environment, preamble_sha256
 from .sketch import LeanRunner, LeanSketchValidator, SketchUnavailable
 from .store import ProofGraphStore
+from .verified import (
+    PublicationError,
+    VerifierSketchValidator,
+    certify_with_verifier,
+    publish,
+)
+from .verifier import (
+    GoalUnresolvable,
+    VerifierBinding,
+    VerifierClient,
+    VerifierUnavailable,
+    ensure_contracts,
+    verifier_environment,
+)
 
 #: Where the graph and every run directory live. One workspace is one line of
 #: enquiry; pointing two sessions at the same one is how a conversation and a
@@ -56,6 +70,15 @@ WORK_ENV = "EVO_PROOF_WORK"
 #: `lean`, which is right for core-Lean goals and wrong for every real
 #: benchmark problem.
 PROJECT_ENV = "EVO_LEAN_PROJECT"
+
+#: The verifier's URL. Set, every candidate, sketch and assembled proof is
+#: judged there and nothing is compiled locally; the graph's environment is the
+#: verifier's (`verifier:<fingerprint>`), a scope setting like any other.
+VERIFIER_ENV = "EVO_VERIFIER_URL"
+#: Which of the verifier's environments: a base key it can look up, or
+#: `@file.json` holding the whole environment record (for a verifier running
+#: without its database).
+VERIFIER_BASE_ENV = "EVO_VERIFIER_BASE"
 
 #: How far a goal's lease outlives the attack it covers. It has to absorb
 #: everything around the solver's own limit -- starting an interpreter, and
@@ -96,18 +119,68 @@ def _store(args) -> ProofGraphStore:
     # would otherwise be fixed into the graph, and every candidate under it
     # would fail as the candidate's fault.
     preamble_context(preamble)
+    verifier = _verifier(args)
     scope = GraphScope.resolve(
         stored=ProofGraphStore.read_scope(path),
-        environment=local_environment(_project(args)),
+        environment=(
+            verifier_environment(verifier[1]) if verifier
+            else local_environment(_project(args))
+        ),
         preamble_sha256=preamble_sha256(preamble),
         identity_hasher=_requested_hasher(args),
         minimum_trust=getattr(args, "minimum_trust", None),
+        base_id=verifier[1].get("base_id", "") if verifier else "",
     )
     store = ProofGraphStore(
         path, scope, adopt_scope=getattr(args, "adopt_scope", False)
     )
     args._scope = store.scope
     return store
+
+
+def _verifier(args) -> "tuple[VerifierClient, dict] | None":
+    """(client, the environment record) when a verifier is configured, else None.
+
+    Resolved once per command and kept on `args`: the graph's scope, the
+    grader, the sketch check and assembly must all talk about the same
+    environment.
+    """
+
+    if hasattr(args, "_verifier"):
+        return args._verifier
+    url = getattr(args, "verifier", "") or os.environ.get(VERIFIER_ENV, "")
+    if not url:
+        args._verifier = None
+        return None
+    spec = getattr(args, "verifier_base", "") or os.environ.get(VERIFIER_BASE_ENV, "")
+    if not spec:
+        raise ValueError(
+            f"--verifier needs --verifier-base (or ${VERIFIER_BASE_ENV}): a base key, "
+            "or @file.json with the environment record")
+    client = VerifierClient(url)
+    if spec.startswith("@"):
+        base = json.loads(Path(spec[1:]).read_text(encoding="utf-8"))
+    else:
+        base = client.base(int(spec))
+    if "fingerprint" not in base:
+        raise ValueError("the verifier's environment record has no fingerprint")
+    args._verifier = (client, base)
+    return args._verifier
+
+
+def _contract_for(args, store: ProofGraphStore):
+    """goal -> the verifier's contract for it, resolved once and kept in the graph."""
+
+    client, base = _verifier(args)
+    preamble = _read_preamble(args)
+
+    def contract_for(goal):
+        found = ensure_contracts(store, client, [goal], base=base, preamble=preamble)[goal.id]
+        if isinstance(found, GoalUnresolvable):
+            raise found
+        return found
+
+    return contract_for
 
 
 def _retire_graph(work: Path) -> list[str]:
@@ -454,9 +527,12 @@ def cmd_attack(args) -> dict:
                 "warnings": warnings,
             }
 
-        report = controller.solve(
-            goal.id, budget=args.budget, max_iterations=args.max_iterations
-        )
+        with _pinned(args, store, controller) as pin_note:
+            report = controller.solve(
+                goal.id, budget=args.budget, max_iterations=args.max_iterations
+            )
+        if pin_note:
+            warnings.append(pin_note)
         return {
             "report": {
                 "root_proved": report.root_proved,
@@ -501,10 +577,17 @@ def cmd_assemble(args) -> dict:
                 "reason": f"goal is {goal.status.value}; nothing to assemble",
             }
         try:
-            result, certification = certify(
-                store, goal.id, runner=_runner(args), routes=args.route,
-                policy=_policy(args),
-            )
+            verifier = _verifier(args)
+            if verifier:
+                result, certification = certify_with_verifier(
+                    store, goal.id, client=verifier[0], base=verifier[1],
+                    preamble=_read_preamble(args), policy=_policy(args), routes=args.route,
+                )
+            else:
+                result, certification = certify(
+                    store, goal.id, runner=_runner(args), routes=args.route,
+                    policy=_policy(args),
+                )
         except AmbiguousRoute as exc:
             # A question, not a fault: answered by naming a route, so it comes
             # back as a payload the caller can act on rather than as an error
@@ -528,10 +611,32 @@ def cmd_assemble(args) -> dict:
             "reason": result.reason[:2000],
             "axioms": sorted(result.axioms),
             "certification_id": certification.id,
+            # The verifier's own record, when it was the verifier that checked.
+            "verifier": certification.external,
             "decomposition_id": certification.decomposition_id,
             "written_to": str(out) if (result.ok and out) else None,
             "text": result.text if args.show_text else None,
         }
+    finally:
+        store.close()
+
+
+def cmd_publish(args) -> dict:
+    """Publish a goal's latest verifier certification into the verifier's library."""
+
+    if not _verifier(args):
+        raise ValueError("publish needs --verifier: a local compile is not publishable")
+    store = _store(args)
+    try:
+        cert = store.latest_certification(args.goal)
+        if cert is None:
+            raise ValueError("this goal has no certification; run `assemble` first")
+        try:
+            answer = publish(store, cert.id, client=_verifier(args)[0],
+                             provenance={"label": args.label} if args.label else None)
+        except PublicationError as exc:
+            return {"published": False, "reason": str(exc)}
+        return {"published": True, "certification_id": cert.id, "publication": answer}
     finally:
         store.close()
 
@@ -562,6 +667,25 @@ def _controller(
     runner = _runner(args)
     work = Path(args.work or os.environ.get(WORK_ENV) or ".proof")
     mode = "agentic" if args.level == "L2" else "single_shot"
+    verifier = _verifier(args)
+    binding = None
+    validator = LeanSketchValidator(runner=runner)
+    if verifier:
+        from .retrieval import VerifierRetrievalProvider
+
+        policy = _policy(args)
+        contract_for = _contract_for(args, store)
+        binding = VerifierBinding(
+            client=verifier[0], preamble=_read_preamble(args), policy=policy,
+            contract_for=contract_for,
+            allow_helpers=getattr(args, "allow_helpers", False),
+            retrieval=VerifierRetrievalProvider(verifier[0], policy.minimum_trust),
+            on_retrieval=lambda goal, request_id, contract, hits: store.record_retrieval(
+                goal.id, request_id, base=dict(contract.base), hits=hits),
+        )
+        validator = VerifierSketchValidator(
+            client=verifier[0], preamble=_read_preamble(args), policy=policy,
+            contract_for=contract_for)
 
     solver = _RefusesToAttack() if not solver_needed else ApiRunSolver(
         work_root=work / "runs",
@@ -586,11 +710,13 @@ def _controller(
         search_profile_factory=lambda: BasicSearchProfile(
             num_trajectories=args.trajectories, proposal_mode=mode
         ),
+        # With a verifier this is never called: one judge, no local precheck.
         grade_func=make_grader(runner, _policy(args)),
         transport=_transport(args),
         preamble=_read_preamble(args),
         level=args.level,
         on_attempt_dir=store.note_attempt_dir,
+        verifier=binding,
     )
     return ProofController(
         store,
@@ -599,7 +725,7 @@ def _controller(
         # the caller's move. Keeping them apart is what lets a person see the
         # decomposition before any budget is spent on it.
         decompositions=_NoDecompositions(),
-        validate_sketch=LeanSketchValidator(runner=runner),
+        validate_sketch=validator,
         max_capability_attempts=args.max_attempts,
         # Longer than one attack can possibly last, and derived from it rather
         # than chosen. An expired lease means one thing -- the holder is dead
@@ -611,6 +737,63 @@ def _controller(
         # that was working.
         lease_ttl_s=args.attack_timeout + _LEASE_MARGIN_S,
     )
+
+
+class _pinned:
+    """Pin the verifier's environment for the length of a run, and watch the view.
+
+    Folding published declarations into a new environment moves them out of
+    the old one, and a run pinned to the old one would stop seeing what it
+    retrieved without being told. The pin makes the verifier refuse to fold
+    while the run lives; the heartbeat renews it before every iteration, and
+    stops the run if renewal fails or a retrieved declaration has vanished.
+
+    A verifier without its database cannot pin; that is said once, as a
+    warning, and the run goes on -- there is nothing to fold there either.
+    """
+
+    def __init__(self, args, store: ProofGraphStore, controller):
+        self.args, self.store, self.controller = args, store, controller
+        self.pin_id = None
+        self.note = ""
+
+    def __enter__(self) -> str:
+        verifier = _verifier(self.args)
+        if not verifier or "base_key" not in verifier[1]:
+            return ""
+        client, base = verifier
+        ttl = self.args.attack_timeout + _LEASE_MARGIN_S
+        try:
+            self.pin_id = client.pin(int(base["base_key"]), holder=self.controller.owner,
+                                     ttl_s=ttl)["pin_id"]
+        except (VerifierUnavailable, ValueError) as exc:
+            self.note = f"the verifier could not pin its environment: {exc}"
+            return self.note
+        minimum = _policy(self.args).minimum_trust
+
+        def heartbeat():
+            from .retrieval import vanished
+
+            try:
+                client.renew_pin(self.pin_id, ttl_s=ttl)
+            except (VerifierUnavailable, ValueError):
+                return "environment_pin_lost"
+            try:
+                if vanished(client, self.store.retrieved(), minimum_trust=minimum):
+                    return "retrieval_view_shrank"
+            except VerifierUnavailable:
+                return None
+            return None
+
+        self.controller.heartbeat = heartbeat
+        return ""
+
+    def __exit__(self, *exc) -> None:
+        if self.pin_id:
+            try:
+                _verifier(self.args)[0].release_pin(self.pin_id)
+            except (VerifierUnavailable, ValueError):
+                pass  # it expires on its own
 
 
 class _NoDecompositions:
@@ -681,6 +864,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-new-graph", action="store_true",
                         help="move the current graph and preamble aside "
                              "(renamed *.bak, never deleted) and start a new one")
+    parser.add_argument("--verifier", default="",
+                        help=f"the verifier's URL (default ${VERIFIER_ENV}); set, nothing "
+                             "is compiled locally")
+    parser.add_argument("--verifier-base", default="",
+                        help=f"the verifier's environment: a base key, or @file.json "
+                             f"(default ${VERIFIER_BASE_ENV})")
     parser.add_argument("--model", default=os.environ.get("DSH_MODEL", "gpt-5.6-sol"))
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -733,6 +922,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="a completed decomposition to assemble through; "
                         "repeat for goals further down the tree")
     p.set_defaults(func=cmd_assemble)
+
+    p = sub.add_parser("publish")
+    p.add_argument("--goal", required=True)
+    p.add_argument("--label", default="")
+    p.set_defaults(func=cmd_publish)
     return parser
 
 
@@ -747,6 +941,9 @@ def _solver_flags(p) -> None:
                    help="how long one attempt may run before it stops itself; "
                         "must be under the caller's own ceiling")
     p.add_argument("--trajectories", type=int, default=1)
+    p.add_argument("--allow-helpers", action="store_true",
+                   help="with a verifier: let a proof declare helpers named under "
+                        "its goal (`goal.step`)")
     p.add_argument("--max-attempts", type=int, default=1)
     p.add_argument("--seed", type=int, default=1)
 

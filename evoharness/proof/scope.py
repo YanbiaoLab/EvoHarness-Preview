@@ -33,8 +33,9 @@ SCOPE_VERSION = 1
 #: it changes what a PROVED certifies.
 ENVELOPE_SCHEMA_VERSION = 1
 #: The verifier's goal-identity schema version: what counts as "the same goal"
-#: on the verifier's side.
-GOALKEY_SCHEMA_VERSION = 1
+#: on the verifier's side. 2 stopped hashing bound-variable names, so renaming
+#: `a` to `b` is no longer a different goal; keys under 1 and 2 never match.
+GOALKEY_SCHEMA_VERSION = 2
 
 DEFAULT_MINIMUM_TRUST = "audited"
 DEFAULT_IDENTITY_HASHER = "exact-text"
