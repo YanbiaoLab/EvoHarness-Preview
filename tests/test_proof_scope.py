@@ -42,7 +42,7 @@ def goals_in(path) -> list[str]:
 
 
 def test_first_open_records_the_scope(tmp_path, capsys):
-    code, _ = run(capsys, tmp_path, "open", "--statement", "theorem a : True")
+    code, _ = run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
     assert code == 0
     scope = ProofGraphStore.read_scope(tmp_path / "graph.db")
     assert scope.environment == "local:bare"
@@ -55,7 +55,7 @@ def test_first_open_records_the_scope(tmp_path, capsys):
 
 
 def test_a_different_hasher_is_refused(tmp_path, capsys):
-    run(capsys, tmp_path, "open", "--statement", "theorem a : True")
+    run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
     code, out = run(capsys, tmp_path, "--lean-identity", "status")
     assert code == 1
     assert "identity_hasher" in out["error"]
@@ -75,7 +75,7 @@ def test_an_unstated_hasher_is_inherited_not_defaulted(tmp_path):
 
 def test_trust_floor_is_inherited_and_reaches_the_grader(tmp_path, capsys):
     run(capsys, tmp_path, "--minimum-trust", "trusted",
-        "open", "--statement", "theorem a : True")
+        "open", "--preamble", "", "--statement", "theorem a : True")
     args = cli.build_parser().parse_args(["--work", str(tmp_path), "status"])
     cli._store(args).close()
     assert cli._policy(args).minimum_trust == "trusted"
@@ -102,7 +102,7 @@ def test_a_hand_edited_preamble_is_refused(tmp_path, capsys):
 
 
 def test_a_different_lean_is_refused(tmp_path, capsys):
-    run(capsys, tmp_path, "open", "--statement", "theorem a : True")
+    run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
     project = tmp_path / "project"
     project.mkdir()
     (project / "lake-manifest.json").write_text("{}")
@@ -153,7 +153,7 @@ def test_a_graph_without_scope_is_refused_until_adopted(tmp_path, capsys):
 
 
 def test_adopting_is_only_for_graphs_without_a_scope(tmp_path, capsys):
-    run(capsys, tmp_path, "open", "--statement", "theorem a : True")
+    run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
     code, out = run(capsys, tmp_path, "--adopt-scope", "status")
     assert code == 1 and "adopt-scope" in out["error"]
 
@@ -165,7 +165,7 @@ def test_force_new_graph_moves_the_old_one_aside(tmp_path, capsys):
     run(capsys, tmp_path, "open", "--statement", "theorem a : True",
         "--preamble", "open Nat")
     code, out = run(capsys, tmp_path, "--force-new-graph",
-                    "open", "--statement", "theorem b : True")
+                    "open", "--preamble", "", "--statement", "theorem b : True")
     assert code == 0
 
     retired = out["retired_graph"]
@@ -182,7 +182,7 @@ def test_force_new_graph_moves_the_old_one_aside(tmp_path, capsys):
 
 def test_retiring_twice_in_one_second_overwrites_nothing(tmp_path, capsys):
     for statement in ("theorem a : True", "theorem b : True", "theorem c : True"):
-        run(capsys, tmp_path, "--force-new-graph", "open", "--statement", statement)
+        run(capsys, tmp_path, "--force-new-graph", "open", "--preamble", "", "--statement", statement)
     backups = sorted(p.name for p in tmp_path.glob("graph.db.*.bak"))
     assert len(backups) == 2  # the first open had nothing to retire
     assert len(set(backups)) == 2
@@ -193,3 +193,87 @@ def test_a_preamble_the_verifier_cannot_use_never_becomes_a_graph(tmp_path, caps
                     "--preamble", "open Nat in")
     assert code == 1 and "scopes only the next" in out["error"]
     assert ProofGraphStore.read_scope(tmp_path / "graph.db") is None
+
+
+# -- replacing a wrong preamble before anything is proved ---------------------
+
+
+def test_a_wrong_preamble_can_be_replaced_while_nothing_is_proved(tmp_path, capsys):
+    """A board opened under the wrong header (here an explicit empty one, as boards
+    opened before headers were required got). Before anything is proved, a verdict
+    under it is a verdict under the wrong premises, so the board may start over;
+    the old one is kept aside."""
+
+    run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
+    graph = ProofGraphStore(tmp_path / "graph.db")
+    goal = graph.open_goals()[0]
+    from evoharness.proof.graph import Outcome
+
+    graph.record_attempt(goal.id, Outcome.TASK_FAILED, note="unknown notation")
+    graph.propagate(goal.id, max_capability_attempts=1)
+    graph.close()
+
+    code, out = run(capsys, tmp_path, "open", "--statement", "theorem a : True",
+                    "--preamble", "import Mathlib")
+    assert code == 1 and "--replace-preamble" in out["error"]
+
+    code, out = run(capsys, tmp_path, "--replace-preamble", "open",
+                    "--statement", "theorem a : True", "--preamble", "import Mathlib")
+    assert code == 0
+    assert out["opened"]["status"] == "open" and out["opened"]["attempts"] == []
+    assert any(p.endswith(".bak") and "/graph.db." in p for p in out["retired_graph"])
+    assert ProofGraphStore.read_scope(tmp_path / "graph.db").preamble_sha256 == (
+        preamble_sha256("import Mathlib"))
+    assert (tmp_path / "preamble.lean").read_text().strip() == "import Mathlib"
+
+
+def test_replacing_the_preamble_refuses_once_something_is_proved(tmp_path, capsys):
+    run(capsys, tmp_path, "open", "--preamble", "", "--statement", "theorem a : True")
+    graph = ProofGraphStore(tmp_path / "graph.db")
+    goal = graph.open_goals()[0]
+    from evoharness.proof.graph import Outcome
+
+    graph.record_attempt(goal.id, Outcome.PROVED, proof_text="trivial")
+    graph.propagate(goal.id, max_capability_attempts=1)
+    graph.close()
+    code, out = run(capsys, tmp_path, "--replace-preamble", "open",
+                    "--statement", "theorem a : True", "--preamble", "import Mathlib")
+    assert code == 1 and "1 proved goal" in out["error"]
+    assert ProofGraphStore.read_scope(tmp_path / "graph.db").preamble_sha256 == preamble_sha256("")
+
+
+def test_replacing_with_the_same_preamble_changes_nothing(tmp_path, capsys):
+    run(capsys, tmp_path, "open", "--statement", "theorem a : True", "--preamble", "open Nat")
+    code, out = run(capsys, tmp_path, "--replace-preamble", "open",
+                    "--statement", "theorem a : True", "--preamble", "open Nat")
+    assert code == 0 and "retired_graph" not in out
+    assert not list(tmp_path.glob("graph.db.*.bak"))
+
+
+
+def test_the_first_open_must_state_the_header(tmp_path, capsys):
+    """Left unsaid, the header used to be fixed as empty for the whole board, and a
+    Mathlib problem opened that way failed on its first token and was marked
+    exhausted -- a verdict about a missing import, recorded against the goal."""
+
+    code, out = run(capsys, tmp_path, "open", "--statement", "theorem a : True")
+    assert code == 1 and "--preamble" in out["error"]
+    assert not (tmp_path / "graph.db").exists() or ProofGraphStore.read_scope(
+        tmp_path / "graph.db") is None
+    code, _ = run(capsys, tmp_path, "open", "--statement", "theorem a : True",
+                  "--preamble", "import Mathlib")
+    assert code == 0
+    # Later opens on the same board inherit the header; they need not restate it.
+    code, _ = run(capsys, tmp_path, "open", "--statement", "theorem b : True")
+    assert code == 0
+    assert ProofGraphStore.read_scope(tmp_path / "graph.db").preamble_sha256 == (
+        preamble_sha256("import Mathlib"))
+
+
+def test_reading_an_empty_workspace_does_not_fix_a_header(tmp_path, capsys):
+    code, out = run(capsys, tmp_path, "status")
+    assert code == 1 and "--preamble" in out["error"]
+    assert ProofGraphStore.read_scope(tmp_path / "graph.db") is None
+    code, _ = run(capsys, tmp_path, "open", "--statement", "theorem a : True",
+                  "--preamble", "import Mathlib")
+    assert code == 0

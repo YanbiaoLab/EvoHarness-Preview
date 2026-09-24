@@ -195,6 +195,25 @@ describe('the lake project', () => {
     expect(await argvOf(ctx, 'proof_status', {})).not.toContain('--lean-project')
   })
 
+  it('passes replace_preamble as the global flag, before the subcommand', async () => {
+    const ctx = await mount()
+    const argv = await argvOf(ctx, 'proof_open', {
+      statement: 'theorem t : True', preamble: 'import Mathlib', replace_preamble: true,
+    })
+    expect(argv.indexOf('--replace-preamble')).toBeGreaterThan(-1)
+    expect(argv.indexOf('--replace-preamble')).toBeLessThan(argv.indexOf('open'))
+    const plain = await argvOf(ctx, 'proof_open', { statement: 'theorem t : True' })
+    expect(plain).not.toContain('--replace-preamble')
+  })
+
+  it('passes an explicitly empty header rather than dropping it', async () => {
+    const ctx = await mount()
+    const argv = await argvOf(ctx, 'proof_open', { statement: 'theorem t : True', preamble: '' })
+    expect(argv[argv.indexOf('--preamble') + 1]).toBe('')
+    const unsaid = await argvOf(ctx, 'proof_open', { statement: 'theorem t : True' })
+    expect(unsaid).not.toContain('--preamble')
+  })
+
   it('falls back to the environment, which is what the launcher sets', async () => {
     vi.stubEnv('EVO_LEAN_PROJECT', '/env/mathlib')
     const ctx = await mount()

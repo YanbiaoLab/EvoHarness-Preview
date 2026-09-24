@@ -91,6 +91,23 @@ def _store(args) -> ProofGraphStore:
     path = work / "graph.db"
     if getattr(args, "force_new_graph", False):
         args._retired = _retire_graph(work)
+    elif getattr(args, "replace_preamble", False):
+        args._retired = _replace_preamble(args, work, path)
+    if (
+        getattr(args, "preamble", None) is None
+        and ProofGraphStore.read_scope(path) is None
+        and not _has_goals(path)
+    ):
+        # The first open fixes the header for every goal on the board. Left
+        # unsaid, it used to be fixed as EMPTY -- and a Mathlib problem opened
+        # that way could not even parse `∑`, failed at once, and was marked
+        # exhausted: a verdict about a missing import, recorded as one about the
+        # goal. So the header comes with the problem, stated, every time.
+        raise ValueError(
+            "there is no board here yet, and the first open fixes the file header "
+            "for every goal on it: pass --preamble with the header the problem comes "
+            "with (for example \"import Mathlib\"), or --preamble '' if it needs none"
+        )
     preamble = _read_preamble(args)
     # Checked before any scope is written: a preamble the verifier cannot use
     # would otherwise be fixed into the graph, and every candidate under it
@@ -108,6 +125,61 @@ def _store(args) -> ProofGraphStore:
     )
     args._scope = store.scope
     return store
+
+
+def _has_goals(path: Path) -> bool:
+    """Whether a graph file exists with goals in it, without creating one."""
+
+    if not path.is_file():
+        return False
+    conn = sqlite3.connect(str(path))
+    try:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='goals'").fetchone()
+        return bool(table) and conn.execute("SELECT COUNT(*) FROM goals").fetchone()[0] > 0
+    finally:
+        conn.close()
+
+
+def _replace_preamble(args, work: Path, path: Path) -> list[str] | None:
+    """Start over under a new preamble -- allowed only while nothing is proved.
+
+    The preamble is fixed per graph because a statement means something
+    different under different imports, and memoization would carry a PROVED
+    earned under one into the other. That hazard needs something proved. Before
+    anything is, a wrong preamble -- one left out at the first `open`, say --
+    has produced only verdicts reached under the wrong premises: a goal that
+    failed because `∑` did not parse was never tried at all. Those are not
+    evidence worth keeping in the graph, so the old graph is moved aside whole
+    (as `--force-new-graph` does, renamed, never deleted) and a new one starts
+    under the preamble given.
+
+    Once anything is proved or certified, this refuses: only
+    `--force-new-graph`, which says in its name that it throws the graph away,
+    may drop a result.
+    """
+
+    if not getattr(args, "preamble", None):
+        raise ValueError("--replace-preamble needs --preamble: the preamble to replace it with")
+    stored = ProofGraphStore.read_scope(path)
+    if stored is None or stored.preamble_sha256 == preamble_sha256(args.preamble):
+        return None  # nothing to replace: a new graph, or the same preamble
+    conn = sqlite3.connect(str(path))
+    try:
+        proved = conn.execute(
+            "SELECT COUNT(*) FROM goals WHERE status = 'proved'").fetchone()[0]
+        certified = conn.execute(
+            "SELECT COUNT(*) FROM certifications WHERE ok = 1").fetchone()[0]
+    finally:
+        conn.close()
+    if proved or certified:
+        raise ValueError(
+            f"this graph has {proved} proved goal(s) and {certified} passing "
+            "certification(s) under its current preamble; replacing the preamble "
+            "would carry them into different premises. Keep the preamble, or start "
+            "over with --force-new-graph, which moves this graph aside."
+        )
+    return _retire_graph(work)
 
 
 def _retire_graph(work: Path) -> list[str]:
@@ -252,7 +324,7 @@ def cmd_open(args) -> dict:
         identity = _hasher(args).hash_many([statement])[0]
         goal = store.upsert_goal(identity, statement)
         store.add_root(goal.id, args.label or declaration_name(statement))
-        if args.preamble:
+        if args.preamble is not None:
             _write_preamble(args, args.preamble)
         return {"opened": _goal_view(store, goal)}
     finally:
@@ -641,7 +713,9 @@ def _write_preamble(args, text: str) -> None:
 
 
 def _read_preamble(args) -> str:
-    if getattr(args, "preamble", None):
+    # `None` is "not said", `""` is "said: no header". Only the first defers to
+    # the board's stored header.
+    if getattr(args, "preamble", None) is not None:
         return args.preamble.strip()
     path = _preamble_path(args)
     return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
@@ -681,12 +755,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-new-graph", action="store_true",
                         help="move the current graph and preamble aside "
                              "(renamed *.bak, never deleted) and start a new one")
+    parser.add_argument("--replace-preamble", action="store_true",
+                        help="start over under --preamble when the graph has a "
+                             "different one and nothing is proved yet (the old "
+                             "graph is moved aside, never deleted)")
     parser.add_argument("--model", default=os.environ.get("DSH_MODEL", "gpt-5.6-sol"))
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("open")
     p.add_argument("--statement", required=True)
-    p.add_argument("--preamble", default="")
+    p.add_argument("--preamble", default=None,
+                   help="the file header (imports) the problem comes with; required "
+                        "on the first open, '' for none")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_open)
 
@@ -698,7 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--goal", required=True)
     p.add_argument("--proposal", required=True,
                    help='json, or @file, or - for stdin')
-    p.add_argument("--preamble", default="")
+    p.add_argument("--preamble", default=None)
     _solver_flags(p)
     p.set_defaults(func=cmd_sketch)
 
@@ -706,7 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--goal", required=True)
     p.add_argument("--budget", type=float, default=10.0)
     p.add_argument("--max-iterations", type=int, default=4)
-    p.add_argument("--preamble", default="")
+    p.add_argument("--preamble", default=None)
     # Refusing is the default. Budget spent on a goal no accepted route uses
     # buys a lemma that cannot close anything, and in a long autonomous run
     # nobody reads the warning that used to be all this said.
