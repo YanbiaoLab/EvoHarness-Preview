@@ -452,3 +452,73 @@ def test_a_directly_proved_goal_certifies_with_no_route_not_an_unknown_one(store
 
     assert certification.decomposition_id == ""
     assert certification.decomposition_id is not None
+
+
+# -- the board's header comes first, however the goal was closed --------------
+
+
+def test_a_directly_proved_goal_is_assembled_under_the_boards_header(tmp_path):
+    """A goal the solver closed in one go has no sketch to carry the header, and its
+    file used to come out with none: a Mathlib proof failed to parse once assembled."""
+
+    from evoharness.proof.assembly import assemble
+    from evoharness.proof.graph import Outcome
+    from evoharness.proof.store import ProofGraphStore
+
+    store = ProofGraphStore(tmp_path / "graph.db")
+    goal = store.upsert_goal("id:odd", "theorem odd (n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2")
+    store.record_attempt(goal.id, Outcome.PROVED, proof_text="by\n  induction n <;> simp_all [Finset.sum_range_succ]; ring")
+    store.propagate(goal.id, max_capability_attempts=3)
+    text = assemble(store, goal.id, preamble="import Mathlib\nopen Nat")
+    assert text.startswith("import Mathlib\nopen Nat\n\ntheorem odd")
+    assert assemble(store, goal.id).startswith("theorem odd"), "no header given, none added"
+    store.close()
+
+
+def test_a_header_carried_by_a_sketch_is_not_written_twice(tmp_path):
+    from evoharness.proof.assembly import assemble
+    from evoharness.proof.graph import DecompositionStatus, Outcome
+    from evoharness.proof.sketch import Sketch, SubgoalSpec
+    from evoharness.proof.store import ProofGraphStore
+
+    store = ProofGraphStore(tmp_path / "graph.db")
+    root = store.upsert_goal("id:root", "theorem root : True")
+    sketch = Sketch(parent_name="root", parent_signature="theorem root : True", parent_body="l1",
+                    subgoals=(SubgoalSpec("l1", "id:l1", "theorem l1 : True"),),
+                    preamble="import Mathlib")
+    d = store.add_decomposition(root.id, [("id:l1", "theorem l1 : True")], sketch=sketch)
+    store.set_decomposition_status(d.id, DecompositionStatus.ACCEPTED)
+    store.record_attempt(d.subgoal_ids[0], Outcome.PROVED, proof_text="trivial")
+    store.propagate(d.subgoal_ids[0], max_capability_attempts=3)
+    text = assemble(store, root.id, preamble="import Mathlib")
+    assert text.count("import Mathlib") == 1 and text.startswith("import Mathlib\n")
+    store.close()
+
+
+def test_the_cli_assembles_under_the_boards_header(tmp_path, capsys, monkeypatch):
+    import json
+
+    from evoharness.proof import cli
+    from evoharness.proof.graph import Outcome
+    from evoharness.proof.store import ProofGraphStore
+
+    monkeypatch.delenv(cli.WORK_ENV, raising=False)
+    monkeypatch.delenv(cli.PROJECT_ENV, raising=False)
+    seen = {}
+
+    class Runner:
+        def compile(self, text):
+            seen["text"] = text
+            return 0, "'odd' depends on axioms: [propext]"
+
+    monkeypatch.setattr(cli, "_runner", lambda args: Runner())
+    assert cli.main(["--work", str(tmp_path), "open", "--preamble", "import Mathlib",
+                     "--statement", "theorem odd : True"]) == 0
+    goal_id = json.loads(capsys.readouterr().out)["opened"]["goal_id"]
+    store = ProofGraphStore(tmp_path / "graph.db")
+    store.record_attempt(goal_id, Outcome.PROVED, proof_text="trivial")
+    store.propagate(goal_id, max_capability_attempts=3)
+    store.close()
+    assert cli.main(["--work", str(tmp_path), "assemble", "--goal", goal_id]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert seen["text"].startswith("import Mathlib\n\ntheorem odd : True := trivial")
