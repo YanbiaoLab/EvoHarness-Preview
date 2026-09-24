@@ -575,7 +575,7 @@ def cmd_assemble(args) -> dict:
         try:
             result, certification = certify(
                 store, goal.id, runner=_runner(args), routes=args.route,
-                policy=_policy(args),
+                policy=_policy(args), preamble=_read_preamble(args),
             )
         except AmbiguousRoute as exc:
             # A question, not a fault: answered by naming a route, so it comes

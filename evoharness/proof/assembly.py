@@ -99,6 +99,7 @@ def assemble(
     goal_id: str,
     *,
     routes: "Iterable[str]" = (),
+    preamble: str = "",
 ) -> str:
     """Render the finished proof of one goal, recursively.
 
@@ -117,12 +118,18 @@ def assemble(
     the moment any subgoal had a subtree of its own -- and `import` is only
     legal at the top. Deduplicated by line and kept in first-seen order, so a
     subtree that needs something extra keeps it.
+
+    `preamble` is the board's own header, and it comes first. Sketches carry
+    a copy of it, so a proof assembled through a route got its imports from
+    there -- but a goal the solver closed directly has no sketch, and its
+    file came out with no header at all: a Mathlib proof that compiled in its
+    own run failed to parse on its first `∑` once assembled.
     """
 
     pins = _pin_map(store, routes)
-    preamble: list[str] = []
+    header: list[str] = [line for line in preamble.strip().splitlines()]
     used: set[str] = set()
-    text, _ = _assemble_body(store, goal_id, pins, preamble, used)
+    text, _ = _assemble_body(store, goal_id, pins, header, used)
     unused = sorted(pins[goal] for goal in set(pins) - used)
     if unused:
         # Silence here would be the worst outcome: the caller named a route,
@@ -132,8 +139,8 @@ def assemble(
             "these routes were named but never applied -- their goals are not "
             f"on the route being assembled: {', '.join(unused)}"
         )
-    if preamble:
-        return "\n".join(preamble) + "\n\n" + text
+    if header:
+        return "\n".join(header) + "\n\n" + text
     return text
 
 
@@ -333,6 +340,7 @@ def verify(
     runner: LeanRunner | None = None,
     routes: "Iterable[str]" = (),
     policy: AxiomPolicy | None = None,
+    preamble: str = "",
 ) -> AssemblyResult:
     """Assemble, compile, and read Lean's axiom report through the policy.
 
@@ -345,7 +353,7 @@ def verify(
     policy = policy or AxiomPolicy()
 
     goal = store.goal(goal_id)
-    text = assemble(store, goal_id, routes=routes)
+    text = assemble(store, goal_id, routes=routes, preamble=preamble)
     name = _root_name(store, goal_id)
     text = text.rstrip() + f"\n\n#print axioms {name}\n"
 
@@ -413,6 +421,7 @@ def certify(
     runner: LeanRunner | None = None,
     routes: "Iterable[str]" = (),
     policy: AxiomPolicy | None = None,
+    preamble: str = "",
 ) -> tuple[AssemblyResult, Certification]:
     """Verify, and record the verdict on the goal.
 
@@ -433,7 +442,8 @@ def certify(
     like provenance while being none.
     """
 
-    result = verify(store, goal_id, runner=runner, routes=routes, policy=policy)
+    result = verify(store, goal_id, runner=runner, routes=routes, policy=policy,
+                    preamble=preamble)
     decomposition = _top_route(store, goal_id, _pin_map(store, routes))
     certification = store.record_certification(
         goal_id,
