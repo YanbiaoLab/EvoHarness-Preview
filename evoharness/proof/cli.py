@@ -29,17 +29,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from .assembly import AmbiguousRoute, AssemblyError, certify
 from .controller import ProofController
+from .envelope import preamble_context
 from .grade import make_grader
 from .graph import DecompositionStatus, GoalStatus
 from .identity import ExactTextHasher, LeanExprHasher
 from .inspect import InspectError, attempt_view
 from .propose import ProposalError, parse_proposal
+from .policy import AxiomPolicy
 from .run_solver import ApiRunSolver, declaration_name
+from .scope import GraphScope, local_environment, preamble_sha256
 from .sketch import LeanRunner, LeanSketchValidator, SketchUnavailable
 from .store import ProofGraphStore
 
@@ -67,16 +72,102 @@ def _runner(args) -> LeanRunner:
     return LeanRunner(timeout_s=args.lean_timeout)
 
 
+def _work(args) -> Path:
+    return Path(args.work or os.environ.get(WORK_ENV) or ".proof")
+
+
 def _store(args) -> ProofGraphStore:
-    work = Path(args.work or os.environ.get(WORK_ENV) or ".proof")
+    """Open the graph under the scope this command works in, or refuse.
+
+    The scope is resolved before opening: what the command will actually use
+    (the Lean it compiles against, the preamble it reads) plus the settings it
+    states by flag, with the unstated ones inherited from the graph. The
+    resolved scope is left on `args` so the hasher and the axiom policy come
+    from the graph rather than from whichever flags this invocation remembered.
+    """
+
+    work = _work(args)
     work.mkdir(parents=True, exist_ok=True)
-    return ProofGraphStore(work / "graph.db")
+    path = work / "graph.db"
+    if getattr(args, "force_new_graph", False):
+        args._retired = _retire_graph(work)
+    preamble = _read_preamble(args)
+    # Checked before any scope is written: a preamble the verifier cannot use
+    # would otherwise be fixed into the graph, and every candidate under it
+    # would fail as the candidate's fault.
+    preamble_context(preamble)
+    scope = GraphScope.resolve(
+        stored=ProofGraphStore.read_scope(path),
+        environment=local_environment(_project(args)),
+        preamble_sha256=preamble_sha256(preamble),
+        identity_hasher=_requested_hasher(args),
+        minimum_trust=getattr(args, "minimum_trust", None),
+    )
+    store = ProofGraphStore(
+        path, scope, adopt_scope=getattr(args, "adopt_scope", False)
+    )
+    args._scope = store.scope
+    return store
+
+
+def _retire_graph(work: Path) -> list[str]:
+    """Move the graph and its preamble aside. Renamed, never deleted.
+
+    The graph runs in WAL mode, so committed pages can still sit in
+    `graph.db-wal`: checkpoint first, then move the database and both sidecar
+    files together. A rename onto an existing path would overwrite it
+    silently, so the suffix is made unique rather than trusted to be.
+    """
+
+    db = work / "graph.db"
+    if db.is_file():
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    names = ("graph.db", "graph.db-wal", "graph.db-shm", "preamble.lean")
+    suffix, n = stamp, 0
+    while any((work / f"{name}.{suffix}.bak").exists() for name in names):
+        n += 1
+        suffix = f"{stamp}.{n}"
+    moved = []
+    for name in names:
+        src = work / name
+        if src.exists():
+            dst = work / f"{name}.{suffix}.bak"
+            src.rename(dst)
+            moved.append(str(dst))
+    return moved
+
+
+def _project(args) -> str:
+    return getattr(args, "lean_project", "") or os.environ.get(PROJECT_ENV, "")
+
+
+def _requested_hasher(args) -> str | None:
+    """The hasher this command names, or None to inherit the graph's."""
+
+    named = getattr(args, "identity", None)
+    if getattr(args, "lean_identity", False):
+        if named not in (None, "lean-expr"):
+            raise ValueError("--lean-identity contradicts --identity " + named)
+        return "lean-expr"
+    return named
 
 
 def _hasher(args):
-    if args.lean_identity:
+    scope = getattr(args, "_scope", None)
+    name = scope.identity_hasher if scope else (_requested_hasher(args) or "exact-text")
+    if name == "lean-expr":
         return LeanExprHasher()
     return ExactTextHasher()
+
+
+def _policy(args) -> AxiomPolicy:
+    scope = getattr(args, "_scope", None)
+    return scope.policy if scope else AxiomPolicy()
 
 
 def _certification_view(store: ProofGraphStore, goal_id: str) -> dict | None:
@@ -98,6 +189,10 @@ def _certification_view(store: ProofGraphStore, goal_id: str) -> dict | None:
         # closed it directly -- and null means the record predates this being
         # kept, when whichever route was oldest won silently.
         "decomposition_id": cert.decomposition_id,
+        # The trust level of the finished proof. Shown because accepting
+        # native_decide means an `audited` proof counts as proved, and a
+        # reader must be able to tell it from a `trusted` one.
+        "trust": cert.trust,
         "at": cert.created_at,
     }
 
@@ -407,7 +502,8 @@ def cmd_assemble(args) -> dict:
             }
         try:
             result, certification = certify(
-                store, goal.id, runner=_runner(args), routes=args.route
+                store, goal.id, runner=_runner(args), routes=args.route,
+                policy=_policy(args),
             )
         except AmbiguousRoute as exc:
             # A question, not a fault: answered by naming a route, so it comes
@@ -490,7 +586,7 @@ def _controller(
         search_profile_factory=lambda: BasicSearchProfile(
             num_trajectories=args.trajectories, proposal_mode=mode
         ),
-        grade_func=make_grader(runner),
+        grade_func=make_grader(runner, _policy(args)),
         transport=_transport(args),
         preamble=_read_preamble(args),
         level=args.level,
@@ -569,7 +665,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lean-project", default="", help=f"default ${PROJECT_ENV}")
     parser.add_argument("--lean-timeout", type=float, default=300.0)
     parser.add_argument("--lean-identity", action="store_true",
-                        help="merge alpha-equivalent lemmas (asks Lean)")
+                        help="merge alpha-equivalent lemmas (asks Lean); "
+                             "same as --identity lean-expr")
+    # Scope settings. Left out, each is inherited from the graph; stated, it
+    # must match the graph or the command is refused. See scope.py.
+    parser.add_argument("--identity", choices=("exact-text", "lean-expr"),
+                        default=None, help="identity hasher (a graph setting)")
+    parser.add_argument("--minimum-trust", choices=("trusted", "audited", "claimed"),
+                        default=None,
+                        help="lowest trust a proof may have (a graph setting; "
+                             "default for a new graph: audited)")
+    parser.add_argument("--adopt-scope", action="store_true",
+                        help="record this command's scope on a graph built "
+                             "before scopes existed")
+    parser.add_argument("--force-new-graph", action="store_true",
+                        help="move the current graph and preamble aside "
+                             "(renamed *.bak, never deleted) and start a new one")
     parser.add_argument("--model", default=os.environ.get("DSH_MODEL", "gpt-5.6-sol"))
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -651,6 +762,10 @@ def main(argv: list[str] | None = None) -> int:
         json.dump({"error": f"{type(exc).__name__}: {exc}"}, sys.stdout)
         sys.stdout.write("\n")
         return 1
+    retired = getattr(args, "_retired", None)
+    if retired and isinstance(payload, dict):
+        # Where the old graph went. Said once, here, because nothing else will.
+        payload = {**payload, "retired_graph": retired}
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0

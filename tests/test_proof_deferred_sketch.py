@@ -331,6 +331,9 @@ def test_a_stale_timeout_does_not_refuse_once_the_checker_is_back(
     out = cli.cmd_attack(argparse.Namespace(
         goal=subgoal_id, work=str(tmp_path), budget=1.0, max_iterations=1,
         preamble="", allow_unaccepted_route=False,
+        # The fixture built this graph as a library, with no scope; the CLI
+        # refuses such a graph unless told to record the current one.
+        adopt_scope=True,
     ))
 
     assert out.get("refused") is not True
@@ -357,6 +360,9 @@ def test_a_checker_that_is_still_down_does_refuse(store, tmp_path, monkeypatch):
     out = cli.cmd_attack(argparse.Namespace(
         goal=subgoal_id, work=str(tmp_path), budget=1.0, max_iterations=1,
         preamble="", allow_unaccepted_route=False,
+        # The fixture built this graph as a library, with no scope; the CLI
+        # refuses such a graph unless told to record the current one.
+        adopt_scope=True,
     ))
 
     assert out["refused"] is True
