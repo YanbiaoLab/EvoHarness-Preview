@@ -57,6 +57,9 @@ class ScopeMismatch(ScopeError):
             "(a PROVED earned under one scope need not hold under another). "
             + "; ".join(lines)
             + ". Match the graph's settings, or start over with --force-new-graph."
+            + (" If only the preamble is wrong and nothing is proved yet, "
+               "--replace-preamble starts over under the new one."
+               if any(name == "preamble_sha256" for name, _, _ in diffs) else "")
         )
 
 

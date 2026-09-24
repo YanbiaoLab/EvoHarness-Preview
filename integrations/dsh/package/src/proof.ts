@@ -231,18 +231,38 @@ export function apply(ctx: Context, config: Config = {}) {
       + 'declaration SIGNATURE: everything up to but NOT including `:=`, for '
       + 'example "theorem foo (a b : Nat) : a + b = b + a". Calling it twice '
       + 'with the same proposition returns the same goal, so it is safe to '
-      + 'reopen one you are already working on.',
+      + 'reopen one you are already working on. The file header comes with '
+      + 'the problem: the FIRST open on a board must pass it as `preamble`, '
+      + 'and it then holds for every goal on that board.',
     parameters: {
       statement: { type: 'string', description: 'Declaration signature.', required: true },
-      preamble: { type: 'string', description: 'Imports, e.g. "import Mathlib".' },
+      preamble: {
+        type: 'string',
+        description:
+          'The file header the problem comes with, e.g. "import Mathlib". '
+          + 'Required on the first open of a board (the call is refused '
+          + 'without it); "" only when the problem needs no imports at all. '
+          + 'Later opens may omit it and inherit the board\'s header.',
+      },
       label: { type: 'string', description: 'A name for this line of enquiry.' },
+      replace_preamble: {
+        type: 'boolean',
+        description:
+          'The board was opened under a different preamble -- usually none, '
+          + 'because the first open left it out -- and nothing on it is '
+          + 'proved yet: start over under `preamble`. The old board is moved '
+          + 'aside, not deleted, and its attempts do not carry over (they were '
+          + 'judged under the wrong premises). Refused once anything is proved.',
+      },
     },
     output: passthrough,
     execute: (args, exec) => callHarness(
       harness(config),
-      ['-m', MODULE, ...commonFlags(exec, config), 'open',
+      ['-m', MODULE, ...commonFlags(exec, config),
+        ...(args.replace_preamble ? ['--replace-preamble'] : []),
+        'open',
         '--statement', String(args.statement),
-        ...(args.preamble ? ['--preamble', String(args.preamble)] : []),
+        ...(typeof args.preamble === 'string' ? ['--preamble', args.preamble] : []),
         ...(args.label ? ['--label', String(args.label)] : [])],
       exec.signal, 'opening a goal',
     ),
